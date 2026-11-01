@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "905229062142",
+    "project_id": "zynvero-5bb1a",
+    "storage_bucket": "zynvero-5bb1a.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:905229062142:android:8c17aa6c7453af50bb7aaf",
+        "android_client_info": {
+          "package_name": "com.tempapp"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyApKGyGFElvuN6SmJpFd7kXoLdnZ02rHsw"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

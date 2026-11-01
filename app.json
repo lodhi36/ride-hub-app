@@ -1,0 +1,6 @@
+{
+  "name": "DatingApp",
+  "displayName": "Ride Hub MultiVendor",
+  "launchScreen": "./src/banner/splash_screen_main.png",
+  "icon": "./src/banner/ride_hub_logo.png"
+}
