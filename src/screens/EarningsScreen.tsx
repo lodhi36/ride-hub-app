@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useContext, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useContext, useCallback, useMemo, useRef } from 'react';
 import {
   View,
   Text,
@@ -56,6 +56,13 @@ const EarningsScreen = ({ navigation }: any) => {
 
   const todayIso = useMemo(() => new Date().toISOString().split('T')[0], []);
   const [selectedDate, setSelectedDate] = useState<string>('All Time');
+  const [tempSelectedDate, setTempSelectedDate] = useState<string>('All Time');
+  const [isDateEarningsLoading, setIsDateEarningsLoading] = useState<boolean>(false);
+  const [dateTotalOrders, setDateTotalOrders] = useState<number>(0);
+  const [dateTotalEarnings, setDateTotalEarnings] = useState<number>(0);
+  const [dateOrders, setDateOrders] = useState<any[]>([]);
+  const [dateErrorMessage, setDateErrorMessage] = useState<string | null>(null);
+  const latestDateReqId = useRef<number>(0);
   const [calYear, setCalYear] = useState<number>(new Date().getFullYear());
   const [calMonth, setCalMonth] = useState<number>(new Date().getMonth());
   const [isCalendarExpanded, setIsCalendarExpanded] = useState<boolean>(true);
@@ -78,32 +85,91 @@ const EarningsScreen = ({ navigation }: any) => {
     }
   };
 
+  // User selects day in calendar; updates temporary state and triggers API only when user confirms via "Done" button
   const handleSelectDay = (day: number) => {
     const mm = String(calMonth + 1).padStart(2, '0');
     const dd = String(day).padStart(2, '0');
     const isoDate = `${calYear}-${mm}-${dd}`;
-    setSelectedDate(isoDate);
+    setTempSelectedDate(isoDate);
   };
+
+  // Apply selected date and fetch date-wise real completed orders from backend API
+  const applyDateSelection = useCallback(async (chosenDate: string) => {
+    setSelectedDate(chosenDate);
+    setTempSelectedDate(chosenDate);
+
+    if (chosenDate === 'All Time') {
+      setDateOrders([]);
+      setDateTotalOrders(0);
+      setDateTotalEarnings(0);
+      setDateErrorMessage(null);
+      setIsDateEarningsLoading(false);
+      return;
+    }
+
+    // Trigger loading states in Earnings Summary, Completed Orders Count, and Orders Breakdown List
+    setIsDateEarningsLoading(true);
+    setDateErrorMessage(null);
+    setDateOrders([]);
+    setDateTotalOrders(0);
+    setDateTotalEarnings(0);
+
+    const reqId = ++latestDateReqId.current;
+
+    try {
+      // Calls GET /api/partner/earnings-by-date?date=YYYY-MM-DD
+      // Authenticates with Supplier session token via api interceptor (no frontend supplierId sent)
+      const res = await api.get(`/partner/earnings-by-date?date=${encodeURIComponent(chosenDate)}`);
+
+      // Prevent stale responses from overwriting the result of a newer date selection
+      if (reqId !== latestDateReqId.current) {
+        return;
+      }
+
+      if (res.data && res.data.success) {
+        setDateTotalOrders(res.data.totalOrders ?? 0);
+        setDateTotalEarnings(res.data.totalEarnings ?? 0);
+        setDateOrders(Array.isArray(res.data.orders) ? res.data.orders : []);
+        setDateErrorMessage(null);
+      } else {
+        setDateErrorMessage(res.data?.message || 'Could not load date earnings');
+      }
+    } catch (err: any) {
+      if (reqId !== latestDateReqId.current) {
+        return;
+      }
+      console.log('Error fetching earnings by date:', err?.response?.data || err.message);
+      setDateErrorMessage(err?.response?.data?.message || err?.message || 'Network error fetching date earnings');
+    } finally {
+      if (reqId === latestDateReqId.current) {
+        setIsDateEarningsLoading(false);
+      }
+    }
+  }, []);
 
   const handleQuickFilter = (type: 'all' | 'today' | 'yesterday' | 'this_month') => {
     if (type === 'today') {
-      setSelectedDate(todayIso);
+      setTempSelectedDate(todayIso);
       setCalYear(new Date().getFullYear());
       setCalMonth(new Date().getMonth());
+      applyDateSelection(todayIso);
     } else if (type === 'yesterday') {
       const yest = new Date();
       yest.setDate(yest.getDate() - 1);
       const yIso = yest.toISOString().split('T')[0];
-      setSelectedDate(yIso);
+      setTempSelectedDate(yIso);
       setCalYear(yest.getFullYear());
       setCalMonth(yest.getMonth());
+      applyDateSelection(yIso);
     } else if (type === 'this_month') {
       const now = new Date();
       setCalYear(now.getFullYear());
       setCalMonth(now.getMonth());
-      setSelectedDate('All Time');
+      setTempSelectedDate('All Time');
+      applyDateSelection('All Time');
     } else {
-      setSelectedDate('All Time');
+      setTempSelectedDate('All Time');
+      applyDateSelection('All Time');
     }
   };
 
@@ -316,7 +382,10 @@ const EarningsScreen = ({ navigation }: any) => {
             </Text>
             <TouchableOpacity
               style={styles.walletCalendarBtn}
-              onPress={() => setIsCalendarModalVisible(true)}
+              onPress={() => {
+                setTempSelectedDate(selectedDate);
+                setIsCalendarModalVisible(true);
+              }}
               activeOpacity={0.8}
             >
               <Text style={{ fontSize: 16 }}>📅</Text>
@@ -445,9 +514,17 @@ const EarningsScreen = ({ navigation }: any) => {
           <View style={styles.summaryCard}>
             <Icon name="cash-check" size={22} color="#0066FF" />
             <Text style={styles.summaryLabel}>
-              {isHindi ? 'आज की कमाई' : "Today's Earnings"}
+              {selectedDate !== 'All Time'
+                ? (isHindi ? 'चयनित दिन कमाई' : 'Selected Earnings')
+                : (isHindi ? 'आज की कमाई' : "Today's Earnings")}
             </Text>
-            <Text style={styles.summaryValue}>₹{todaysEarnings}</Text>
+            {isDateEarningsLoading ? (
+              <ActivityIndicator size="small" color="#0066FF" style={{ marginTop: 4 }} />
+            ) : (
+              <Text style={styles.summaryValue}>
+                ₹{selectedDate !== 'All Time' ? dateTotalEarnings : todaysEarnings}
+              </Text>
+            )}
           </View>
 
           <View style={styles.summaryCard}>
@@ -455,7 +532,13 @@ const EarningsScreen = ({ navigation }: any) => {
             <Text style={styles.summaryLabel}>
               {isHindi ? 'पूर्ण ऑर्डर्स' : 'Completed Orders'}
             </Text>
-            <Text style={styles.summaryValue}>{completedServicesCount}</Text>
+            {isDateEarningsLoading ? (
+              <ActivityIndicator size="small" color="#0066FF" style={{ marginTop: 4 }} />
+            ) : (
+              <Text style={styles.summaryValue}>
+                {selectedDate !== 'All Time' ? dateTotalOrders : completedServicesCount}
+              </Text>
+            )}
           </View>
 
           <View style={styles.summaryCard}>
@@ -463,7 +546,15 @@ const EarningsScreen = ({ navigation }: any) => {
             <Text style={styles.summaryLabel}>
               {isHindi ? 'औसत / ऑर्डर' : 'Avg / Order'}
             </Text>
-            <Text style={styles.summaryValue}>₹{averageEarning}</Text>
+            {isDateEarningsLoading ? (
+              <ActivityIndicator size="small" color="#0066FF" style={{ marginTop: 4 }} />
+            ) : (
+              <Text style={styles.summaryValue}>
+                ₹{selectedDate !== 'All Time'
+                  ? (dateTotalOrders > 0 ? Math.round(dateTotalEarnings / dateTotalOrders) : 0)
+                  : averageEarning}
+              </Text>
+            )}
           </View>
 
           <View style={styles.summaryCard}>
@@ -582,7 +673,7 @@ const EarningsScreen = ({ navigation }: any) => {
                   const mm = String(calMonth + 1).padStart(2, '0');
                   const dd = String(day).padStart(2, '0');
                   const dayIso = `${calYear}-${mm}-${dd}`;
-                  const isSelected = selectedDate === dayIso;
+                  const isSelected = (tempSelectedDate || selectedDate) === dayIso;
                   const isToday = dayIso === todayIso;
                   const dayData = earningsDateMap.get(dayIso);
                   const hasEarnings = !!dayData && dayData.count > 0;
@@ -621,6 +712,18 @@ const EarningsScreen = ({ navigation }: any) => {
                   );
                 })}
               </View>
+
+              {tempSelectedDate !== selectedDate && tempSelectedDate !== 'All Time' && (
+                <TouchableOpacity
+                  style={styles.applyInlineDateBtn}
+                  onPress={() => applyDateSelection(tempSelectedDate)}
+                  activeOpacity={0.8}
+                >
+                  <Text style={styles.applyInlineDateBtnText}>
+                    {isHindi ? `पूर्ण करें - दिनांक लागू करें (${tempSelectedDate}) ✓` : `Done - Apply Date (${tempSelectedDate}) ✓`}
+                  </Text>
+                </TouchableOpacity>
+              )}
             </View>
           )}
 
@@ -632,17 +735,27 @@ const EarningsScreen = ({ navigation }: any) => {
                   ? (isHindi ? 'दिखा रहा है: सभी समय का विवरण' : 'Showing: All Time History')
                   : (isHindi ? `📅 दिनांक: ${selectedDate}` : `📅 Date: ${selectedDate}`)}
               </Text>
-              <Text style={styles.filterSummaryValues}>
-                {isHindi ? 'कुल कमाई:' : 'Earned:'}{' '}
-                <Text style={{ color: '#16A34A', fontWeight: '900' }}>₹{filteredTotalEarning}</Text> • {isHindi ? 'ऑर्डर्स:' : 'Orders:'}{' '}
-                <Text style={{ color: '#0F172A', fontWeight: '900' }}>{filteredOrdersCount}</Text>
-              </Text>
+              {isDateEarningsLoading ? (
+                <Text style={styles.filterSummaryValues}>
+                  {isHindi ? 'डेटा लोड हो रहा है...' : 'Loading date earnings...'}
+                </Text>
+              ) : (
+                <Text style={styles.filterSummaryValues}>
+                  {isHindi ? 'कुल कमाई:' : 'Earned:'}{' '}
+                  <Text style={{ color: '#16A34A', fontWeight: '900' }}>
+                    ₹{selectedDate !== 'All Time' ? dateTotalEarnings : filteredTotalEarning}
+                  </Text> • {isHindi ? 'ऑर्डर्स:' : 'Orders:'}{' '}
+                  <Text style={{ color: '#0F172A', fontWeight: '900' }}>
+                    {selectedDate !== 'All Time' ? dateTotalOrders : filteredOrdersCount}
+                  </Text>
+                </Text>
+              )}
             </View>
 
             {selectedDate !== 'All Time' && (
               <TouchableOpacity
                 style={styles.clearDateBtn}
-                onPress={() => setSelectedDate('All Time')}
+                onPress={() => applyDateSelection('All Time')}
                 activeOpacity={0.7}
               >
                 <Text style={styles.clearDateBtnText}>
@@ -660,31 +773,96 @@ const EarningsScreen = ({ navigation }: any) => {
             : (isHindi ? `ऑर्डर्स विवरण (${selectedDate})` : `Orders Breakdown (${selectedDate})`)}
         </Text>
 
-        {loading ? (
-          <ActivityIndicator size="large" color="#0066FF" style={{ marginVertical: 20 }} />
-        ) : filteredEarningsList.length === 0 ? (
-          <View style={styles.emptyCard}>
-            <Icon name="cash-remove" size={36} color="#94A3B8" />
-            <Text style={styles.emptyTitle}>
-              {isHindi ? 'कोई पूर्ण ऑर्डर नहीं मिला' : 'No Completed Order Payouts Yet'}
-            </Text>
-            <Text style={styles.emptySubText}>
-              {isHindi
-                ? 'इस तारीख के लिए कोई ऑर्डर नहीं है। अपने वॉलेट में पैसे पाने के लिए ग्राहकों के ऑर्डर पूरे करें।'
-                : 'Complete customer orders to earn payout amounts credited directly to your wallet.'}
-            </Text>
-          </View>
-        ) : (
-          filteredEarningsList.map((item: any, idx: number) => (
-            <View key={item.bookingId || idx} style={styles.earningItemCard}>
-              <View style={styles.itemHeader}>
-                <Text style={styles.itemServiceName}>{item.serviceName || (isHindi ? 'स्टोर ऑर्डर' : 'Food Delivery')}</Text>
-                <Text style={styles.itemPrice}>+₹{item.price}</Text>
-              </View>
-              <Text style={styles.itemAddress}>👤 {item.customerName || (isHindi ? 'ग्राहक' : 'Customer')} • #{String(item.bookingId || '').slice(-6)}</Text>
-              <Text style={styles.itemMeta}>📅 {item.date} • {item.time} • {isHindi ? 'स्थिति:' : 'Status:'} {item.status || 'COMPLETED'}</Text>
+        {selectedDate !== 'All Time' ? (
+          isDateEarningsLoading ? (
+            <View style={styles.emptyCard}>
+              <ActivityIndicator size="large" color="#0066FF" style={{ marginBottom: 10 }} />
+              <Text style={styles.emptyTitle}>
+                {isHindi ? `${selectedDate} के ऑर्डर्स लोड हो रहे हैं...` : `Loading completed orders for ${selectedDate}...`}
+              </Text>
             </View>
-          ))
+          ) : dateErrorMessage ? (
+            <View style={styles.emptyCard}>
+              <Text style={{ fontSize: 32, marginBottom: 8 }}>⚠️</Text>
+              <Text style={[styles.emptyTitle, { color: '#DC2626' }]}>
+                {isHindi ? 'लोड करने में विफल' : 'Failed to Load'}
+              </Text>
+              <Text style={styles.emptySubText}>{dateErrorMessage}</Text>
+              <TouchableOpacity
+                style={styles.retryBtn}
+                onPress={() => applyDateSelection(selectedDate)}
+              >
+                <Text style={styles.retryBtnText}>
+                  {isHindi ? 'पुनः प्रयास करें' : 'Retry'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          ) : dateTotalOrders === 0 ? (
+            <View style={styles.emptyCard}>
+              <Text style={{ fontSize: 36, marginBottom: 8 }}>📋</Text>
+              <Text style={styles.emptyTitle}>
+                0 Completed Orders on this date
+              </Text>
+              <Text style={styles.emptySubText}>
+                {isHindi
+                  ? `${selectedDate} को कोई पूर्ण ऑर्डर नहीं मिला। कुल कमाई: ₹0`
+                  : `No completed orders found for ${selectedDate}. Total earnings: ₹0`}
+              </Text>
+            </View>
+          ) : (
+            dateOrders.map((item: any, idx: number) => {
+              const completedTimeStr = item.completedAt
+                ? new Date(item.completedAt).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true })
+                : '';
+              const completedDateStr = item.completedAt
+                ? new Date(item.completedAt).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })
+                : selectedDate;
+
+              return (
+                <View key={item.orderId || idx} style={styles.earningItemCard}>
+                  <View style={styles.itemHeader}>
+                    <Text style={styles.itemServiceName} numberOfLines={2}>
+                      {item.itemSummary || (isHindi ? 'स्टोर ऑर्डर' : 'Store Order')}
+                    </Text>
+                    <Text style={styles.itemPrice}>+₹{item.amount}</Text>
+                  </View>
+                  <Text style={styles.itemAddress}>
+                    📦 Order ID: #{String(item.orderId || '').slice(-8)}
+                  </Text>
+                  <Text style={styles.itemMeta}>
+                    📅 {completedDateStr} • {completedTimeStr} • {isHindi ? 'स्थिति:' : 'Status:'} {item.orderStatus || 'COMPLETED'}
+                  </Text>
+                </View>
+              );
+            })
+          )
+        ) : (
+          loading ? (
+            <ActivityIndicator size="large" color="#0066FF" style={{ marginVertical: 20 }} />
+          ) : filteredEarningsList.length === 0 ? (
+            <View style={styles.emptyCard}>
+              <Icon name="cash-remove" size={36} color="#94A3B8" />
+              <Text style={styles.emptyTitle}>
+                {isHindi ? 'कोई पूर्ण ऑर्डर नहीं मिला' : 'No Completed Order Payouts Yet'}
+              </Text>
+              <Text style={styles.emptySubText}>
+                {isHindi
+                  ? 'इस तारीख के लिए कोई ऑर्डर नहीं है। अपने वॉलेट में पैसे पाने के लिए ग्राहकों के ऑर्डर पूरे करें।'
+                  : 'Complete customer orders to earn payout amounts credited directly to your wallet.'}
+              </Text>
+            </View>
+          ) : (
+            filteredEarningsList.map((item: any, idx: number) => (
+              <View key={item.bookingId || idx} style={styles.earningItemCard}>
+                <View style={styles.itemHeader}>
+                  <Text style={styles.itemServiceName}>{item.serviceName || (isHindi ? 'स्टोर ऑर्डर' : 'Food Delivery')}</Text>
+                  <Text style={styles.itemPrice}>+₹{item.price}</Text>
+                </View>
+                <Text style={styles.itemAddress}>👤 {item.customerName || (isHindi ? 'ग्राहक' : 'Customer')} • #{String(item.bookingId || '').slice(-6)}</Text>
+                <Text style={styles.itemMeta}>📅 {item.date} • {item.time} • {isHindi ? 'स्थिति:' : 'Status:'} {item.status || 'COMPLETED'}</Text>
+              </View>
+            ))
+          )
         )}
       </ScrollView>
 
@@ -831,28 +1009,32 @@ const EarningsScreen = ({ navigation }: any) => {
             {/* Quick Filter Buttons inside Modal */}
             <View style={styles.modalQuickFilterRow}>
               <TouchableOpacity
-                style={[styles.modalQuickBtn, selectedDate === 'All Time' && styles.modalQuickBtnActive]}
-                onPress={() => { handleQuickFilter('all'); setIsCalendarModalVisible(false); }}
+                style={[styles.modalQuickBtn, tempSelectedDate === 'All Time' && styles.modalQuickBtnActive]}
+                onPress={() => setTempSelectedDate('All Time')}
               >
-                <Text style={[styles.modalQuickBtnText, selectedDate === 'All Time' && styles.modalQuickBtnTextActive]}>
+                <Text style={[styles.modalQuickBtnText, tempSelectedDate === 'All Time' && styles.modalQuickBtnTextActive]}>
                   {isHindi ? 'सभी समय' : 'All Time'}
                 </Text>
               </TouchableOpacity>
 
               <TouchableOpacity
-                style={[styles.modalQuickBtn, selectedDate === todayIso && styles.modalQuickBtnActive]}
-                onPress={() => { handleQuickFilter('today'); setIsCalendarModalVisible(false); }}
+                style={[styles.modalQuickBtn, tempSelectedDate === todayIso && styles.modalQuickBtnActive]}
+                onPress={() => setTempSelectedDate(todayIso)}
               >
-                <Text style={[styles.modalQuickBtnText, selectedDate === todayIso && styles.modalQuickBtnTextActive]}>
+                <Text style={[styles.modalQuickBtnText, tempSelectedDate === todayIso && styles.modalQuickBtnTextActive]}>
                   {isHindi ? 'आज' : 'Today'}
                 </Text>
               </TouchableOpacity>
 
               <TouchableOpacity
-                style={[styles.modalQuickBtn, selectedDate !== 'All Time' && selectedDate !== todayIso && styles.modalQuickBtnActive]}
-                onPress={() => { handleQuickFilter('yesterday'); setIsCalendarModalVisible(false); }}
+                style={[styles.modalQuickBtn, tempSelectedDate !== 'All Time' && tempSelectedDate !== todayIso && styles.modalQuickBtnActive]}
+                onPress={() => {
+                  const yest = new Date();
+                  yest.setDate(yest.getDate() - 1);
+                  setTempSelectedDate(yest.toISOString().split('T')[0]);
+                }}
               >
-                <Text style={[styles.modalQuickBtnText, selectedDate !== 'All Time' && selectedDate !== todayIso && styles.modalQuickBtnTextActive]}>
+                <Text style={[styles.modalQuickBtnText, tempSelectedDate !== 'All Time' && tempSelectedDate !== todayIso && styles.modalQuickBtnTextActive]}>
                   {isHindi ? 'कल' : 'Yesterday'}
                 </Text>
               </TouchableOpacity>
@@ -893,7 +1075,7 @@ const EarningsScreen = ({ navigation }: any) => {
                 const mm = String(calMonth + 1).padStart(2, '0');
                 const dd = String(day).padStart(2, '0');
                 const dayIso = `${calYear}-${mm}-${dd}`;
-                const isSelected = selectedDate === dayIso;
+                const isSelected = tempSelectedDate === dayIso;
                 const isToday = dayIso === todayIso;
                 const dayData = earningsDateMap.get(dayIso);
                 const hasEarnings = !!dayData && dayData.count > 0;
@@ -909,7 +1091,6 @@ const EarningsScreen = ({ navigation }: any) => {
                     ]}
                     onPress={() => {
                       handleSelectDay(day);
-                      setIsCalendarModalVisible(false);
                     }}
                     activeOpacity={0.75}
                   >
@@ -937,10 +1118,13 @@ const EarningsScreen = ({ navigation }: any) => {
 
             <TouchableOpacity
               style={styles.closeCalendarModalBtn}
-              onPress={() => setIsCalendarModalVisible(false)}
+              onPress={() => {
+                setIsCalendarModalVisible(false);
+                applyDateSelection(tempSelectedDate);
+              }}
             >
               <Text style={styles.closeCalendarModalBtnText}>
-                {isHindi ? 'पूर्ण / बंद करें' : 'Done / Close'}
+                {isHindi ? `पूर्ण करें (${tempSelectedDate === 'All Time' ? 'सभी समय' : tempSelectedDate})` : `Done (${tempSelectedDate})`}
               </Text>
             </TouchableOpacity>
           </View>
@@ -1712,18 +1896,52 @@ const styles = StyleSheet.create({
     fontWeight: '900',
   },
   closeCalendarModalBtn: {
-    backgroundColor: '#F1F5F9',
+    backgroundColor: '#0066FF',
     borderRadius: 12,
-    paddingVertical: 11,
+    paddingVertical: 12,
     alignItems: 'center',
-    marginTop: 12,
-    borderWidth: 1,
-    borderColor: '#E2E8F0',
+    marginTop: 14,
+    shadowColor: '#0066FF',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.3,
+    shadowRadius: 5,
+    elevation: 3,
   },
   closeCalendarModalBtnText: {
-    fontSize: 13,
+    fontSize: 14,
     fontWeight: '800',
-    color: '#334155',
+    color: '#FFFFFF',
+  },
+  applyInlineDateBtn: {
+    backgroundColor: '#0066FF',
+    borderRadius: 10,
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 10,
+    shadowColor: '#0066FF',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+  applyInlineDateBtnText: {
+    color: '#FFFFFF',
+    fontWeight: '800',
+    fontSize: 13,
+  },
+  retryBtn: {
+    backgroundColor: '#0066FF',
+    paddingHorizontal: 18,
+    paddingVertical: 8,
+    borderRadius: 8,
+    marginTop: 10,
+  },
+  retryBtnText: {
+    color: '#FFFFFF',
+    fontWeight: '700',
+    fontSize: 13,
   },
 });
 

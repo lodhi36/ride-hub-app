@@ -212,7 +212,7 @@ export default function FashionSubcategoriesScreen({ navigation, route }: any) {
           <View style={{ marginLeft: 8 }}>
             <Text style={[styles.headerTitle, isDark && { color: '#F8FAFC' }]}>{screenTitle}</Text>
             <Text style={[styles.headerSub, isDark && { color: '#94A3B8' }]}>
-              {subcategories.length} subcategories • 2-Row Horizontal Slider
+              {subcategories.length} subcategories
             </Text>
           </View>
         </View>
@@ -231,44 +231,7 @@ export default function FashionSubcategoriesScreen({ navigation, route }: any) {
         </TouchableOpacity>
       </View>
 
-      {/* 2. DEMOGRAPHIC TABS (Men, Women, Kids, All) */}
-      <View style={[styles.demoTabsBar, isDark && { backgroundColor: '#0F172A', borderBottomColor: '#1E293B' }]}>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.demoTabsContent}>
-          {[
-            { id: 'Male', label: 'Men', icon: '👔' },
-            { id: 'Female', label: 'Women', icon: '👗' },
-            { id: 'Kids', label: 'Kids', icon: '🧒' },
-            { id: 'All', label: 'All Fashion', icon: '⭐' },
-          ].map((tab) => {
-            const isActive = currentDemographic === tab.id;
-            return (
-              <TouchableOpacity
-                key={tab.id}
-                style={[
-                  styles.demoTabPill,
-                  isDark && { backgroundColor: '#1E293B', borderColor: '#334155' },
-                  isActive && styles.demoTabPillActive,
-                ]}
-                activeOpacity={0.8}
-                onPress={() => handleDemographicChange(tab.id)}
-              >
-                <Text style={styles.demoTabEmoji}>{tab.icon}</Text>
-                <Text
-                  style={[
-                    styles.demoTabLabel,
-                    isDark && { color: '#94A3B8' },
-                    isActive && styles.demoTabLabelActive,
-                  ]}
-                >
-                  {tab.label}
-                </Text>
-              </TouchableOpacity>
-            );
-          })}
-        </ScrollView>
-      </View>
-
-      {/* 3. SEARCH BAR */}
+      {/* SEARCH BAR */}
       <View style={[styles.searchBarWrap, isDark && { backgroundColor: '#0B0F19' }]}>
         <View style={[styles.searchContainer, isDark && { backgroundColor: '#1E293B', borderColor: '#334155' }]}>
           <Icon name="search" size={16} color="#64748B" style={{ marginRight: 8 }} />
