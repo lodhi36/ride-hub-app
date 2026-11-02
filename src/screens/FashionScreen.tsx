@@ -189,8 +189,21 @@ export default function FashionScreen({ navigation, route }: any) {
           }
 
           if (lottie || sc.lottieConfig?.rawJson) {
+            let directJson = sc.lottieConfig?.rawJson || null;
+            if (!directJson && lottie) {
+              try {
+                const lRes = await fetch(lottie);
+                if (lRes.ok) {
+                  const parsed = await lRes.json();
+                  if (parsed && (parsed.v || parsed.layers)) {
+                    directJson = parsed;
+                  }
+                }
+              } catch (_) {}
+            }
+
             lottieCfg = {
-              source: sc.lottieConfig?.rawJson || (lottie ? { uri: lottie } : null),
+              source: directJson || (lottie ? { uri: lottie } : null),
               speed: sc.lottieConfig?.speed || 1.0,
               loop: sc.lottieConfig?.loop !== false,
               autoplay: sc.lottieConfig?.autoplay !== false,
@@ -398,6 +411,7 @@ export default function FashionScreen({ navigation, route }: any) {
         {/* 2. DYNAMIC PROMOTIONAL HERO BANNER & ANIMATION (Admin Managed - Real Data Only) */}
         {(fashionBanners.length > 0 || adminLottieConfig?.source || adminBannerUrl) ? (
           <View style={[styles.bannerContainer, { height: bannerHeight }]}>
+            {/* Case 1: Lottie Only Display Mode */}
             {adminLottieConfig?.source && (displayMode === 'LOTTIE' || (!adminBannerUrl && fashionBanners.length === 0)) ? (
               <View style={styles.heroLottieWrap}>
                 <LottieAnimation
@@ -409,45 +423,64 @@ export default function FashionScreen({ navigation, route }: any) {
                   autoplay={adminLottieConfig.autoplay !== false}
                 />
               </View>
-            ) : fashionBanners.length > 1 ? (
-              <View>
-                <ScrollView
-                  ref={bannerScrollRef}
-                  horizontal
-                  pagingEnabled
-                  showsHorizontalScrollIndicator={false}
-                  onMomentumScrollEnd={(e) => {
-                    const offset = e.nativeEvent.contentOffset.x;
-                    const idx = Math.round(offset / (SCREEN_WIDTH - 24));
-                    setBannerActiveIndex(idx);
-                  }}
-                  style={{ width: SCREEN_WIDTH - 24, borderRadius: 16 }}
-                >
-                  {fashionBanners.map((banner, bIdx) => (
-                    <View key={banner.id || bIdx} style={{ width: SCREEN_WIDTH - 24, height: bannerHeight, borderRadius: 16, overflow: 'hidden' }}>
-                      <Image source={{ uri: banner.imageUrl }} style={{ width: '100%', height: '100%' }} resizeMode="cover" />
+            ) : (
+              /* Case 2: Image Banner (Single or Carousel) with Lottie Animation Layered ON TOP */
+              <View style={{ width: '100%', height: '100%', position: 'relative' }}>
+                {fashionBanners.length > 1 ? (
+                  <View style={{ width: '100%', height: '100%' }}>
+                    <ScrollView
+                      ref={bannerScrollRef}
+                      horizontal
+                      pagingEnabled
+                      showsHorizontalScrollIndicator={false}
+                      onMomentumScrollEnd={(e) => {
+                        const offset = e.nativeEvent.contentOffset.x;
+                        const idx = Math.round(offset / (SCREEN_WIDTH - 24));
+                        setBannerActiveIndex(idx);
+                      }}
+                      style={{ width: SCREEN_WIDTH - 24, borderRadius: 16 }}
+                    >
+                      {fashionBanners.map((banner, bIdx) => (
+                        <View key={banner.id || bIdx} style={{ width: SCREEN_WIDTH - 24, height: bannerHeight, borderRadius: 16, overflow: 'hidden' }}>
+                          <Image source={{ uri: banner.imageUrl }} style={{ width: '100%', height: '100%' }} resizeMode="cover" />
+                        </View>
+                      ))}
+                    </ScrollView>
+                    <View style={styles.bannerDotsRow}>
+                      {fashionBanners.map((_, dotIdx) => (
+                        <View
+                          key={dotIdx}
+                          style={[
+                            styles.bannerDot,
+                            bannerActiveIndex === dotIdx && styles.bannerDotActive,
+                          ]}
+                        />
+                      ))}
                     </View>
-                  ))}
-                </ScrollView>
-                <View style={styles.bannerDotsRow}>
-                  {fashionBanners.map((_, dotIdx) => (
-                    <View
-                      key={dotIdx}
-                      style={[
-                        styles.bannerDot,
-                        bannerActiveIndex === dotIdx && styles.bannerDotActive,
-                      ]}
+                  </View>
+                ) : (adminBannerUrl || fashionBanners.length > 0) ? (
+                  <Image
+                    source={{ uri: adminBannerUrl || fashionBanners[0]?.imageUrl }}
+                    style={{ width: '100%', height: '100%', borderRadius: 16 }}
+                    resizeMode="cover"
+                  />
+                ) : null}
+
+                {/* Animated Lottie Layered Directly ON TOP of Fashion Banner */}
+                {adminLottieConfig?.source && displayMode !== 'IMAGE' && (
+                  <View style={styles.bannerLottieOverlay} pointerEvents="none">
+                    <LottieAnimation
+                      source={adminLottieConfig.source}
+                      width="100%"
+                      height={bannerHeight}
+                      speed={adminLottieConfig.speed || 1.0}
+                      loop={adminLottieConfig.loop !== false}
+                      autoplay={adminLottieConfig.autoplay !== false}
                     />
-                  ))}
-                </View>
+                  </View>
+                )}
               </View>
-            ) : (adminBannerUrl || fashionBanners.length > 0) ? (
-              <Image
-                source={{ uri: adminBannerUrl || fashionBanners[0]?.imageUrl }}
-                style={{ width: '100%', height: '100%', borderRadius: 16 }}
-                resizeMode="cover"
-              />
-            ) : null}
+            )}
           </View>
         ) : null}
 
@@ -757,6 +790,19 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: '#FFFFFF',
+  },
+  bannerLottieOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    borderRadius: 16,
+    overflow: 'hidden',
+    zIndex: 10,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'transparent',
   },
   bannerDotsRow: {
     position: 'absolute',
