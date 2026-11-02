@@ -113,14 +113,16 @@ api.interceptors.response.use(
     if (!error.response && config && !config._retryAttempted) {
       config._retryAttempted = true;
       const currentNorm = (config.baseURL || '').replace(/\/+$/, '');
-      const altCandidates = [
-        'http://10.166.80.3:5000/api',
-        `http://${CENTRAL_IP}:5000/api`,
-        'http://127.0.0.1:5000/api',
-        'http://localhost:5000/api',
-        'http://10.0.2.2:5000/api',
-        `${CLOUD_URL}/api`,
-      ];
+      const altCandidates = USE_CLOUD
+        ? [`${CLOUD_URL}/api`]
+        : [
+            'http://10.166.80.3:5000/api',
+            `http://${CENTRAL_IP}:5000/api`,
+            'http://127.0.0.1:5000/api',
+            'http://localhost:5000/api',
+            'http://10.0.2.2:5000/api',
+            `${CLOUD_URL}/api`,
+          ];
       // Only keep distinct alternative URLs that are different from the failed one
       const altUrls = Array.from(new Set(altCandidates)).filter(u => u.replace(/\/+$/, '') !== currentNorm);
 

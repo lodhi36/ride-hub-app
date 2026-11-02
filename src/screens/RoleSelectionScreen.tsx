@@ -95,11 +95,8 @@ const RoleSelectionScreen = ({ navigation }: any) => {
           poster="${posterUrl}"
         >
           <source src="${cleanHost}/uploads/video.mp4?v=pure2" type="video/mp4" />
-          <source src="http://127.0.0.1:5000/uploads/video.mp4?v=pure2" type="video/mp4" />
           <source src="${cleanHost}/uploads/vedio.mp4?v=pure2" type="video/mp4" />
-          <source src="http://127.0.0.1:5000/uploads/vedio.mp4?v=pure2" type="video/mp4" />
-          <source src="http://10.166.80.3:5000/uploads/video.mp4?v=pure2" type="video/mp4" />
-          <source src="http://10.166.80.3:5000/uploads/vedio.mp4?v=pure2" type="video/mp4" />
+          <source src="https://raw.githubusercontent.com/lodhi36/sachin24/main/uploads/video.mp4" type="video/mp4" />
         </video>
         <script>
           var v = document.getElementById('roleVideo');

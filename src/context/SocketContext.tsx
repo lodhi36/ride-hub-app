@@ -404,7 +404,7 @@ export const SocketProvider = ({ children }: { children: ReactNode }) => {
   useEffect(() => {
     const candidateUrls = Array.from(new Set(
       USE_CLOUD
-        ? [CLOUD_URL, SOCKET_URL, 'http://127.0.0.1:5000', 'http://10.166.80.3:5000']
+        ? [CLOUD_URL, SOCKET_URL]
         : [SOCKET_URL, 'http://127.0.0.1:5000', 'http://10.166.80.3:5000', `http://${CENTRAL_IP}:5000`, CLOUD_URL]
     )).filter(Boolean);
 

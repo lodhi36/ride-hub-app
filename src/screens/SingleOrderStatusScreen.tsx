@@ -1766,10 +1766,8 @@ export const SingleOrderStatusScreen: React.FC<SingleOrderStatusScreenProps> = (
                   <video id="bgvid" autoplay loop muted playsinline webkit-playsinline preload="auto" poster="${restaurantImageUri || `${UPLOADS_URL}/bhopal_lake_hero.jpg`}" style="width:100%;height:100%;object-fit:cover;object-position:50% 12%;">
                     <source src="${UPLOADS_URL}/adsfoog.mp4?v=pure2" type="video/mp4">
                     <source src="${UPLOADS_URL}/video.mp4?v=pure2" type="video/mp4">
-                    <source src="http://127.0.0.1:5000/uploads/adsfoog.mp4?v=pure2" type="video/mp4">
-                    <source src="http://127.0.0.1:5000/uploads/video.mp4?v=pure2" type="video/mp4">
-                    <source src="http://10.166.80.3:5000/uploads/adsfoog.mp4?v=pure2" type="video/mp4">
-                    <source src="http://10.166.80.3:5000/uploads/video.mp4?v=pure2" type="video/mp4">
+                    <source src="https://raw.githubusercontent.com/lodhi36/sachin24/main/uploads/adsfoog.mp4" type="video/mp4">
+                    <source src="https://raw.githubusercontent.com/lodhi36/sachin24/main/uploads/video.mp4" type="video/mp4">
                   </video>
                   <script>
                     var v = document.getElementById('bgvid');

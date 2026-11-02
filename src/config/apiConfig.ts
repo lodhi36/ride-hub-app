@@ -12,9 +12,8 @@ export const USE_LOCALHOST = false;
 export const CENTRAL_IP = '10.166.80.3';
 export const CENTRAL_PORT = '5000';
 
-export const LOCAL_URL = USE_CLOUD
-  ? CLOUD_URL
-  : (USE_LOCALHOST ? `http://127.0.0.1:${CENTRAL_PORT}` : `http://${CENTRAL_IP}:${CENTRAL_PORT}`);
+// Production Release Lock: Always point directly to Render Cloud Backend
+export const LOCAL_URL = CLOUD_URL;
 
 // Base URL for all REST API calls
 export const BASE_URL = `${LOCAL_URL}/api`;
