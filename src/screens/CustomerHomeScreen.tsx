@@ -171,6 +171,17 @@ const formatRating = (rating: any): string => {
 
 
 
+const DEFAULT_INITIAL_CATEGORIES = [
+  { id: 'all', _id: 'all', name: 'All Services', icon: '⚡', isAll: true, isActive: true },
+  { id: 'food', _id: 'food', name: 'Food', icon: '🍔', image: 'cat_food.jpg', isActive: true },
+  { id: 'grocery', _id: 'grocery', name: 'Kirana', icon: '🛒', image: 'cat_kirana.jpg', isActive: true },
+  { id: 'fashion', _id: 'fashion', name: 'Fashion', icon: '👗', image: 'cat_fashion.jpg', isActive: true },
+  { id: 'vegetables', _id: 'vegetables', name: 'Vegetables', icon: '🥦', image: 'cat_vegetables.jpg', isActive: true },
+  { id: 'fruits', _id: 'fruits', name: 'Fruits', icon: '🍎', image: 'image-1793175021193-996356562.jpg', isActive: true },
+  { id: 'beauty', _id: 'beauty', name: 'Beauty', icon: '💄', image: 'cat_beauty.jpg', isActive: true },
+  { id: 'toys', _id: 'toys', name: 'Toys', icon: '🧸', image: 'image-1793174968733-925672148.jpg', isActive: true },
+];
+
 const SEARCH_PHRASES = [
   'Search Food, Grocery, Beauty, Fashion & More...',
   'Search Fresh Food & Dishes...',
@@ -256,7 +267,7 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
   const [showSearchModal, setShowSearchModal] = useState<boolean>(false);
   const [showVoiceModal, setShowVoiceModal] = useState<boolean>(false);
   const [selectedCat, setSelectedCat] = useState<string>('all');
-  const [categories, setCategories] = useState<any[]>([]);
+  const [categories, setCategories] = useState<any[]>(DEFAULT_INITIAL_CATEGORIES);
   const [cartCount, setCartCount] = useState<number>(CartService.getCartCount());
   const [cartState, setCartState] = useState<any>(CartService.getCart());
   const [activeTab, setActiveTab] = useState<'home' | 'search' | 'orders' | 'profile'>('home');
@@ -807,12 +818,10 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
           if (geo?.fullAddress) setCurrentAddress(geo.fullAddress);
         } else {
           setWeatherError('Weather unavailable');
-          setShowLocationRequiredModal(true);
         }
       } else {
         setWeatherData(null);
         setIsRaining(false);
-        setShowLocationRequiredModal(true);
       }
     } catch (e) {
       console.log('[LOCATION PERMISSION REQUEST ERROR]', e);
@@ -833,7 +842,7 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
           return;
         }
         const dynamicList = [
-          { id: 'all', _id: 'all', name: 'All Services', icon: '⚡', isAll: true },
+          { id: 'all', _id: 'all', name: 'All Services', icon: '⚡', isAll: true, isActive: true },
           ...active.map((c: any) => ({
             id: c._id || c.id,
             _id: c._id || c.id,
@@ -841,6 +850,8 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
             icon: c.icon || 'store',
             image: c.image || '',
             description: c.description || '',
+            isActive: c.isActive !== false,
+            subcategories: c.subcategories || [],
           })),
         ];
         setCategories(dynamicList);
@@ -915,7 +926,29 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
   useEffect(() => {
     const initLocationAndWeather = async () => {
       try {
-        // ⚡ Silent Background Device Location Sync (0 repeated prompts, real hardware GPS)
+        // ⚡ ZOMATO / SWIGGY STEP 1: Instant 0ms Permanent Address Cache Restoration
+        const savedPerm = await getPermanentCustomerAddress();
+        if (savedPerm && (savedPerm.fullAddress || savedPerm.latitude)) {
+          const initAddr = savedPerm.fullAddress || 'Bhopal, Madhya Pradesh';
+          const initCoords = {
+            latitude: savedPerm.latitude || 23.2505,
+            longitude: savedPerm.longitude || 77.4065,
+          };
+          setCurrentAddress(initAddr);
+          setCustomerCoords(initCoords);
+          setShowLocationRequiredModal(false);
+          fetchOnlineRestaurants(false, initCoords);
+          checkLiveWeather(initCoords.latitude, initCoords.longitude);
+        } else {
+          // Graceful Bhopal default so home screen is never blank or stuck
+          const defaultCoords = { latitude: 23.2505, longitude: 77.4065 };
+          setCurrentAddress('Bhopal, Madhya Pradesh');
+          setCustomerCoords(defaultCoords);
+          setShowLocationRequiredModal(false);
+          fetchOnlineRestaurants(false, defaultCoords);
+        }
+
+        // ⚡ ZOMATO / SWIGGY STEP 2: Silent Background GPS Detection (0 Popups, 0 User Friction)
         const bgSync = await syncLiveDeviceLocationInBackground('customer');
         if (bgSync.success && bgSync.coords && bgSync.address) {
           setShowLocationRequiredModal(false);
@@ -942,17 +975,16 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
         const hasPermission = await checkLocationPermission();
         setLocationPermissionGranted(hasPermission);
 
-        // Always prioritize real hardware GPS position to guarantee NO dummy coordinates
+        // Hardware GPS Lock if permission already granted
         if (hasPermission) {
           const gpsRes = await fetchCurrentGpsPositionDetailed(false);
           if (gpsRes.success && gpsRes.fix) {
             setShowLocationRequiredModal(false);
             const gps = gpsRes.fix;
-            console.log('📍 [CUSTOMER HOME] Real Hardware GPS Fix detected:', gps.latitude, gps.longitude);
             const coords = { latitude: gps.latitude, longitude: gps.longitude };
             setCustomerCoords(coords);
             checkLiveWeather(gps.latitude, gps.longitude);
-            fetchOnlineRestaurants(false);
+            fetchOnlineRestaurants(false, coords);
             const geo = await reverseGeocodeCoords(gps.latitude, gps.longitude);
             const full = geo?.fullAddress || `Location near (${gps.latitude.toFixed(3)}, ${gps.longitude.toFixed(3)})`;
             setCurrentAddress(full);
@@ -982,36 +1014,6 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
               }
             } catch (e) {
               setIsOutOfZone(false);
-            }
-            return;
-          } else {
-            setShowLocationRequiredModal(true);
-          }
-        } else {
-          setShowLocationRequiredModal(true);
-        }
-
-        // If GPS not locked yet or permission pending, check saved permanent address as graceful fallback
-        const savedPerm = await getPermanentCustomerAddress();
-        if (savedPerm && (savedPerm.fullAddress || (savedPerm.latitude && savedPerm.longitude))) {
-          if (savedPerm.fullAddress) setCurrentAddress(savedPerm.fullAddress);
-          if (savedPerm.latitude && savedPerm.longitude) {
-            const coords = { latitude: savedPerm.latitude, longitude: savedPerm.longitude };
-            setCustomerCoords(coords);
-            checkLiveWeather(coords.latitude, coords.longitude);
-            try {
-              const res = await api.post('/zones/check-customer-serviceable', coords);
-              if (res.data && res.data.serviceable === false && !res.data.pendingLocation) {
-                setIsOutOfZone(true);
-                setZoneCheckMessage(res.data.message || 'This service is not available in your location.');
-              } else {
-                setIsOutOfZone(false);
-                setZoneCheckMessage('');
-                fetchOnlineRestaurants(false);
-              }
-            } catch (e) {
-              setIsOutOfZone(false);
-              fetchOnlineRestaurants(false);
             }
           }
         }
@@ -2772,11 +2774,15 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
             <View style={styles.moreCircleWrap}>
               <Text style={styles.moreDotsText}>•••</Text>
             </View>
-          ) : finalImgUri ? (
+          ) : finalImgUri && !failedImages[String(item._id || item.id || itemKey)] ? (
             <Image
               source={{ uri: finalImgUri, cache: 'force-cache' }}
               style={styles.categoryImg}
               resizeMode="cover"
+              onError={() => {
+                const k = String(item._id || item.id || itemKey);
+                setFailedImages(prev => ({ ...prev, [k]: true }));
+              }}
             />
           ) : (
             <Text style={{ fontSize: 24 }}>{typeof itemIcon === 'string' ? itemIcon : '🏪'}</Text>

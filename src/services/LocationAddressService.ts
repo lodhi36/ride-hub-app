@@ -564,22 +564,74 @@ export const saveAddressToStorage = async (
   }
 };
 
+// In-memory instant caches for 0ms Zomato / Swiggy latency
+let _memoryCustomerAddress: DeliveryAddress | null = null;
+let _memoryStoreLocation: any = null;
+
+export const DEFAULT_CUSTOMER_FALLBACK_ADDRESS: DeliveryAddress = {
+  id: 'addr_default_bhopal',
+  tag: 'Home',
+  houseNo: 'Bhopal Central',
+  landmark: 'Bhopal, Madhya Pradesh',
+  city: 'Bhopal',
+  pincode: '462001',
+  fullAddress: 'Bhopal, Madhya Pradesh',
+  latitude: 23.2505,
+  longitude: 77.4065,
+  isCurrentLocation: false,
+};
+
 /**
  * Get the currently active delivery address from storage
  */
 export const getActiveDeliveryAddress = async (): Promise<DeliveryAddress | null> => {
+  if (_memoryCustomerAddress && (_memoryCustomerAddress.fullAddress || _memoryCustomerAddress.latitude)) {
+    return _memoryCustomerAddress;
+  }
   try {
     const permanent = await AsyncStorage.getItem(STORAGE_KEY_PERMANENT_CUSTOMER);
     if (permanent) {
       const parsed = JSON.parse(permanent);
-      if (parsed && (parsed.fullAddress || parsed.latitude)) return parsed;
+      if (parsed && (parsed.fullAddress || parsed.latitude)) {
+        _memoryCustomerAddress = parsed;
+        return parsed;
+      }
     }
     const raw = await AsyncStorage.getItem(STORAGE_KEY_ACTIVE_ADDR);
-    if (raw) return JSON.parse(raw);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && (parsed.fullAddress || parsed.latitude)) {
+        _memoryCustomerAddress = parsed;
+        return parsed;
+      }
+    }
     const saved = await getSavedAddresses();
-    if (saved && saved.length > 0) return saved[0];
+    if (saved && saved.length > 0) {
+      _memoryCustomerAddress = saved[0];
+      return saved[0];
+    }
+    const lastAddr = await AsyncStorage.getItem('last_known_customer_address');
+    const lastGps = await AsyncStorage.getItem('last_known_gps_position');
+    if (lastAddr || lastGps) {
+      const parsedGps = lastGps ? JSON.parse(lastGps) : null;
+      const reconstructed: DeliveryAddress = {
+        id: 'addr_recovered',
+        tag: 'Home',
+        houseNo: 'Current Location',
+        landmark: lastAddr || 'Bhopal, Madhya Pradesh',
+        city: 'Bhopal',
+        pincode: '462001',
+        fullAddress: lastAddr || 'Bhopal, Madhya Pradesh',
+        latitude: parsedGps?.latitude || 23.2505,
+        longitude: parsedGps?.longitude || 77.4065,
+        isCurrentLocation: true,
+      };
+      _memoryCustomerAddress = reconstructed;
+      return reconstructed;
+    }
   } catch (e) {}
-  return null;
+  _memoryCustomerAddress = DEFAULT_CUSTOMER_FALLBACK_ADDRESS;
+  return DEFAULT_CUSTOMER_FALLBACK_ADDRESS;
 };
 
 /**
@@ -593,11 +645,19 @@ export const getPermanentCustomerAddress = async (): Promise<DeliveryAddress | n
  * Permanently save customer delivery address across all storage keys & cache
  */
 export const savePermanentCustomerAddress = async (addr: DeliveryAddress): Promise<void> => {
+  _memoryCustomerAddress = addr;
   try {
     await AsyncStorage.setItem(STORAGE_KEY_PERMANENT_CUSTOMER, JSON.stringify(addr));
     await AsyncStorage.setItem(STORAGE_KEY_ACTIVE_ADDR, JSON.stringify(addr));
     if (addr.fullAddress) {
       await AsyncStorage.setItem('last_known_customer_address', addr.fullAddress);
+    }
+    if (addr.latitude && addr.longitude) {
+      await AsyncStorage.setItem('last_known_gps_position', JSON.stringify({
+        latitude: addr.latitude,
+        longitude: addr.longitude,
+        timestamp: Date.now(),
+      }));
     }
     await saveAddressToStorage(addr);
   } catch (e) {}
@@ -625,6 +685,9 @@ export const getPermanentStoreLocation = async (): Promise<{
   businessLongitude?: number;
   businessAddress?: string;
 } | null> => {
+  if (_memoryStoreLocation && (_memoryStoreLocation.address || _memoryStoreLocation.fullAddress)) {
+    return _memoryStoreLocation;
+  }
   try {
     const raw = await AsyncStorage.getItem(STORAGE_KEY_PERMANENT_STORE);
     if (raw) {
@@ -633,7 +696,7 @@ export const getPermanentStoreLocation = async (): Promise<{
         const pLat = parsed.businessLatitude || parsed.latitude || 0;
         const pLon = parsed.businessLongitude || parsed.longitude || 0;
         const pAddr = parsed.businessAddress || parsed.fullAddress || parsed.address;
-        return {
+        const result = {
           address: pAddr,
           fullAddress: pAddr,
           latitude: pLat,
@@ -643,6 +706,8 @@ export const getPermanentStoreLocation = async (): Promise<{
           businessAddress: pAddr,
           city: parsed.city || 'Bhopal',
         };
+        _memoryStoreLocation = result;
+        return result;
       }
     }
     const cachedSupp = await AsyncStorage.getItem('supplierUser');
@@ -652,7 +717,7 @@ export const getPermanentStoreLocation = async (): Promise<{
       if (suppAddr) {
         const sLat = parsed.businessLatitude || parsed.latitude || parsed.locationCoords?.latitude || 0;
         const sLon = parsed.businessLongitude || parsed.longitude || parsed.locationCoords?.longitude || 0;
-        return {
+        const result = {
           address: suppAddr,
           fullAddress: suppAddr,
           latitude: sLat,
@@ -662,11 +727,15 @@ export const getPermanentStoreLocation = async (): Promise<{
           businessAddress: suppAddr,
           city: parsed.city || 'Bhopal',
         };
+        _memoryStoreLocation = result;
+        return result;
       }
     }
     const lastLoc = await AsyncStorage.getItem('last_known_resto_location');
     if (lastLoc) {
-      return { address: lastLoc, fullAddress: lastLoc };
+      const result = { address: lastLoc, fullAddress: lastLoc };
+      _memoryStoreLocation = result;
+      return result;
     }
   } catch (e) {}
   return null;
@@ -699,6 +768,7 @@ export const savePermanentStoreLocation = async (data: {
       businessLongitude: lon,
       city: data.city || 'Bhopal',
     };
+    _memoryStoreLocation = toSave;
     await AsyncStorage.setItem(STORAGE_KEY_PERMANENT_STORE, JSON.stringify(toSave));
     await AsyncStorage.setItem('last_known_resto_location', addr);
     const cachedSupp = await AsyncStorage.getItem('supplierUser');

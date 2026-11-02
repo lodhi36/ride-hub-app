@@ -64,6 +64,45 @@ export default function FashionScreen({ navigation, route }: any) {
   const [realFashionItems, setRealFashionItems] = useState<any[]>(_cachedFashionProducts);
   const [loadingItems, setLoadingItems] = useState<boolean>(_cachedFashionProducts.length === 0);
 
+  // Active demographic and subcategories 2-line slider state
+  const [activeDemographic, setActiveDemographic] = useState<'Male' | 'Female' | 'Kids'>('Male');
+  const [fashionSubcategories, setFashionSubcategories] = useState<any[]>([]);
+  const [loadingSubcategories, setLoadingSubcategories] = useState<boolean>(false);
+
+  const fetchSubcategoriesForDemographic = useCallback(async (demo: string) => {
+    try {
+      setLoadingSubcategories(true);
+      const res = await api.get(`/categories/fashion?demographic=${encodeURIComponent(demo)}`).catch(() => null);
+      if (res?.data?.success && Array.isArray(res.data.subcategories)) {
+        const activeSubs = res.data.subcategories.filter((s: any) => s.isActive !== false && s.name && s.name.trim().length > 0);
+        setFashionSubcategories(activeSubs);
+      } else {
+        setFashionSubcategories([]);
+      }
+    } catch (_) {
+      setFashionSubcategories([]);
+    } finally {
+      setLoadingSubcategories(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchSubcategoriesForDemographic(activeDemographic);
+  }, [activeDemographic, fetchSubcategoriesForDemographic]);
+
+  const subcatPairs = useMemo(() => {
+    const list = fashionSubcategories;
+    const pairs: any[][] = [];
+    for (let i = 0; i < list.length; i += 2) {
+      if (i + 1 < list.length) {
+        pairs.push([list[i], list[i + 1]]);
+      } else {
+        pairs.push([list[i]]);
+      }
+    }
+    return pairs;
+  }, [fashionSubcategories]);
+
   // Live cart synchronization
   const [cartCount, setCartCount] = useState<number>(() => CartService.getCartCount());
 
@@ -494,6 +533,129 @@ export default function FashionScreen({ navigation, route }: any) {
               </View>
             </TouchableOpacity>
           </View>
+        </View>
+
+        {/* 3B. 2-LINE HORIZONTAL SLIDER FOR SUBCATEGORIES (ONLY SIDE SLIDE) */}
+        <View style={[styles.subcatSliderSection, isDark && { backgroundColor: '#0F172A', borderColor: '#1E293B' }]}>
+          <View style={styles.subcatSliderHeaderRow}>
+            <View>
+              <Text style={[styles.subcatSliderTitle, isDark && { color: '#F8FAFC' }]}>
+                {activeDemographic === 'Male'
+                  ? "Men's Subcategories"
+                  : activeDemographic === 'Female'
+                  ? "Women's Subcategories"
+                  : "Kids Subcategories"}
+              </Text>
+              <Text style={[styles.subcatSliderSub, isDark && { color: '#94A3B8' }]}>
+                2 rows • Side-slide to explore ({fashionSubcategories.length})
+              </Text>
+            </View>
+            <TouchableOpacity
+              activeOpacity={0.8}
+              onPress={() => openSubcategories(activeDemographic, `${activeDemographic} Fashion`)}
+              style={styles.subcatViewAllChip}
+            >
+              <Text style={styles.subcatViewAllText}>View All ›</Text>
+            </TouchableOpacity>
+          </View>
+
+          {/* Demographic Selector Pills */}
+          <View style={styles.subcatTabRow}>
+            {[
+              { id: 'Male', label: 'Men', icon: '👔' },
+              { id: 'Female', label: 'Women', icon: '👗' },
+              { id: 'Kids', label: 'Kids', icon: '🧒' },
+            ].map((tab) => {
+              const isActive = activeDemographic === tab.id;
+              return (
+                <TouchableOpacity
+                  key={tab.id}
+                  style={[
+                    styles.subcatTabPill,
+                    isDark && { backgroundColor: '#1E293B', borderColor: '#334155' },
+                    isActive && styles.subcatTabPillActive,
+                  ]}
+                  activeOpacity={0.8}
+                  onPress={() => setActiveDemographic(tab.id as any)}
+                >
+                  <Text style={styles.subcatTabEmoji}>{tab.icon}</Text>
+                  <Text
+                    style={[
+                      styles.subcatTabLabel,
+                      isDark && { color: '#94A3B8' },
+                      isActive && styles.subcatTabLabelActive,
+                    ]}
+                  >
+                    {tab.label}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+
+          {/* ⚡ 2-ROW HORIZONTAL SLIDER (ONLY SIDE SLIDE) */}
+          {loadingSubcategories ? (
+            <View style={{ height: 140, alignItems: 'center', justifyContent: 'center' }}>
+              <ActivityIndicator size="small" color="#0066FF" />
+            </View>
+          ) : subcatPairs.length === 0 ? (
+            <View style={{ height: 90, alignItems: 'center', justifyContent: 'center' }}>
+              <Text style={{ fontSize: 13, color: '#94A3B8' }}>No subcategories found for {activeDemographic}</Text>
+            </View>
+          ) : (
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.horizontalSubcatScroll}
+              decelerationRate="fast"
+            >
+              {subcatPairs.map((pair, colIdx) => (
+                <View key={`col_${colIdx}`} style={styles.subcatColumn}>
+                  {pair.map((subcat: any, rowIdx: number) => {
+                    const imgUrl = subcat.image ? resolveFullUrl(subcat.image) : null;
+                    return (
+                      <TouchableOpacity
+                        key={subcat._id || subcat.name || `sub_${colIdx}_${rowIdx}`}
+                        style={styles.compactSubcatCard}
+                        activeOpacity={0.8}
+                        onPress={() => {
+                          navigation.navigate('FashionSubcategoriesScreen', {
+                            demographic: activeDemographic,
+                            title: `${activeDemographic} Fashion`,
+                            subcategoryId: subcat._id,
+                            customerCoords,
+                          });
+                        }}
+                      >
+                        <View
+                          style={[
+                            styles.compactCircleWrap,
+                            isDark && { backgroundColor: '#1E293B', borderColor: '#334155' },
+                          ]}
+                        >
+                          {imgUrl ? (
+                            <Image source={{ uri: imgUrl }} style={styles.compactCircleImg} resizeMode="cover" />
+                          ) : (
+                            <View style={styles.compactPlaceholder}>
+                              <Text style={{ fontSize: 20 }}>
+                                {activeDemographic === 'Male' ? '👔' : activeDemographic === 'Female' ? '👗' : '🧒'}
+                              </Text>
+                            </View>
+                          )}
+                        </View>
+                        <Text
+                          style={[styles.compactSubcatTitle, isDark && { color: '#E2E8F0' }]}
+                          numberOfLines={2}
+                        >
+                          {subcat.name}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              ))}
+            </ScrollView>
+          )}
         </View>
 
         {/* 4. REAL FASHION ITEMS (Under Male, Female, Kids) */}
@@ -953,5 +1115,121 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontSize: 11,
     fontWeight: '800',
+  },
+  // ⚡ 2-Row Subcategory Slider Styles
+  subcatSliderSection: {
+    marginTop: 20,
+    backgroundColor: '#FFFFFF',
+    borderTopWidth: 1,
+    borderBottomWidth: 1,
+    borderColor: '#F1F5F9',
+    paddingVertical: 14,
+  },
+  subcatSliderHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    marginBottom: 10,
+  },
+  subcatSliderTitle: {
+    fontSize: 16,
+    fontWeight: '800',
+    color: '#0F172A',
+  },
+  subcatSliderSub: {
+    fontSize: 11,
+    color: '#64748B',
+    marginTop: 2,
+  },
+  subcatViewAllChip: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
+    backgroundColor: '#EFF6FF',
+    borderWidth: 1,
+    borderColor: '#BFDBFE',
+  },
+  subcatViewAllText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#0066FF',
+  },
+  subcatTabRow: {
+    flexDirection: 'row',
+    paddingHorizontal: 16,
+    gap: 8,
+    marginBottom: 12,
+  },
+  subcatTabPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 16,
+    backgroundColor: '#F8FAFC',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+  },
+  subcatTabPillActive: {
+    backgroundColor: '#0066FF',
+    borderColor: '#0066FF',
+  },
+  subcatTabEmoji: {
+    fontSize: 13,
+    marginRight: 4,
+  },
+  subcatTabLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#475569',
+  },
+  subcatTabLabelActive: {
+    color: '#FFFFFF',
+    fontWeight: '700',
+  },
+  horizontalSubcatScroll: {
+    paddingHorizontal: 16,
+    gap: 12,
+    flexDirection: 'row',
+  },
+  subcatColumn: {
+    flexDirection: 'column',
+    gap: 10,
+    justifyContent: 'space-between',
+  },
+  compactSubcatCard: {
+    width: 72,
+    alignItems: 'center',
+  },
+  compactCircleWrap: {
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    backgroundColor: '#F8FAFC',
+    borderWidth: 1.5,
+    borderColor: '#E2E8F0',
+    overflow: 'hidden',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  compactCircleImg: {
+    width: '100%',
+    height: '100%',
+  },
+  compactPlaceholder: {
+    width: '100%',
+    height: '100%',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  compactSubcatTitle: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#1E293B',
+    textAlign: 'center',
+    marginTop: 4,
+    lineHeight: 13,
+    width: 72,
   },
 });

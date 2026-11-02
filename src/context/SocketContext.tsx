@@ -21,7 +21,7 @@ try {
 }
 import { useAuth } from './AuthContext';
 import api, { SOCKET_URL, UPLOADS_URL } from '../services/api';
-import { CENTRAL_IP, CLOUD_URL } from '../config/apiConfig';
+import { CENTRAL_IP, CLOUD_URL, USE_CLOUD } from '../config/apiConfig';
 import WebRTCCallModal from '../components/WebRTCCallModal';
 import { navigationRef } from '../services/NavigationService';
 
@@ -402,15 +402,11 @@ export const SocketProvider = ({ children }: { children: ReactNode }) => {
   const [globalCallerUser, setGlobalCallerUser] = useState<any>(null);
 
   useEffect(() => {
-    const candidateUrls = Array.from(new Set([
-      SOCKET_URL,
-      'http://192.168.137.1:5000',
-      'http://10.166.80.3:5000',
-      `http://${CENTRAL_IP}:5000`,
-      'http://127.0.0.1:5000',
-      'http://10.0.2.2:5000',
-      'http://localhost:5000',
-    ])).filter(Boolean);
+    const candidateUrls = Array.from(new Set(
+      USE_CLOUD
+        ? [CLOUD_URL, SOCKET_URL, 'http://127.0.0.1:5000', 'http://10.166.80.3:5000']
+        : [SOCKET_URL, 'http://127.0.0.1:5000', 'http://10.166.80.3:5000', `http://${CENTRAL_IP}:5000`, CLOUD_URL]
+    )).filter(Boolean);
 
     let urlIdx = 0;
     let currentTargetUrl = candidateUrls[urlIdx];

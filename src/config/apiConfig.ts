@@ -2,14 +2,13 @@
 // CENTRALIZED API CONFIGURATION - RIDE HUB
 // ============================================================
 // Live Production Backend: Render Cloud (24/7 online)
-// Cloud URL: https://ride-hub-backend-4x3w.onrender.com
-// Local Fallback IP: 10.95.242.70:5000 | USB: 127.0.0.1:5000
+// Cloud URL: https://sachin24.onrender.com
 // ============================================================
 
-export const USE_CLOUD = false; // false = connects to local PC backend
-export const CLOUD_URL = 'https://ride-hub-backend-4x3w.onrender.com';
+export const USE_CLOUD = true; // true = connects directly to Render cloud backend
+export const CLOUD_URL = 'https://sachin24.onrender.com';
 
-export const USE_LOCALHOST = false; // Connect directly to PC Wi-Fi/Ethernet IP
+export const USE_LOCALHOST = false;
 export const CENTRAL_IP = '10.166.80.3';
 export const CENTRAL_PORT = '5000';
 
@@ -26,8 +25,8 @@ export const CATEGORIES_API_URL = `${LOCAL_URL}/api/categories`;
 // Socket.IO server URL
 export const SOCKET_URL = LOCAL_URL;
 
-// Request timeout (20 seconds for mobile internet and cloud wake-up)
-export const REQUEST_TIMEOUT = 20000;
+// Request timeout (35 seconds for cloud wake-up and mobile internet)
+export const REQUEST_TIMEOUT = 35000;
 
 // LocationIQ & Mappls / MapmyIndia API Keys
 export const MAPPLI_TOKEN = 'eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6IjFkOGVjM2NlZTljODQyOWY5MTY2MTNkOGVmMzU2NGQ4IiwiaCI6Im11cm11cjY0In0=';
@@ -46,7 +45,7 @@ export const OPENROUTESERVICE_ROUTING_URL = 'https://api.openrouteservice.org/v2
 export const UPLOADS_URL = `${LOCAL_URL}/uploads`;
 
 // Raw GitHub CDN for Instant High-Speed Media Delivery (Zero 404s, Global Caching)
-export const CLOUD_UPLOADS_CDN = 'https://raw.githubusercontent.com/lodhi36/ride-hub-backend/main/uploads';
+export const CLOUD_UPLOADS_CDN = 'https://raw.githubusercontent.com/lodhi36/sachin24/main/uploads';
 
 // Dynamic Server URL tracker (updated whenever active backend changes)
 let _dynamicServerUrl: string = (LOCAL_URL || `http://127.0.0.1:${CENTRAL_PORT}`).replace(/\/api\/?$/, '').replace(/\/+$/, '');
@@ -61,7 +60,7 @@ export const getDynamicServerUrl = (): string => {
   return _dynamicServerUrl || (LOCAL_URL || `http://127.0.0.1:${CENTRAL_PORT}`).replace(/\/api\/?$/, '').replace(/\/+$/, '');
 };
 
-// Unified Static Asset Resolver (Primary: active server host, fallback to GitHub CDN if cloud)
+// Unified Static Asset Resolver (Primary: raw GitHub CDN when on Cloud, or active server host)
 export const resolveUploadUrl = (img?: string): string => {
   if (!img || typeof img !== 'string') return '';
   const trimmed = img.trim();
@@ -71,6 +70,11 @@ export const resolveUploadUrl = (img?: string): string => {
   }
   const cleanPath = trimmed.replace(/^\/?(api\/)?(uploads\/)?/, '');
   const serverUrl = getDynamicServerUrl();
+
+  // On Render Cloud backend, resolve directly to Raw GitHub CDN for zero 404s and instant edge caching
+  if (USE_CLOUD || serverUrl.includes('onrender.com')) {
+    return `${CLOUD_UPLOADS_CDN}/${cleanPath}`;
+  }
   return `${serverUrl}/uploads/${cleanPath}`;
 };
 

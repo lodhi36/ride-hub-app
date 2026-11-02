@@ -51,6 +51,7 @@ const resolveBannerUri = (img?: string, item?: BannerItem) => {
   if (!img || typeof img !== 'string') return null;
   const resolved = resolveUploadUrl(img);
   if (!resolved) return null;
+  if (resolved.startsWith('data:')) return resolved;
   // Strictly use a stable version from the item to prevent infinite re-render loops and WebView reloads!
   const version = item?.updatedAt || item?.createdAt;
   if (!version) return resolved;
@@ -71,7 +72,19 @@ export const RoleBannerCarousel: React.FC<RoleBannerCarouselProps> = ({
   resizeMode = 'cover',
   onBannerPress,
 }) => {
-  const [banners, setBanners] = useState<BannerItem[]>([]);
+  const [banners, setBanners] = useState<BannerItem[]>(() => {
+    const norm = (target || 'USER').toUpperCase();
+    if (norm === 'USER') {
+      return [{
+        id: 'default_home_hero',
+        imageUrl: '/uploads/screen-customer_home-1793402905146-353504771.png',
+        target: 'USER',
+        status: 'Active',
+        order: 0,
+      }];
+    }
+    return [];
+  });
   const [failedBanners, setFailedBanners] = useState<{ [key: string]: boolean }>({});
   const [loading, setLoading] = useState(true);
   const [activeIndex, setActiveIndex] = useState(0);
