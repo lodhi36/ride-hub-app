@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   View,
   Text,
@@ -11,6 +11,7 @@ import {
   TextInput,
   StatusBar,
   Platform,
+  ActivityIndicator,
 } from 'react-native';
 import Icon from '../components/PngIcon';
 import api, { UPLOADS_URL } from '../services/api';
