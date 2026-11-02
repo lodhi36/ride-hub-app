@@ -171,6 +171,14 @@ export default function SubcategoriesScreen({ route, navigation }: any) {
     return 'food';
   }, [categoryTitle]);
 
+  const isKirana = useMemo(() => {
+    return cleanCategoryKey === 'kirana' ||
+      String(routeCatName || '').toLowerCase().includes('kirana') ||
+      String(selectedCategory?.name || '').toLowerCase().includes('kirana') ||
+      String(routeCatName || '').toLowerCase().includes('grocery') ||
+      String(selectedCategory?.name || '').toLowerCase().includes('grocery');
+  }, [cleanCategoryKey, routeCatName, selectedCategory]);
+
   // Theme
   const { isDark, currentColors } = useTheme('customer');
 
@@ -262,8 +270,21 @@ export default function SubcategoriesScreen({ route, navigation }: any) {
           }
 
           if (lottie || sc.lottieConfig?.rawJson) {
+            let directJson = sc.lottieConfig?.rawJson || null;
+            if (!directJson && lottie) {
+              try {
+                const lRes = await fetch(lottie);
+                if (lRes.ok) {
+                  const parsed = await lRes.json();
+                  if (parsed && (parsed.v || parsed.layers)) {
+                    directJson = parsed;
+                  }
+                }
+              } catch (_) {}
+            }
+
             lottieCfg = {
-              source: sc.lottieConfig?.rawJson || (lottie ? { uri: lottie } : null),
+              source: directJson || (lottie ? { uri: lottie } : null),
               speed: sc.lottieConfig?.speed || 1.0,
               loop: sc.lottieConfig?.loop !== false,
               autoplay: sc.lottieConfig?.autoplay !== false,
@@ -639,18 +660,20 @@ export default function SubcategoriesScreen({ route, navigation }: any) {
         {(categoryBanners.length > 0 || adminLottieConfig?.source || adminBannerUrl) ? (
           <View style={[styles.bannerContainer, { height: bannerHeight }]}>
             {adminLottieConfig?.source && (displayMode === 'LOTTIE' || (!adminBannerUrl && categoryBanners.length === 0)) ? (
-              <View style={styles.heroLottieWrap}>
-                <LottieAnimation
-                  source={adminLottieConfig.source}
-                  width="100%"
-                  height={(SCREEN_WIDTH - 24) * 0.44}
-                  speed={adminLottieConfig.speed || 1.0}
-                  loop={adminLottieConfig.loop !== false}
-                  autoplay={adminLottieConfig.autoplay !== false}
-                />
+              <View style={[styles.heroLottieWrap, isKirana && { paddingTop: 0 }]}>
+                <View style={isKirana ? styles.kiranaLottieOverlay : undefined}>
+                  <LottieAnimation
+                    source={adminLottieConfig.source}
+                    width={isKirana ? "80%" : "100%"}
+                    height={(SCREEN_WIDTH - 24) * (isKirana ? 0.38 : 0.44)}
+                    speed={adminLottieConfig.speed || 1.0}
+                    loop={adminLottieConfig.loop !== false}
+                    autoplay={adminLottieConfig.autoplay !== false}
+                  />
+                </View>
               </View>
             ) : categoryBanners.length > 1 ? (
-              <View>
+              <View style={{ width: '100%', height: '100%', position: 'relative' }}>
                 <ScrollView
                   ref={bannerScrollRef}
                   horizontal
@@ -680,6 +703,24 @@ export default function SubcategoriesScreen({ route, navigation }: any) {
                     />
                   ))}
                 </View>
+                {adminLottieConfig?.source && displayMode === 'BOTH' && (
+                  <View
+                    style={[
+                      styles.heroLottieOverlay,
+                      isKirana && styles.kiranaLottieOverlay,
+                    ]}
+                    pointerEvents="none"
+                  >
+                    <LottieAnimation
+                      source={adminLottieConfig.source}
+                      width={isKirana ? "80%" : "100%"}
+                      height={(SCREEN_WIDTH - 24) * (isKirana ? 0.38 : 0.44)}
+                      speed={adminLottieConfig.speed || 1.0}
+                      loop={adminLottieConfig.loop !== false}
+                      autoplay={adminLottieConfig.autoplay !== false}
+                    />
+                  </View>
+                )}
               </View>
             ) : adminLottieConfig?.source && displayMode === 'BOTH' ? (
               <View style={styles.heroCombinedWrap}>
@@ -688,11 +729,17 @@ export default function SubcategoriesScreen({ route, navigation }: any) {
                   style={styles.heroBannerImage}
                   resizeMode="cover"
                 />
-                <View style={styles.heroLottieOverlay} pointerEvents="none">
+                <View
+                  style={[
+                    styles.heroLottieOverlay,
+                    isKirana && styles.kiranaLottieOverlay,
+                  ]}
+                  pointerEvents="none"
+                >
                   <LottieAnimation
                     source={adminLottieConfig.source}
-                    width="100%"
-                    height={(SCREEN_WIDTH - 24) * 0.44}
+                    width={isKirana ? "80%" : "100%"}
+                    height={(SCREEN_WIDTH - 24) * (isKirana ? 0.38 : 0.44)}
                     speed={adminLottieConfig.speed || 1.0}
                     loop={adminLottieConfig.loop !== false}
                     autoplay={adminLottieConfig.autoplay !== false}
@@ -1116,6 +1163,10 @@ const styles = StyleSheet.create({
     bottom: 0,
     justifyContent: 'center',
     alignItems: 'center',
+  },
+  kiranaLottieOverlay: {
+    top: -16,
+    bottom: 16,
   },
   subcatsSection: {
     marginTop: 16,
