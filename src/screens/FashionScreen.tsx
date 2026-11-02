@@ -471,8 +471,8 @@ export default function FashionScreen({ navigation, route }: any) {
                   <View style={styles.bannerLottieOverlay} pointerEvents="none">
                     <LottieAnimation
                       source={adminLottieConfig.source}
-                      width="100%"
-                      height={bannerHeight}
+                      width="75%"
+                      height={bannerHeight * 0.75}
                       speed={adminLottieConfig.speed || 1.0}
                       loop={adminLottieConfig.loop !== false}
                       autoplay={adminLottieConfig.autoplay !== false}
@@ -793,10 +793,10 @@ const styles = StyleSheet.create({
   },
   bannerLottieOverlay: {
     position: 'absolute',
-    top: 0,
+    top: -12,
     left: 0,
     right: 0,
-    bottom: 0,
+    bottom: 12,
     borderRadius: 16,
     overflow: 'hidden',
     zIndex: 10,
