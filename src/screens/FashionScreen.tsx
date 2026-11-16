@@ -15,10 +15,14 @@ import {
 } from 'react-native';
 import Icon from '../components/PngIcon';
 import api, { UPLOADS_URL } from '../services/api';
+import { resolveUploadUrl } from '../config/apiConfig';
 import { CartService } from '../services/CartService';
 import { useSocket } from '../context/SocketContext';
 import { LottieAnimation } from '../components/LottieAnimation';
 import { useTheme } from '../context/ThemeContext';
+import FastStorage from '../services/FastStorage';
+import { BannerSkeleton, ProductGridSkeleton, SubcategoriesSkeleton } from '../components/ShimmerSkeleton';
+import CachedImage, { prefetchImages } from '../components/CachedImage';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
@@ -29,9 +33,7 @@ let _cachedFashionDemographics: any = null;
 
 const resolveFullUrl = (u?: string) => {
   if (!u || !u.trim()) return '';
-  if (u.startsWith('http') || u.startsWith('data:')) return u;
-  const clean = u.replace(/^\/?(api\/)?(uploads\/)?/, '');
-  return `${UPLOADS_URL}/${clean}`;
+  return resolveUploadUrl(u);
 };
 
 export default function FashionScreen({ navigation, route }: any) {
@@ -41,11 +43,17 @@ export default function FashionScreen({ navigation, route }: any) {
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [isSearchVisible, setIsSearchVisible] = useState<boolean>(false);
 
-  // Dynamic Admin Hero Banners & Top Deals Slider
-  const [fashionBanners, setFashionBanners] = useState<any[]>([]);
+  // Dynamic Admin Hero Banners & Top Deals Slider - Synchronous FastStorage Hydration
+  const [fashionBanners, setFashionBanners] = useState<any[]>(() => {
+    const cached = FastStorage.getItemSync<any[]>('@cached_fashion_banners');
+    return (Array.isArray(cached) && cached.length > 0) ? cached : _cachedFashionBanners;
+  });
   const [bannerActiveIndex, setBannerActiveIndex] = useState<number>(0);
   const bannerScrollRef = React.useRef<ScrollView>(null);
-  const [adminBannerUrl, setAdminBannerUrl] = useState<string | null>(null);
+  const [adminBannerUrl, setAdminBannerUrl] = useState<string | null>(() => {
+    const cached = FastStorage.getItemSync<any[]>('@cached_fashion_banners');
+    return (Array.isArray(cached) && cached.length > 0 && cached[0].imageUrl) ? cached[0].imageUrl : null;
+  });
   const [bannerAspectRatio, setBannerAspectRatio] = useState<number>(2.27);
   const [adminLottieConfig, setAdminLottieConfig] = useState<any>(null);
   const [displayMode, setDisplayMode] = useState<'IMAGE' | 'LOTTIE' | 'BOTH'>('BOTH');
@@ -53,39 +61,52 @@ export default function FashionScreen({ navigation, route }: any) {
   const { isDark, currentColors } = useTheme('customer');
 
   // Dynamic Admin Demographic Images (Men/Male, Women/Female, Kids)
-  const [demographicImages, setDemographicImages] = useState<{ men: string; women: string; kids: string }>(
-    _cachedFashionDemographics || {
-      men: '',
-      women: '',
-      kids: '',
-    }
-  );
+  const [demographicImages, setDemographicImages] = useState<{ men: string; women: string; kids: string }>(() => {
+    const cached = FastStorage.getItemSync<any>('@cached_fashion_demographics');
+    return cached || _cachedFashionDemographics || { men: '', women: '', kids: '' };
+  });
 
   // Real items state for Male, Female, Kids
-  const [realFashionItems, setRealFashionItems] = useState<any[]>(_cachedFashionProducts);
-  const [loadingItems, setLoadingItems] = useState<boolean>(_cachedFashionProducts.length === 0);
+  const [realFashionItems, setRealFashionItems] = useState<any[]>(() => {
+    const cached = FastStorage.getItemSync<any[]>('@cached_fashion_products');
+    return (Array.isArray(cached) && cached.length > 0) ? cached : _cachedFashionProducts;
+  });
+  const [loadingItems, setLoadingItems] = useState<boolean>(() => {
+    const cached = FastStorage.getItemSync<any[]>('@cached_fashion_products');
+    return !(Array.isArray(cached) && cached.length > 0) && _cachedFashionProducts.length === 0;
+  });
 
   // Active demographic and subcategories 2-line slider state
   const [activeDemographic, setActiveDemographic] = useState<'Male' | 'Female' | 'Kids'>('Male');
-  const [fashionSubcategories, setFashionSubcategories] = useState<any[]>([]);
+  const [fashionSubcategories, setFashionSubcategories] = useState<any[]>(() => {
+    const cached = FastStorage.getItemSync<any[]>('@cached_fashion_subcats_Male');
+    return Array.isArray(cached) ? cached : [];
+  });
   const [loadingSubcategories, setLoadingSubcategories] = useState<boolean>(false);
 
   const fetchSubcategoriesForDemographic = useCallback(async (demo: string) => {
     try {
-      setLoadingSubcategories(true);
-      const res = await api.get(`/categories/fashion?demographic=${encodeURIComponent(demo)}`).catch(() => null);
-      if (res?.data?.success && Array.isArray(res.data.subcategories)) {
-        const activeSubs = res.data.subcategories.filter((s: any) => s.isActive !== false && s.name && s.name.trim().length > 0);
+      if (fashionSubcategories.length === 0) {
+        setLoadingSubcategories(true);
+      }
+      const activeSubs = await FastStorage.deduplicate(`fashion_subcats_${demo}`, async () => {
+        const res = await api.get(`/categories/fashion?demographic=${encodeURIComponent(demo)}`).catch(() => null);
+        if (res?.data?.success && Array.isArray(res.data.subcategories)) {
+          return res.data.subcategories.filter((s: any) => s.isActive !== false && s.name && s.name.trim().length > 0);
+        }
+        return [];
+      });
+
+      if (activeSubs && activeSubs.length > 0) {
         setFashionSubcategories(activeSubs);
-      } else {
-        setFashionSubcategories([]);
+        FastStorage.setItem(`@cached_fashion_subcats_${demo}`, activeSubs, 60 * 60 * 1000);
       }
     } catch (_) {
       setFashionSubcategories([]);
     } finally {
       setLoadingSubcategories(false);
     }
-  }, []);
+  }, [fashionSubcategories.length]);
 
   useEffect(() => {
     fetchSubcategoriesForDemographic(activeDemographic);
@@ -114,33 +135,60 @@ export default function FashionScreen({ navigation, route }: any) {
     return unsub;
   }, []);
 
-  // Fetch real items from backend store
+  // Fetch real items from backend store (Deduplicated + Cached)
   const fetchFashionProducts = useCallback(async () => {
     try {
-      if (_cachedFashionProducts.length === 0) {
+      if (realFashionItems.length === 0 && _cachedFashionProducts.length === 0) {
         setLoadingItems(true);
       }
-      const res = await api.get('/menu/6ac8693de868a5421c3d7f7d?forCustomer=true').catch(() => null);
-      if (res?.data?.success && Array.isArray(res.data.items) && res.data.items.length > 0) {
-        _cachedFashionProducts = res.data.items;
-        setRealFashionItems(res.data.items);
-      } else if (_cachedFashionProducts.length === 0) {
+      const items = await FastStorage.deduplicate('fashion_products_fetch', async () => {
+        let storeId = '6af40d167ba007be08431b50';
+        try {
+          const rRes = await api.get('/restaurants/online').catch(() => null);
+          if (rRes?.data?.restaurants && Array.isArray(rRes.data.restaurants)) {
+            const fStore = rRes.data.restaurants.find((r: any) => {
+              const c = (r.categoryName || r.name || r.restaurantName || '').toLowerCase();
+              return c.includes('fashion') || c.includes('cloth') || c.includes('कपड़े');
+            });
+            if (fStore?._id) storeId = fStore._id;
+          }
+        } catch (_) {}
+
+        const res = await api.get(`/menu/${storeId}?forCustomer=true`).catch(() => null);
+        if (res?.data?.success && Array.isArray(res.data.items) && res.data.items.length > 0) {
+          return res.data.items;
+        }
+        // Fallback to Poonam fashion if Geeta fashion has no items
+        const fallbackRes = await api.get('/menu/6ac8693de868a5421c3d7f7d?forCustomer=true').catch(() => null);
+        if (fallbackRes?.data?.success && Array.isArray(fallbackRes.data.items) && fallbackRes.data.items.length > 0) {
+          return fallbackRes.data.items;
+        }
+        return [];
+      });
+
+      if (items && items.length > 0) {
+        _cachedFashionProducts = items;
+        setRealFashionItems(items);
+        FastStorage.setItem('@cached_fashion_products', items, 15 * 60 * 1000);
+        const fImages = items.map((p: any) => resolveFullUrl(p.image || p.imageUrl)).filter(Boolean);
+        prefetchImages(fImages);
+      } else if (realFashionItems.length === 0 && _cachedFashionProducts.length === 0) {
         setRealFashionItems([]);
       }
     } catch (_) {
-      if (_cachedFashionProducts.length === 0) {
+      if (realFashionItems.length === 0 && _cachedFashionProducts.length === 0) {
         setRealFashionItems([]);
       }
     } finally {
       setLoadingItems(false);
     }
-  }, []);
+  }, [realFashionItems.length]);
 
   const handleAddToCart = (item: any) => {
     const storeObj = {
-      _id: item.restaurantId || '6ac8693de868a5421c3d7f7d',
-      name: 'Poonam fashion',
-      restaurantName: 'Poonam fashion',
+      _id: item.restaurantId || '6af40d167ba007be08431b50',
+      name: item.restaurantName || 'Geeta fashion',
+      restaurantName: item.restaurantName || 'Geeta fashion',
       categoryName: 'Fashion',
       restaurant_status: 'online',
       isOnline: true,
@@ -223,6 +271,12 @@ export default function FashionScreen({ navigation, route }: any) {
       }
 
       setFashionBanners(allBanners);
+      if (allBanners.length > 0) {
+        _cachedFashionBanners = allBanners;
+        FastStorage.setItem('@cached_fashion_banners', allBanners, 30 * 60 * 1000);
+        const bUrls = allBanners.map((b: any) => b.imageUrl).filter(Boolean);
+        prefetchImages(bUrls);
+      }
       const primaryUrl = allBanners.length > 0 ? allBanners[0].imageUrl : null;
       setAdminBannerUrl(primaryUrl);
       if (primaryUrl) {
@@ -261,18 +315,14 @@ export default function FashionScreen({ navigation, route }: any) {
       const res = await api.get('/settings/fashion-demographics').catch(() => null);
       if (res?.data?.success && res.data.fashionImages) {
         const fi = res.data.fashionImages;
-        const resolveUrl = (u?: string) => {
-          if (!u || !u.trim()) return '';
-          if (u.startsWith('http') || u.startsWith('data:')) return u;
-          const clean = u.replace(/^\/?(api\/)?(uploads\/)?/, '');
-          const base = `${UPLOADS_URL}/${clean}`;
-          return base.includes('?') ? base : `${base}?v=${Date.now()}`;
+        const newDemos = {
+          men: resolveUploadUrl(fi.men),
+          women: resolveUploadUrl(fi.women),
+          kids: resolveUploadUrl(fi.kids),
         };
-        setDemographicImages({
-          men: resolveUrl(fi.men),
-          women: resolveUrl(fi.women),
-          kids: resolveUrl(fi.kids),
-        });
+        setDemographicImages(newDemos);
+        _cachedFashionDemographics = newDemos;
+        FastStorage.setItem('@cached_fashion_demographics', newDemos, 60 * 60 * 1000);
       }
     } catch (_) {}
   }, []);

@@ -25,70 +25,12 @@ import {
   savePermanentCustomerAddress,
   setActiveDeliveryAddress,
   isValidCoordinates,
+  isDummyCoordinates,
   DeliveryAddress,
 } from '../services/LocationAddressService';
 import { useTheme } from '../context/ThemeContext';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
-
-// 4 Operational Delivery Zones of Bhopal (Polygons for Leaflet visualization)
-const BHOPAL_MAP_ZONES = [
-  {
-    name: 'North Bhopal & Karond Zone',
-    color: '#0066FF',
-    coords: [
-      [23.3280, 77.4050],
-      [23.3200, 77.4250],
-      [23.2800, 77.4450],
-      [23.2500, 77.4400],
-      [23.2200, 77.3950],
-      [23.2450, 77.3650],
-      [23.2950, 77.3500],
-      [23.3280, 77.4050],
-    ],
-  },
-  {
-    name: 'Arwaliya & Huzur Tahsil Zone',
-    color: '#F59E0B',
-    coords: [
-      [23.3400, 77.3900],
-      [23.3400, 77.4550],
-      [23.3100, 77.4750],
-      [23.2850, 77.4500],
-      [23.2650, 77.4200],
-      [23.2700, 77.3850],
-      [23.2950, 77.3700],
-      [23.3200, 77.3800],
-      [23.3400, 77.3900],
-    ],
-  },
-  {
-    name: 'New Bhopal (MP Nagar • Arera • Kolar)',
-    color: '#10B981',
-    coords: [
-      [23.2450, 77.4100],
-      [23.2400, 77.4500],
-      [23.2100, 77.4600],
-      [23.1700, 77.4400],
-      [23.1600, 77.4000],
-      [23.1800, 77.3800],
-      [23.2200, 77.3950],
-      [23.2450, 77.4100],
-    ],
-  },
-  {
-    name: 'BHEL & East Bhopal (Indrapuri • Piplani)',
-    color: '#8B5CF6',
-    coords: [
-      [23.2900, 77.4450],
-      [23.2800, 77.4950],
-      [23.2350, 77.5000],
-      [23.2150, 77.4600],
-      [23.2450, 77.4400],
-      [23.2900, 77.4450],
-    ],
-  },
-];
 
 interface CustomerMapLocationModalProps {
   visible: boolean;
@@ -103,24 +45,24 @@ export const CustomerMapLocationModal: React.FC<CustomerMapLocationModalProps> =
   initialCoords,
   onLocationUpdated,
 }) => {
+  const hasValidInit = Boolean(
+    initialCoords &&
+    isValidCoordinates(initialCoords.latitude, initialCoords.longitude) &&
+    !isDummyCoordinates(initialCoords.latitude, initialCoords.longitude)
+  );
   const [selectedLat, setSelectedLat] = useState<number>(
-    initialCoords && isValidCoordinates(initialCoords.latitude, initialCoords.longitude)
-      ? initialCoords.latitude
-      : 23.3050 // Arwaliya / Bhopal
+    hasValidInit && initialCoords ? initialCoords.latitude : 0
   );
   const [selectedLon, setSelectedLon] = useState<number>(
-    initialCoords && isValidCoordinates(initialCoords.latitude, initialCoords.longitude)
-      ? initialCoords.longitude
-      : 77.4200
+    hasValidInit && initialCoords ? initialCoords.longitude : 0
   );
-  const [addressTitle, setAddressTitle] = useState<string>('Islamnagar');
-  const [fullAddressText, setFullAddressText] = useState<string>('Shyampur, Islamnagar, Huzur Tahsil, Bhopal Madhya Pradesh 462026, India');
+  const [addressTitle, setAddressTitle] = useState<string>('Current Location');
+  const [fullAddressText, setFullAddressText] = useState<string>('Locating your position...');
+  const [gpsStatusMsg, setGpsStatusMsg] = useState<string>(hasValidInit ? '' : 'Locating your position...');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [isSearching, setIsSearching] = useState<boolean>(false);
   const [searchResults, setSearchResults] = useState<any[]>([]);
   const [detectingGps, setDetectingGps] = useState<boolean>(false);
-  const [isInsideZone, setIsInsideZone] = useState<boolean | null>(true);
-  const [isCheckingZone, setIsCheckingZone] = useState<boolean>(false);
   const [updatingLocation, setUpdatingLocation] = useState<boolean>(false);
   const [mapLayerType, setMapLayerType] = useState<'standard' | 'satellite'>('standard');
 
@@ -129,11 +71,15 @@ export const CustomerMapLocationModal: React.FC<CustomerMapLocationModalProps> =
   // Sync initial coords when modal opens
   useEffect(() => {
     if (visible) {
-      if (initialCoords && isValidCoordinates(initialCoords.latitude, initialCoords.longitude)) {
+      if (
+        initialCoords &&
+        isValidCoordinates(initialCoords.latitude, initialCoords.longitude) &&
+        !isDummyCoordinates(initialCoords.latitude, initialCoords.longitude)
+      ) {
         setSelectedLat(initialCoords.latitude);
         setSelectedLon(initialCoords.longitude);
+        setGpsStatusMsg('');
         resolveAddress(initialCoords.latitude, initialCoords.longitude);
-        checkZoneServiceability(initialCoords.latitude, initialCoords.longitude);
       } else {
         handleDetectCurrentGps();
       }
@@ -146,9 +92,9 @@ export const CustomerMapLocationModal: React.FC<CustomerMapLocationModalProps> =
       const geo = await reverseGeocodeCoords(lat, lon);
       if (geo && geo.fullAddress) {
         setFullAddressText(geo.fullAddress);
-        setAddressTitle(geo.locality || geo.city || 'Bhopal Location');
+        setAddressTitle(geo.locality || geo.city || 'Selected Location');
       } else {
-        setAddressTitle('Bhopal Location');
+        setAddressTitle('Selected Location');
         setFullAddressText(`Coordinates: ${lat.toFixed(4)}, ${lon.toFixed(4)}`);
       }
     } catch (_) {
@@ -157,40 +103,42 @@ export const CustomerMapLocationModal: React.FC<CustomerMapLocationModalProps> =
     }
   };
 
-  // Check Zone Serviceability
-  const checkZoneServiceability = async (lat: number, lon: number) => {
-    try {
-      setIsCheckingZone(true);
-      const res = await api.post('/zones/check-customer-serviceable', { latitude: lat, longitude: lon });
-      if (res.data) {
-        setIsInsideZone(res.data.serviceable !== false);
-      } else {
-        setIsInsideZone(true);
-      }
-    } catch (_) {
-      setIsInsideZone(true);
-    } finally {
-      setIsCheckingZone(false);
-    }
-  };
-
   // Detect Current GPS
   const handleDetectCurrentGps = async () => {
     try {
       setDetectingGps(true);
-      const res = await fetchCurrentGpsPositionDetailed(true);
-      const fix = res.fix || (isValidCoordinates((res as any)?.latitude, (res as any)?.longitude) ? (res as any) : null);
+      setGpsStatusMsg('Locating your position...');
+      const res = await fetchCurrentGpsPositionDetailed(false);
+      const fix = res.fix && !isDummyCoordinates(res.fix.latitude, res.fix.longitude) ? res.fix : null;
       if (fix && isValidCoordinates(fix.latitude, fix.longitude)) {
         setSelectedLat(fix.latitude);
         setSelectedLon(fix.longitude);
+        if (fix.accuracy && fix.accuracy > 50) {
+          const warnMsg = 'लोकेशन ठीक नहीं मिल रही, कृपया पिन खुद ठीक करें।';
+          setGpsStatusMsg(warnMsg);
+          Alert.alert('GPS शुद्धता चेतावनी', warnMsg + `\n(शुद्धता: ${Math.round(fix.accuracy)}m)`);
+        } else {
+          setGpsStatusMsg('');
+        }
         updateMapPin(fix.latitude, fix.longitude);
         await resolveAddress(fix.latitude, fix.longitude);
-        await checkZoneServiceability(fix.latitude, fix.longitude);
       } else {
-        Alert.alert('GPS Notice', res.message || 'Could not detect device GPS. Please enable Location permissions.');
+        const msg =
+          res.errorType === 'PERMISSION_DENIED'
+            ? 'Location permission required.'
+            : res.errorType === 'LOCATION_OFF'
+            ? 'GPS unavailable.'
+            : 'Unable to fetch current location. Retry.';
+        setGpsStatusMsg(msg);
+        if (!isValidCoordinates(selectedLat, selectedLon)) {
+          setAddressTitle('GPS Status');
+          setFullAddressText(msg);
+        }
+        Alert.alert('GPS Status', msg);
       }
     } catch (err) {
       console.warn('GPS detection notice:', err);
+      setGpsStatusMsg('Unable to fetch current location. Retry.');
     } finally {
       setDetectingGps(false);
     }
@@ -255,7 +203,7 @@ export const CustomerMapLocationModal: React.FC<CustomerMapLocationModalProps> =
     try {
       setIsSearching(true);
       const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(
-        query.trim() + ' Bhopal'
+        query.trim()
       )}&format=json&limit=5`;
       const res = await fetch(url, { headers: { 'User-Agent': 'RideHub-CustomerMap/2.0' } });
       const data = await res.json();
@@ -267,12 +215,12 @@ export const CustomerMapLocationModal: React.FC<CustomerMapLocationModalProps> =
     }
   };
 
-  // Confirm Location
+  // Confirm Location (Open Location Model — valid real GPS coordinates required)
   const handleConfirmLocation = async () => {
-    if (isInsideZone === false) {
+    if (!isValidCoordinates(selectedLat, selectedLon) || isDummyCoordinates(selectedLat, selectedLon)) {
       Alert.alert(
-        'Location Out of Zone',
-        'Sorry! This location is outside our Bhopal delivery zones. Please select an address within Bhopal service zones to continue.'
+        'Location Required',
+        gpsStatusMsg || 'Unable to fetch current location. Retry.'
       );
       return;
     }
@@ -281,17 +229,33 @@ export const CustomerMapLocationModal: React.FC<CustomerMapLocationModalProps> =
       setUpdatingLocation(true);
       const newAddr: DeliveryAddress = {
         id: `addr_${Date.now()}`,
-        label: addressTitle || 'Delivery Address',
+        tag: 'Other',
+        houseNo: addressTitle || 'Delivery Address',
+        landmark: addressTitle || '',
+        city: '',
+        pincode: '',
         fullAddress: fullAddressText,
         latitude: selectedLat,
         longitude: selectedLon,
-        city: 'Bhopal',
-        state: 'Madhya Pradesh',
-        isDefault: true,
+        isCurrentLocation: true,
       };
 
       await savePermanentCustomerAddress(newAddr);
       await setActiveDeliveryAddress(newAddr);
+      try {
+        await api.post('/customer/addresses', {
+          tag: 'Other',
+          label: addressTitle || 'Pin Location',
+          address: fullAddressText,
+          formattedAddress: fullAddressText,
+          latitude: selectedLat,
+          longitude: selectedLon,
+          locationAccuracy: 15,
+          isDefault: true,
+        });
+      } catch (e: any) {
+        console.log('[CUSTOMER PIN ADDR SYNC NOTE]:', e.message);
+      }
       onLocationUpdated({ latitude: selectedLat, longitude: selectedLon }, fullAddressText);
       onClose();
     } catch (err) {
@@ -304,9 +268,8 @@ export const CustomerMapLocationModal: React.FC<CustomerMapLocationModalProps> =
     }
   };
 
-  // Leaflet Map HTML
+  // Leaflet Map HTML (Clean OpenStreetMap without zone polygon overlays or hardcoded fallbacks)
   const mapHtml = useMemo(() => {
-    const zonesJson = JSON.stringify(BHOPAL_MAP_ZONES);
     return `<!DOCTYPE html>
 <html>
 <head>
@@ -388,15 +351,21 @@ export const CustomerMapLocationModal: React.FC<CustomerMapLocationModalProps> =
 <body>
   <div id="map"></div>
   <script>
-    var hasPin = ${isValidCoordinates(selectedLat, selectedLon)};
-    var centerLat = hasPin ? ${selectedLat} : 23.3050;
-    var centerLon = hasPin ? ${selectedLon} : 77.4200;
-    var zoomLvl = hasPin ? 15 : 13;
+    var hasPin = ${isValidCoordinates(selectedLat, selectedLon) && !isDummyCoordinates(selectedLat, selectedLon)};
+    var centerLat = ${selectedLat};
+    var centerLon = ${selectedLon};
 
+    var mapEl = document.getElementById('map');
+    if (mapEl && !hasPin) {
+      mapEl.style.visibility = 'hidden';
+    }
     var map = L.map('map', {
       zoomControl: false,
       attributionControl: false
-    }).setView([centerLat, centerLon], zoomLvl);
+    });
+    if (hasPin) {
+      map.setView([centerLat, centerLon], 15);
+    }
     window.map = map;
 
     var standardTile = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -416,17 +385,6 @@ export const CustomerMapLocationModal: React.FC<CustomerMapLocationModalProps> =
         standardTile.addTo(map);
       }
     };
-
-    var zones = ${zonesJson};
-    zones.forEach(function(z) {
-      L.polygon(z.coords, {
-        color: z.color,
-        fillColor: z.color,
-        fillOpacity: 0.12,
-        weight: 2,
-        dashArray: '5, 5'
-      }).addTo(map);
-    });
 
     var pinIcon = L.divIcon({
       className: 'pin-wrapper',
@@ -477,6 +435,11 @@ export const CustomerMapLocationModal: React.FC<CustomerMapLocationModalProps> =
     });
 
     window.setPinLocation = function(lat, lon) {
+      if (!lat || !lon || isNaN(lat) || isNaN(lon)) return;
+      var el = document.getElementById('map');
+      if (el && el.style.visibility === 'hidden') {
+        el.style.visibility = 'visible';
+      }
       if (!marker) {
         marker = L.marker([lat, lon], {
           icon: pinIcon,
@@ -499,8 +462,8 @@ export const CustomerMapLocationModal: React.FC<CustomerMapLocationModalProps> =
       if (data && data.type === 'PIN_MOVED') {
         setSelectedLat(data.lat);
         setSelectedLon(data.lon);
+        setGpsStatusMsg('');
         resolveAddress(data.lat, data.lon);
-        checkZoneServiceability(data.lat, data.lon);
       }
     } catch (e) {}
   };
@@ -520,7 +483,7 @@ export const CustomerMapLocationModal: React.FC<CustomerMapLocationModalProps> =
 
           <View style={styles.headerTextWrap}>
             <Text style={[styles.headerTitle, isDark && { color: currentColors.primaryText }]}>Select Delivery Location</Text>
-            <Text style={[styles.headerSubtitle, isDark && { color: currentColors.secondaryText }]}>Drag pin or search to set your Bhopal address</Text>
+            <Text style={[styles.headerSubtitle, isDark && { color: currentColors.secondaryText }]}>Drag pin or search to set your delivery address</Text>
           </View>
 
           <TouchableOpacity
@@ -664,6 +627,29 @@ export const CustomerMapLocationModal: React.FC<CustomerMapLocationModalProps> =
             onMessage={handleWebViewMessage}
           />
 
+          {(!isValidCoordinates(selectedLat, selectedLon) || isDummyCoordinates(selectedLat, selectedLon)) && (
+            <View style={{
+              position: 'absolute',
+              top: 0, left: 0, right: 0, bottom: 0,
+              backgroundColor: 'rgba(15, 23, 42, 0.72)',
+              alignItems: 'center',
+              justifyContent: 'center',
+              padding: 24,
+            }}>
+              <ActivityIndicator size="large" color="#38BDF8" style={{ marginBottom: 12 }} />
+              <Text style={{ color: '#FFFFFF', fontSize: 15, fontWeight: '800', textAlign: 'center', marginBottom: 10 }}>
+                {gpsStatusMsg || 'Locating your position...'}
+              </Text>
+              <TouchableOpacity
+                style={{ backgroundColor: '#0066FF', paddingHorizontal: 18, paddingVertical: 10, borderRadius: 12 }}
+                onPress={handleDetectCurrentGps}
+                activeOpacity={0.85}
+              >
+                <Text style={{ color: '#FFFFFF', fontWeight: '800', fontSize: 13 }}>Retry</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+
           {/* Floating Right Map Controls Stack */}
           <View style={styles.floatingControlsStack}>
             {/* Map Layers */}
@@ -713,26 +699,21 @@ export const CustomerMapLocationModal: React.FC<CustomerMapLocationModalProps> =
               </View>
             </View>
 
-            {/* Title, Address & Zone Badge */}
+            {/* Title & Live GPS Status */}
             <View style={styles.locationInfoWrap}>
               <View style={styles.titleBadgeRow}>
                 <Text style={[styles.localityTitle, isDark && { color: currentColors.primaryText }]} numberOfLines={1}>
                   {addressTitle}
                 </Text>
 
-                {isCheckingZone ? (
+                {detectingGps ? (
                   <ActivityIndicator size="small" color="#0066FF" />
-                ) : isInsideZone === false ? (
-                  <View style={styles.zonePillOut}>
-                    <Icon name="close" size={13} color="#DC2626" style={{ marginRight: 3 }} />
-                    <Text style={styles.zonePillOutText}>Out of Zone</Text>
-                  </View>
-                ) : (
+                ) : isValidCoordinates(selectedLat, selectedLon) ? (
                   <View style={styles.zonePillIn}>
                     <Icon name="checkmark" size={13} color="#16A34A" style={{ marginRight: 3 }} />
-                    <Text style={styles.zonePillInText}>In Zone</Text>
+                    <Text style={styles.zonePillInText}>GPS Pin Ready</Text>
                   </View>
-                )}
+                ) : null}
               </View>
 
               <Text style={styles.fullAddressText} numberOfLines={2}>
@@ -743,10 +724,7 @@ export const CustomerMapLocationModal: React.FC<CustomerMapLocationModalProps> =
 
           {/* Primary Action Button */}
           <TouchableOpacity
-            style={[
-              styles.primaryActionButton,
-              isInsideZone === false && styles.primaryActionButtonDisabled,
-            ]}
+            style={styles.primaryActionButton}
             onPress={handleConfirmLocation}
             activeOpacity={0.88}
             disabled={updatingLocation}
@@ -756,7 +734,7 @@ export const CustomerMapLocationModal: React.FC<CustomerMapLocationModalProps> =
             ) : (
               <View style={styles.actionBtnContent}>
                 <Text style={styles.primaryActionButtonText}>
-                  {isInsideZone === false ? 'Select Bhopal Service Location' : 'Update Location & View Stores'}
+                  Update Location & View Stores
                 </Text>
                 <Icon name="arrow-forward" size={18} color="#FFFFFF" style={{ marginLeft: 8 }} />
               </View>

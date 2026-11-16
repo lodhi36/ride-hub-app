@@ -25,8 +25,19 @@ const STORAGE_KEY_SAVED_ADDRS = '@customer_saved_addresses_v2';
 const STORAGE_KEY_ACTIVE_ADDR = '@customer_active_address_v2';
 export const STORAGE_KEY_PERMANENT_CUSTOMER = '@permanent_customer_delivery_address';
 export const STORAGE_KEY_PERMANENT_STORE = '@permanent_supplier_store_location';
+export const STORAGE_KEY_RIDER_LAST_GPS = '@last_known_gps_delivery_v2';
+export const STORAGE_KEY_CUSTOMER_LAST_GPS = '@last_known_gps_customer_v2';
 
-const isDummyCoord = (lat?: number, lon?: number): boolean => !lat || !lon || (lat === 0 && lon === 0);
+const KNOWN_DUMMY_COORDS: ReadonlyArray<[number, number]> = [
+  [23.2599, 77.4126], // Bhopal static dummy
+  [23.2330, 77.4350], // Friend/Booking test dummy
+  [23.2505, 77.4065], // Old Bhopal polygon center dummy
+  [23.3050, 77.4200], // Islamnagar map default dummy
+  [28.6139, 77.2090], // New Delhi dummy
+  [28.6129, 77.2295], // Kartavya Path dummy
+];
+
+const isDummyCoord = (lat?: number, lon?: number): boolean => isDummyCoordinates(lat, lon);
 
 /**
  * Haversine formula to compute distance in KM between two coordinates
@@ -329,8 +340,11 @@ export const isDummyCoordinates = (lat?: number | null, lon?: number | null): bo
   if (!isValidCoordinates(lat, lon)) return true;
   const nLat = Number(lat);
   const nLon = Number(lon);
-  // Specifically detect known hardcoded placeholder coords (Bhopal center dummy)
-  if (Math.abs(nLat - 23.2599) < 0.0001 && Math.abs(nLon - 77.4126) < 0.0001) return true;
+  for (const [dLat, dLon] of KNOWN_DUMMY_COORDS) {
+    if (Math.abs(nLat - dLat) < 0.0001 && Math.abs(nLon - dLon) < 0.0001) {
+      return true;
+    }
+  }
   return false;
 };
 
@@ -379,6 +393,7 @@ export const fetchCurrentGpsPositionDetailed = async (
 
     let lastGpsErrorCode: number | null = null;
     let lastGpsErrorMessage: string = '';
+    let rejectedForLowAccuracy = false;
 
     const getLocationPromise = (
       highAccuracy: boolean,
@@ -388,15 +403,24 @@ export const fetchCurrentGpsPositionDetailed = async (
       return new Promise((resolve) => {
         Geolocation.getCurrentPosition(
           (pos) => {
-            if (pos?.coords && isValidCoordinates(pos.coords.latitude, pos.coords.longitude)) {
+            if (
+              pos?.coords &&
+              isValidCoordinates(pos.coords.latitude, pos.coords.longitude) &&
+              !isDummyCoordinates(pos.coords.latitude, pos.coords.longitude)
+            ) {
+              const rawAccuracy = Number(pos.coords.accuracy);
+              if (Number.isFinite(rawAccuracy) && rawAccuracy > 1000) {
+                rejectedForLowAccuracy = true;
+                resolve(null);
+                return;
+              }
               const res: DeviceGpsFix = {
                 latitude: Number(pos.coords.latitude),
                 longitude: Number(pos.coords.longitude),
-                accuracy: Math.round((pos.coords.accuracy || 5) * 10) / 10,
+                accuracy: Number.isFinite(rawAccuracy) && rawAccuracy > 0 ? Math.round(rawAccuracy * 10) / 10 : 10,
                 timestamp: pos.timestamp || Date.now(),
               };
               memoryGpsCache = res;
-              AsyncStorage.setItem('last_known_gps_position', JSON.stringify(res)).catch(() => {});
               resolve(res);
               return;
             }
@@ -436,15 +460,30 @@ export const fetchCurrentGpsPositionDetailed = async (
       allowRecentMemoryCache &&
       memoryGpsCache &&
       Date.now() - memoryGpsCache.timestamp < 20000 &&
-      isValidCoordinates(memoryGpsCache.latitude, memoryGpsCache.longitude)
+      !isDummyCoordinates(memoryGpsCache.latitude, memoryGpsCache.longitude)
     ) {
       return { success: true, fix: memoryGpsCache };
     }
 
-    // Detect Location Services OFF (Code 2 = POSITION_UNAVAILABLE, Code 3 = TIMEOUT, Code 5 = SETTINGS_NOT_SATISFIED)
+    if (rejectedForLowAccuracy && lastGpsErrorCode === null) {
+      return {
+        success: false,
+        errorType: 'ACCURACY_LOW',
+        message: 'GPS accuracy too low. Please move to an open area and retry.',
+      };
+    }
+
+    if (lastGpsErrorCode === 1) {
+      return {
+        success: false,
+        errorType: 'PERMISSION_DENIED',
+        message: 'Location permission required.',
+      };
+    }
+
+    // Detect Location Services OFF (Code 2 = POSITION_UNAVAILABLE, Code 5 = SETTINGS_NOT_SATISFIED)
     if (
       lastGpsErrorCode === 2 ||
-      lastGpsErrorCode === 3 ||
       lastGpsErrorCode === 5 ||
       lastGpsErrorMessage.toLowerCase().includes('location') ||
       lastGpsErrorMessage.toLowerCase().includes('disabled') ||
@@ -453,22 +492,14 @@ export const fetchCurrentGpsPositionDetailed = async (
       return {
         success: false,
         errorType: 'LOCATION_OFF',
-        message: 'Please turn on your device location to continue.',
-      };
-    }
-
-    if (lastGpsErrorCode === 1) {
-      return {
-        success: false,
-        errorType: 'PERMISSION_DENIED',
-        message: 'Location permission denied. Please allow location access in settings.',
+        message: 'GPS unavailable.',
       };
     }
 
     return {
       success: false,
       errorType: 'TIMEOUT',
-      message: 'Please turn on your device location to continue.',
+      message: 'Unable to fetch current location. Retry.',
     };
   } catch (e: any) {
     return {
@@ -499,11 +530,12 @@ export const watchCurrentGpsPosition = (
         if (pos?.coords && pos.coords.latitude && pos.coords.longitude) {
           const lat = pos.coords.latitude;
           const lon = pos.coords.longitude;
-          if (!isDummyCoordinates(lat, lon)) {
+          const acc = Number(pos.coords.accuracy);
+          if (!isDummyCoordinates(lat, lon) && (!Number.isFinite(acc) || acc <= 1000)) {
             const fix: DeviceGpsFix = {
               latitude: lat,
               longitude: lon,
-              accuracy: Math.round((pos.coords.accuracy || 5) * 10) / 10,
+              accuracy: Number.isFinite(acc) && acc > 0 ? Math.round(acc * 10) / 10 : 10,
               timestamp: pos.timestamp || Date.now(),
             };
             memoryGpsCache = fix;
@@ -517,9 +549,9 @@ export const watchCurrentGpsPosition = (
       },
       {
         enableHighAccuracy: true,
-        distanceFilter: 1, // update every 1 meter
-        interval: 2500, // update every 2.5 seconds
-        fastestInterval: 1000,
+        distanceFilter: 8, // battery-safe movement threshold (8 meters)
+        interval: 4000,
+        fastestInterval: 2000,
         showLocationDialog: true,
         forceRequestLocation: true,
       }
@@ -536,28 +568,134 @@ export const watchCurrentGpsPosition = (
   }
 };
 
+// Helper to resolve current active role user ID without cross-role leakage
+const getRoleSessionUserId = async (roleKey: 'customerUser' | 'supplierUser' | 'deliveryUser'): Promise<string | null> => {
+  try {
+    const raw = await AsyncStorage.getItem(roleKey);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return (parsed?._id || parsed?.id) ? String(parsed._id || parsed.id) : null;
+  } catch (_) {
+    return null;
+  }
+};
+
+export const clearCustomerAddressCache = async () => {
+  _memoryCustomerAddress = null;
+  memoryGpsCache = null;
+  try {
+    await AsyncStorage.multiRemove([
+      STORAGE_KEY_SAVED_ADDRS,
+      STORAGE_KEY_ACTIVE_ADDR,
+      STORAGE_KEY_PERMANENT_CUSTOMER,
+      STORAGE_KEY_CUSTOMER_LAST_GPS,
+      'last_known_customer_address',
+      'last_known_gps_position',
+    ]);
+  } catch (_) {}
+};
+
+export const clearRiderLocationCache = async () => {
+  memoryGpsCache = null;
+  try {
+    await AsyncStorage.multiRemove([
+      STORAGE_KEY_RIDER_LAST_GPS,
+      'last_known_rider_location',
+      'last_rider_gps_coords',
+    ]);
+  } catch (_) {}
+};
+
+export const saveLastRoleGpsCoords = async (
+  role: 'customer' | 'delivery',
+  fix: { latitude: number; longitude: number; accuracy?: number; timestamp?: number },
+  ownerUserId?: string | null
+): Promise<void> => {
+  if (isDummyCoordinates(fix?.latitude, fix?.longitude)) return;
+  try {
+    const key = role === 'delivery' ? STORAGE_KEY_RIDER_LAST_GPS : STORAGE_KEY_CUSTOMER_LAST_GPS;
+    const roleKey = role === 'delivery' ? 'deliveryUser' : 'customerUser';
+    const uid = ownerUserId || (await getRoleSessionUserId(roleKey));
+    const payload = {
+      latitude: Number(fix.latitude),
+      longitude: Number(fix.longitude),
+      accuracy: fix.accuracy || 10,
+      timestamp: fix.timestamp || Date.now(),
+      ownerUserId: uid || undefined,
+    };
+    await AsyncStorage.setItem(key, JSON.stringify(payload));
+  } catch (_) {}
+};
+
+export const getLastRoleGpsCoords = async (
+  role: 'customer' | 'delivery',
+  ownerUserId?: string | null
+): Promise<DeviceGpsFix | null> => {
+  try {
+    const key = role === 'delivery' ? STORAGE_KEY_RIDER_LAST_GPS : STORAGE_KEY_CUSTOMER_LAST_GPS;
+    const roleKey = role === 'delivery' ? 'deliveryUser' : 'customerUser';
+    const uid = ownerUserId || (await getRoleSessionUserId(roleKey));
+    const raw = await AsyncStorage.getItem(key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || isDummyCoordinates(parsed.latitude, parsed.longitude)) return null;
+    if (uid && parsed.ownerUserId && String(parsed.ownerUserId) !== String(uid)) return null;
+    return {
+      latitude: Number(parsed.latitude),
+      longitude: Number(parsed.longitude),
+      accuracy: Number(parsed.accuracy || 10),
+      timestamp: Number(parsed.timestamp || Date.now()),
+    };
+  } catch (_) {
+    return null;
+  }
+};
+
+export const clearSupplierLocationCache = async () => {
+  _memoryStoreLocation = null;
+  try {
+    await AsyncStorage.multiRemove([
+      STORAGE_KEY_PERMANENT_STORE,
+      'last_known_resto_location',
+    ]);
+  } catch (_) {}
+};
+
+export const clearAllLocationMemoryCaches = () => {
+  _memoryCustomerAddress = null;
+  _memoryStoreLocation = null;
+};
+
 /**
- * Retrieve saved customer addresses from storage
+ * Retrieve saved customer addresses from storage (strictly scoped to current customer)
  */
 export const getSavedAddresses = async (): Promise<DeliveryAddress[]> => {
   try {
+    const custId = await getRoleSessionUserId('customerUser');
     const raw = await AsyncStorage.getItem(STORAGE_KEY_SAVED_ADDRS);
-    if (raw) return JSON.parse(raw);
+    if (raw) {
+      const list = JSON.parse(raw);
+      if (!Array.isArray(list)) return [];
+      if (!custId) return list.filter((a: any) => !a?.ownerUserId);
+      return list.filter((a: any) => !a?.ownerUserId || String(a.ownerUserId) === custId);
+    }
   } catch (e) {}
   return [];
 };
 
 /**
- * Save new address to storage and set it as active
+ * Save new address to storage and set it as active (tagged with customer userId)
  */
 export const saveAddressToStorage = async (
   addr: DeliveryAddress
 ): Promise<DeliveryAddress[]> => {
   try {
+    const custId = await getRoleSessionUserId('customerUser');
+    const taggedAddr = custId ? { ...addr, ownerUserId: custId } : addr;
     const current = await getSavedAddresses();
-    const updated = [addr, ...current.filter((a) => a.id !== addr.id)];
+    const updated = [taggedAddr, ...current.filter((a) => a.id !== addr.id)];
     await AsyncStorage.setItem(STORAGE_KEY_SAVED_ADDRS, JSON.stringify(updated));
-    await AsyncStorage.setItem(STORAGE_KEY_ACTIVE_ADDR, JSON.stringify(addr));
+    await AsyncStorage.setItem(STORAGE_KEY_ACTIVE_ADDR, JSON.stringify(taggedAddr));
     return updated;
   } catch (e) {
     return [addr];
@@ -565,73 +703,74 @@ export const saveAddressToStorage = async (
 };
 
 // In-memory instant caches for 0ms Zomato / Swiggy latency
-let _memoryCustomerAddress: DeliveryAddress | null = null;
+let _memoryCustomerAddress: (DeliveryAddress & { ownerUserId?: string }) | null = null;
 let _memoryStoreLocation: any = null;
 
-export const DEFAULT_CUSTOMER_FALLBACK_ADDRESS: DeliveryAddress = {
-  id: 'addr_default_bhopal',
-  tag: 'Home',
-  houseNo: 'Bhopal Central',
-  landmark: 'Bhopal, Madhya Pradesh',
-  city: 'Bhopal',
-  pincode: '462001',
-  fullAddress: 'Bhopal, Madhya Pradesh',
-  latitude: 23.2505,
-  longitude: 77.4065,
-  isCurrentLocation: false,
-};
+// SPEC PART 1: ZERO DUMMY LOCATION POLICY - No fake Bhopal or dummy coordinates
+export const DEFAULT_CUSTOMER_FALLBACK_ADDRESS: DeliveryAddress | null = null;
 
 /**
- * Get the currently active delivery address from storage
+ * Get the currently active delivery address from storage (strictly validates customer ownerUserId)
  */
 export const getActiveDeliveryAddress = async (): Promise<DeliveryAddress | null> => {
+  const custId = await getRoleSessionUserId('customerUser');
   if (_memoryCustomerAddress && (_memoryCustomerAddress.fullAddress || _memoryCustomerAddress.latitude)) {
-    return _memoryCustomerAddress;
+    if (!custId || !_memoryCustomerAddress.ownerUserId || String(_memoryCustomerAddress.ownerUserId) === custId) {
+      return _memoryCustomerAddress;
+    }
+    _memoryCustomerAddress = null;
   }
   try {
     const permanent = await AsyncStorage.getItem(STORAGE_KEY_PERMANENT_CUSTOMER);
     if (permanent) {
       const parsed = JSON.parse(permanent);
       if (parsed && (parsed.fullAddress || parsed.latitude)) {
-        _memoryCustomerAddress = parsed;
-        return parsed;
+        if (!custId || !parsed.ownerUserId || String(parsed.ownerUserId) === custId) {
+          _memoryCustomerAddress = parsed;
+          return parsed;
+        }
       }
     }
     const raw = await AsyncStorage.getItem(STORAGE_KEY_ACTIVE_ADDR);
     if (raw) {
       const parsed = JSON.parse(raw);
       if (parsed && (parsed.fullAddress || parsed.latitude)) {
-        _memoryCustomerAddress = parsed;
-        return parsed;
+        if (!custId || !parsed.ownerUserId || String(parsed.ownerUserId) === custId) {
+          _memoryCustomerAddress = parsed;
+          return parsed;
+        }
       }
     }
     const saved = await getSavedAddresses();
     if (saved && saved.length > 0) {
-      _memoryCustomerAddress = saved[0];
-      return saved[0];
+      const validSaved = saved.find((s) => !isDummyCoordinates(s.latitude, s.longitude));
+      if (validSaved) {
+        _memoryCustomerAddress = validSaved;
+        return validSaved;
+      }
     }
     const lastAddr = await AsyncStorage.getItem('last_known_customer_address');
-    const lastGps = await AsyncStorage.getItem('last_known_gps_position');
-    if (lastAddr || lastGps) {
-      const parsedGps = lastGps ? JSON.parse(lastGps) : null;
+    const lastCustGps = await getLastRoleGpsCoords('customer', custId);
+    if (lastCustGps && lastAddr) {
       const reconstructed: DeliveryAddress = {
         id: 'addr_recovered',
         tag: 'Home',
         houseNo: 'Current Location',
-        landmark: lastAddr || 'Bhopal, Madhya Pradesh',
-        city: 'Bhopal',
-        pincode: '462001',
-        fullAddress: lastAddr || 'Bhopal, Madhya Pradesh',
-        latitude: parsedGps?.latitude || 23.2505,
-        longitude: parsedGps?.longitude || 77.4065,
+        landmark: lastAddr,
+        city: '',
+        pincode: '',
+        fullAddress: lastAddr,
+        latitude: lastCustGps.latitude,
+        longitude: lastCustGps.longitude,
+        ownerUserId: custId || undefined,
         isCurrentLocation: true,
       };
       _memoryCustomerAddress = reconstructed;
       return reconstructed;
     }
   } catch (e) {}
-  _memoryCustomerAddress = DEFAULT_CUSTOMER_FALLBACK_ADDRESS;
-  return DEFAULT_CUSTOMER_FALLBACK_ADDRESS;
+  _memoryCustomerAddress = null;
+  return null;
 };
 
 /**
@@ -645,21 +784,24 @@ export const getPermanentCustomerAddress = async (): Promise<DeliveryAddress | n
  * Permanently save customer delivery address across all storage keys & cache
  */
 export const savePermanentCustomerAddress = async (addr: DeliveryAddress): Promise<void> => {
-  _memoryCustomerAddress = addr;
+  if (isDummyCoordinates(addr?.latitude, addr?.longitude)) return;
+  const custId = await getRoleSessionUserId('customerUser');
+  const taggedAddr = custId ? { ...addr, ownerUserId: custId } : addr;
+  _memoryCustomerAddress = taggedAddr;
   try {
-    await AsyncStorage.setItem(STORAGE_KEY_PERMANENT_CUSTOMER, JSON.stringify(addr));
-    await AsyncStorage.setItem(STORAGE_KEY_ACTIVE_ADDR, JSON.stringify(addr));
+    await AsyncStorage.setItem(STORAGE_KEY_PERMANENT_CUSTOMER, JSON.stringify(taggedAddr));
+    await AsyncStorage.setItem(STORAGE_KEY_ACTIVE_ADDR, JSON.stringify(taggedAddr));
     if (addr.fullAddress) {
       await AsyncStorage.setItem('last_known_customer_address', addr.fullAddress);
     }
     if (addr.latitude && addr.longitude) {
-      await AsyncStorage.setItem('last_known_gps_position', JSON.stringify({
+      await saveLastRoleGpsCoords('customer', {
         latitude: addr.latitude,
         longitude: addr.longitude,
         timestamp: Date.now(),
-      }));
+      }, custId);
     }
-    await saveAddressToStorage(addr);
+    await saveAddressToStorage(taggedAddr);
   } catch (e) {}
 };
 
@@ -673,7 +815,7 @@ export const setActiveDeliveryAddress = async (addr: DeliveryAddress): Promise<v
 };
 
 /**
- * Get permanent locked restaurant / store location
+ * Get permanent locked restaurant / store location (owner-validated)
  */
 export const getPermanentStoreLocation = async (): Promise<{
   address: string;
@@ -685,18 +827,23 @@ export const getPermanentStoreLocation = async (): Promise<{
   businessLongitude?: number;
   businessAddress?: string;
 } | null> => {
+  const suppId = await getRoleSessionUserId('supplierUser');
   if (_memoryStoreLocation && (_memoryStoreLocation.address || _memoryStoreLocation.fullAddress)) {
-    return _memoryStoreLocation;
+    if (!suppId || !_memoryStoreLocation.ownerUserId || String(_memoryStoreLocation.ownerUserId) === suppId) {
+      return _memoryStoreLocation;
+    }
+    _memoryStoreLocation = null;
   }
   try {
     const raw = await AsyncStorage.getItem(STORAGE_KEY_PERMANENT_STORE);
     if (raw) {
       const parsed = JSON.parse(raw);
-      if (parsed && (parsed.address || parsed.fullAddress)) {
+      if (parsed && (parsed.address || parsed.fullAddress) && (!suppId || !parsed.ownerUserId || String(parsed.ownerUserId) === suppId)) {
         const pLat = parsed.businessLatitude || parsed.latitude || 0;
         const pLon = parsed.businessLongitude || parsed.longitude || 0;
         const pAddr = parsed.businessAddress || parsed.fullAddress || parsed.address;
         const result = {
+          ownerUserId: parsed.ownerUserId || suppId || undefined,
           address: pAddr,
           fullAddress: pAddr,
           latitude: pLat,
@@ -718,6 +865,7 @@ export const getPermanentStoreLocation = async (): Promise<{
         const sLat = parsed.businessLatitude || parsed.latitude || parsed.locationCoords?.latitude || 0;
         const sLon = parsed.businessLongitude || parsed.longitude || parsed.locationCoords?.longitude || 0;
         const result = {
+          ownerUserId: suppId || undefined,
           address: suppAddr,
           fullAddress: suppAddr,
           latitude: sLat,
@@ -730,12 +878,6 @@ export const getPermanentStoreLocation = async (): Promise<{
         _memoryStoreLocation = result;
         return result;
       }
-    }
-    const lastLoc = await AsyncStorage.getItem('last_known_resto_location');
-    if (lastLoc) {
-      const result = { address: lastLoc, fullAddress: lastLoc };
-      _memoryStoreLocation = result;
-      return result;
     }
   } catch (e) {}
   return null;
@@ -755,10 +897,12 @@ export const savePermanentStoreLocation = async (data: {
   businessAddress?: string;
 }): Promise<void> => {
   try {
+    const suppId = await getRoleSessionUserId('supplierUser');
     const addr = data.businessAddress || data.fullAddress || data.address;
     const lat = data.businessLatitude || data.latitude || 0;
     const lon = data.businessLongitude || data.longitude || 0;
     const toSave = {
+      ownerUserId: suppId || undefined,
       address: addr,
       fullAddress: addr,
       businessAddress: addr,
@@ -824,20 +968,30 @@ export const deleteAddressFromStorage = async (
  */
 export const syncLiveDeviceLocationInBackground = async (
   role: 'customer' | 'supplier' | 'delivery'
-): Promise<{ success: boolean; coords?: { latitude: number; longitude: number }; address?: string }> => {
+): Promise<{
+  success: boolean;
+  coords?: { latitude: number; longitude: number };
+  address?: string;
+  errorType?: GpsFetchResult['errorType'];
+  message?: string;
+}> => {
   try {
     // 1. Silent Permission Request / Verification
     const granted = await requestLocationPermission();
     if (!granted) {
       console.log(`[BG GPS SYNC] Location permission not granted for ${role}`);
-      return { success: false };
+      return { success: false, errorType: 'PERMISSION_DENIED', message: 'Location permission required.' };
     }
 
     // 2. Fetch fresh device GPS fix
     const res = await fetchCurrentGpsPositionDetailed(false);
     if (!res.success || !res.fix || isDummyCoordinates(res.fix.latitude, res.fix.longitude)) {
-      console.log(`[BG GPS SYNC] No valid GPS fix yet for ${role}`);
-      return { success: false };
+      console.log(`[BG GPS SYNC] No valid GPS fix yet for ${role}`, res.errorType);
+      return {
+        success: false,
+        errorType: res.errorType || 'TIMEOUT',
+        message: res.message || 'Unable to fetch current location. Retry.',
+      };
     }
 
     const { latitude, longitude } = res.fix;
@@ -845,7 +999,10 @@ export const syncLiveDeviceLocationInBackground = async (
 
     // 3. Reverse Geocode to street address
     const geo = await reverseGeocodeCoords(latitude, longitude);
-    const fullAddress = geo?.fullAddress || `Near ${geo?.area || 'Location'}, ${geo?.city || 'Bhopal'}`;
+    const fallbackLabel = [geo?.area, geo?.city].filter(Boolean).join(', ');
+    const fullAddress =
+      geo?.fullAddress ||
+      (fallbackLabel ? fallbackLabel : `Location (${latitude.toFixed(4)}, ${longitude.toFixed(4)})`);
 
     // 4. Role-specific persistent lock & backend synchronization
     if (role === 'customer') {
@@ -854,7 +1011,7 @@ export const syncLiveDeviceLocationInBackground = async (
         tag: 'Home',
         houseNo: geo?.area || 'Current Location',
         landmark: fullAddress,
-        city: geo?.city || 'Bhopal',
+        city: geo?.city || '',
         pincode: geo?.pincode || '',
         fullAddress,
         latitude,
@@ -864,13 +1021,15 @@ export const syncLiveDeviceLocationInBackground = async (
       await savePermanentCustomerAddress(autoAddr);
       await setActiveDeliveryAddress(autoAddr);
 
-      // Background update customer user in MongoDB if logged in
-      const uStr = await AsyncStorage.getItem('userData');
+      // Background update ONLY authenticated customer in MongoDB (never shared userData)
+      const activeRole = await AsyncStorage.getItem('activeRole');
+      const uStr = activeRole === 'CUSTOMER' ? await AsyncStorage.getItem('customerUser') : null;
       if (uStr) {
         try {
           const u = JSON.parse(uStr);
           const uId = u?._id || u?.id;
-          if (uId) {
+          const uRole = String(u?.role || 'customer').toLowerCase();
+          if (uId && ['customer', 'user'].includes(uRole)) {
             api.put(`/users/${uId}`, {
               location: fullAddress,
               fullAddress,
@@ -895,16 +1054,18 @@ export const syncLiveDeviceLocationInBackground = async (
         longitude,
         businessLatitude: latitude,
         businessLongitude: longitude,
-        city: geo?.city || 'Bhopal',
+        city: geo?.city || '',
       });
 
-      // Background update supplier in MongoDB if logged in
-      const suppStr = (await AsyncStorage.getItem('supplierUser')) || (await AsyncStorage.getItem('userData'));
+      // Background update ONLY authenticated supplier in MongoDB (never shared userData)
+      const activeRole = await AsyncStorage.getItem('activeRole');
+      const suppStr = activeRole === 'SUPPLIER' ? await AsyncStorage.getItem('supplierUser') : null;
       if (suppStr) {
         try {
           const supp = JSON.parse(suppStr);
-          const sId = supp?._id || supp?.id || supp?.partnerId;
-          if (sId) {
+          const sId = supp?._id || supp?.id;
+          const sRole = String(supp?.role || '').toLowerCase();
+          if (sId && ['supplier', 'seller_partner', 'restaurant'].includes(sRole)) {
             api.put(`/profile/${sId}`, {
               location: fullAddress,
               businessAddress: fullAddress,
@@ -926,15 +1087,17 @@ export const syncLiveDeviceLocationInBackground = async (
       }
     } else if (role === 'delivery') {
       await AsyncStorage.setItem('last_known_rider_location', fullAddress);
-      await AsyncStorage.setItem('last_rider_gps_coords', JSON.stringify({ latitude, longitude }));
+      await saveLastRoleGpsCoords('delivery', res.fix);
 
-      // Background update rider in MongoDB if logged in
-      const delivStr = (await AsyncStorage.getItem('deliveryUser')) || (await AsyncStorage.getItem('userData'));
+      // Background update ONLY authenticated rider in MongoDB (never shared userData)
+      const activeRole = await AsyncStorage.getItem('activeRole');
+      const delivStr = activeRole === 'DELIVERY' ? await AsyncStorage.getItem('deliveryUser') : null;
       if (delivStr) {
         try {
           const deliv = JSON.parse(delivStr);
           const rId = deliv?._id || deliv?.id;
-          if (rId) {
+          const rRole = String(deliv?.role || '').toLowerCase();
+          if (rId && ['rider', 'delivery_partner', 'provider', 'delivery'].includes(rRole)) {
             api.put(`/users/${rId}`, {
               location: fullAddress,
               latitude,
@@ -959,6 +1122,6 @@ export const syncLiveDeviceLocationInBackground = async (
     };
   } catch (err) {
     console.log(`[BG GPS SYNC ERROR ${role}]`, err);
-    return { success: false };
+    return { success: false, errorType: 'UNKNOWN', message: 'Unable to fetch current location. Retry.' };
   }
 };

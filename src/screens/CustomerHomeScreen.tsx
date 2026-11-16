@@ -71,6 +71,10 @@ import {
   normalizeCategory,
 } from '../utils/categoryHelper';
 
+import FastStorage from '../services/FastStorage';
+import { CategoryListSkeleton, BannerSkeleton } from '../components/ShimmerSkeleton';
+import CachedImage, { prefetchImages } from '../components/CachedImage';
+
 const toranGarlandLottie = require('../banner/toran_garland.json');
 const shoppingLottieJson = require('../banner/SingleShoppingGirl.json');
 const shoppingBagLottieJson = require('../banner/Shopping bag.json');
@@ -141,9 +145,9 @@ const calculateDistanceKm = (lat1: number, lon1: number, lat2: number, lon2: num
   const a =
     Math.sin(dLat / 2) * Math.sin(dLat / 2) +
     Math.cos((lat1 * Math.PI) / 180) *
-      Math.cos((lat2 * Math.PI) / 180) *
-      Math.sin(dLon / 2) *
-      Math.sin(dLon / 2);
+    Math.cos((lat2 * Math.PI) / 180) *
+    Math.sin(dLon / 2) *
+    Math.sin(dLon / 2);
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return Math.round(R * c * 10) / 10;
 };
@@ -201,10 +205,9 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
   const { user } = useAuth();
   const { isDark, currentColors } = useTheme('customer');
 
-  const [currentAddress, setCurrentAddress] = useState<string>('Detecting location...');
+  const [currentAddress, setCurrentAddress] = useState<string>('Locating your position...');
   const [customerCoords, setCustomerCoords] = useState<{ latitude: number; longitude: number } | null>(null);
-  const [isOutOfZone, setIsOutOfZone] = useState<boolean>(false);
-  const [zoneCheckMessage, setZoneCheckMessage] = useState<string>('');
+  const [gpsErrorState, setGpsErrorState] = useState<'locating' | 'ready' | 'permission_denied' | 'gps_unavailable' | 'fetch_failed'>('locating');
   const [showMapLocationModal, setShowMapLocationModal] = useState<boolean>(false);
   const [showLocationRequiredModal, setShowLocationRequiredModal] = useState<boolean>(false);
 
@@ -217,9 +220,8 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
     setCustomerCoords(coords);
     setCurrentAddress(fullAddress);
     setLocationPermissionGranted(true);
+    setGpsErrorState('ready');
     setShowLocationRequiredModal(false);
-    setIsOutOfZone(false);
-    setZoneCheckMessage('');
     fetchOnlineRestaurants(true, coords);
     savePermanentCustomerAddress({
       id: `addr_map_${Date.now()}`,
@@ -230,44 +232,17 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
       houseNo: '',
       landmark: '',
       pincode: '',
-      city: 'Bhopal',
-    }).catch(() => {});
+      city: '',
+    }).catch(() => { });
   };
-
-  // Real-time Service Zone Verification for Customer GPS
-  useEffect(() => {
-    if (!customerCoords?.latitude || !customerCoords?.longitude || (customerCoords.latitude === 0 && customerCoords.longitude === 0)) return;
-    let isMounted = true;
-    const verifyZone = async () => {
-      try {
-        const res = await api.post('/zones/check-customer-serviceable', {
-          latitude: customerCoords.latitude,
-          longitude: customerCoords.longitude,
-        });
-        if (isMounted) {
-          if (res.data && res.data.serviceable === false && !res.data.pendingLocation) {
-            setIsOutOfZone(true);
-            setZoneCheckMessage(res.data.message || 'This service is not available in your location.');
-          } else {
-            setIsOutOfZone(false);
-            setZoneCheckMessage('');
-          }
-        }
-      } catch (e: any) {
-        console.warn('[CUSTOMER ZONE CHECK NOTICE]', e?.message);
-        if (isMounted) {
-          setIsOutOfZone(false);
-        }
-      }
-    };
-    verifyZone();
-    return () => { isMounted = false; };
-  }, [customerCoords?.latitude, customerCoords?.longitude]);
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [showSearchModal, setShowSearchModal] = useState<boolean>(false);
   const [showVoiceModal, setShowVoiceModal] = useState<boolean>(false);
   const [selectedCat, setSelectedCat] = useState<string>('all');
-  const [categories, setCategories] = useState<any[]>(DEFAULT_INITIAL_CATEGORIES);
+  const [categories, setCategories] = useState<any[]>(() => {
+    const cached = FastStorage.getItemSync<any[]>('@cached_customer_categories');
+    return Array.isArray(cached) && cached.length > 0 ? cached : DEFAULT_INITIAL_CATEGORIES;
+  });
   const [cartCount, setCartCount] = useState<number>(CartService.getCartCount());
   const [cartState, setCartState] = useState<any>(CartService.getCart());
   const [activeTab, setActiveTab] = useState<'home' | 'search' | 'orders' | 'profile'>('home');
@@ -384,7 +359,10 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
   const [bannerIndex, setBannerIndex] = useState(0);
 
   // Dynamic Admin-Uploaded Customer Hero Posters (6-Second Auto Slide)
-  const [customerBanners, setCustomerBanners] = useState<any[]>([]);
+  const [customerBanners, setCustomerBanners] = useState<any[]>(() => {
+    const cached = FastStorage.getItemSync<any[]>('@cached_customer_banners');
+    return Array.isArray(cached) && cached.length > 0 ? cached : [];
+  });
   const [failedBannerIds, setFailedBannerIds] = useState<{ [key: string]: boolean }>({});
   const [heroActiveIndex, setHeroActiveIndex] = useState<number>(0);
   const heroScrollRef = useRef<ScrollView>(null);
@@ -451,9 +429,13 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
       setCustomerBanners(bannersList);
       setFailedBannerIds({});
       if (Array.isArray(bannersList) && bannersList.length > 0) {
-        AsyncStorage.setItem('@cached_customer_banners', JSON.stringify(bannersList)).catch(() => {});
+        FastStorage.setItem('@cached_customer_banners', bannersList, 30 * 60 * 1000);
+        AsyncStorage.setItem('@cached_customer_banners', JSON.stringify(bannersList)).catch(() => { });
+        const bUrls = bannersList.map((b: any) => resolveBannerUrl(b.imageUrl)).filter(Boolean);
+        prefetchImages(bUrls);
       } else {
-        AsyncStorage.removeItem('@cached_customer_banners').catch(() => {});
+        FastStorage.removeItem('@cached_customer_banners');
+        AsyncStorage.removeItem('@cached_customer_banners').catch(() => { });
       }
     } catch (e) {
       console.log('[CustomerHome] Error fetching banners:', e);
@@ -472,7 +454,7 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
           }
         }
       }
-    } catch (e) {}
+    } catch (e) { }
   }, []);
 
   useEffect(() => {
@@ -497,7 +479,7 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
             const exists = prev.some((x) => String(x._id || x.id) === String(b._id || b.id));
             if (exists) return prev;
             const next = [b, ...prev];
-            AsyncStorage.setItem('@cached_customer_banners', JSON.stringify(next)).catch(() => {});
+            AsyncStorage.setItem('@cached_customer_banners', JSON.stringify(next)).catch(() => { });
             return next;
           });
         }
@@ -512,9 +494,9 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
         setCustomerBanners((prev) => {
           const next = prev.filter((b) => String(b._id || b.id) !== delId);
           if (next.length === 0) {
-            AsyncStorage.removeItem('@cached_customer_banners').catch(() => {});
+            AsyncStorage.removeItem('@cached_customer_banners').catch(() => { });
           } else {
-            AsyncStorage.setItem('@cached_customer_banners', JSON.stringify(next)).catch(() => {});
+            AsyncStorage.setItem('@cached_customer_banners', JSON.stringify(next)).catch(() => { });
           }
           return next;
         });
@@ -809,17 +791,21 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
       setLocationPermissionGranted(granted);
       if (granted) {
         const res = await fetchCurrentGpsPositionDetailed(false);
-        if (res.success && res.fix) {
+        if (res.success && res.fix && !isDummyCoordinates(res.fix.latitude, res.fix.longitude)) {
           setShowLocationRequiredModal(false);
           const gps = res.fix;
           setCustomerCoords({ latitude: gps.latitude, longitude: gps.longitude });
+          setGpsErrorState('ready');
           await checkLiveWeather(gps.latitude, gps.longitude);
+          fetchOnlineRestaurants(false, { latitude: gps.latitude, longitude: gps.longitude });
           const geo = await reverseGeocodeCoords(gps.latitude, gps.longitude);
           if (geo?.fullAddress) setCurrentAddress(geo.fullAddress);
         } else {
+          setGpsErrorState(res.errorType === 'LOCATION_OFF' ? 'gps_unavailable' : 'fetch_failed');
           setWeatherError('Weather unavailable');
         }
       } else {
+        setGpsErrorState('permission_denied');
         setWeatherData(null);
         setIsRaining(false);
       }
@@ -835,10 +821,16 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
     try {
       const res = await api.get('/categories');
       if (res.data?.success && Array.isArray(res.data.categories)) {
-        const active = res.data.categories.filter((c: any) => c.isActive !== false);
+        // Strict: ONLY show categories that have a valid uploaded image (no dummy categories without images)
+        const active = res.data.categories.filter((c: any) =>
+          c.isActive !== false &&
+          c.image &&
+          typeof c.image === 'string' &&
+          c.image.trim() !== ''
+        );
         if (active.length === 0) {
           setCategories([]);
-          AsyncStorage.removeItem('@cached_customer_categories').catch(() => {});
+          AsyncStorage.removeItem('@cached_customer_categories').catch(() => { });
           return;
         }
         const dynamicList = [
@@ -855,10 +847,26 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
           })),
         ];
         setCategories(dynamicList);
-        AsyncStorage.setItem('@cached_customer_categories', JSON.stringify(dynamicList)).catch(() => {});
+        FastStorage.setItem('@cached_customer_categories', dynamicList, 60 * 60 * 1000);
+        AsyncStorage.setItem('@cached_customer_categories', JSON.stringify(dynamicList)).catch(() => { });
+
+        // Pre-warm subcategories in FastStorage for 0ms navigation lag across all categories
+        dynamicList.forEach((c: any) => {
+          if (!c.isAll && c.id) {
+            if (Array.isArray(c.subcategories) && c.subcategories.length > 0) {
+              FastStorage.setItem('@cached_subcats_' + c.id, c.subcategories, 60 * 60 * 1000);
+              FastStorage.setItem('@cached_subcats_' + c.name.toLowerCase(), c.subcategories, 60 * 60 * 1000);
+            }
+          }
+        });
+
+        // Prefetch category icons
+        const catImages = dynamicList.map((c: any) => resolveCategoryImageUrl(c.image)).filter(Boolean);
+        prefetchImages(catImages);
       } else {
         setCategories([]);
-        AsyncStorage.removeItem('@cached_customer_categories').catch(() => {});
+        FastStorage.removeItem('@cached_customer_categories');
+        AsyncStorage.removeItem('@cached_customer_categories').catch(() => { });
       }
     } catch (err) {
       console.log('[CustomerHomeScreen] Category fetch notice:', err);
@@ -928,11 +936,11 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
       try {
         // ⚡ ZOMATO / SWIGGY STEP 1: Instant 0ms Permanent Address Cache Restoration
         const savedPerm = await getPermanentCustomerAddress();
-        if (savedPerm && (savedPerm.fullAddress || savedPerm.latitude)) {
-          const initAddr = savedPerm.fullAddress || 'Bhopal, Madhya Pradesh';
+        if (savedPerm && savedPerm.latitude && savedPerm.longitude && !isDummyCoordinates(savedPerm.latitude, savedPerm.longitude)) {
+          const initAddr = savedPerm.fullAddress || 'Selected Delivery Location';
           const initCoords = {
-            latitude: savedPerm.latitude || 23.2505,
-            longitude: savedPerm.longitude || 77.4065,
+            latitude: savedPerm.latitude,
+            longitude: savedPerm.longitude,
           };
           setCurrentAddress(initAddr);
           setCustomerCoords(initCoords);
@@ -940,36 +948,31 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
           fetchOnlineRestaurants(false, initCoords);
           checkLiveWeather(initCoords.latitude, initCoords.longitude);
         } else {
-          // Graceful Bhopal default so home screen is never blank or stuck
-          const defaultCoords = { latitude: 23.2505, longitude: 77.4065 };
-          setCurrentAddress('Bhopal, Madhya Pradesh');
-          setCustomerCoords(defaultCoords);
-          setShowLocationRequiredModal(false);
-          fetchOnlineRestaurants(false, defaultCoords);
+          // Honest GPS locating state - ZERO fake coordinates
+          setCurrentAddress('Locating your position...');
+          setGpsErrorState('locating');
+          setCustomerCoords(null);
+          fetchOnlineRestaurants(false);
         }
 
-        // ⚡ ZOMATO / SWIGGY STEP 2: Silent Background GPS Detection (0 Popups, 0 User Friction)
+        // Silent Background GPS Detection
         const bgSync = await syncLiveDeviceLocationInBackground('customer');
         if (bgSync.success && bgSync.coords && bgSync.address) {
           setShowLocationRequiredModal(false);
           setLocationPermissionGranted(true);
+          setGpsErrorState('ready');
           setCustomerCoords(bgSync.coords);
           setCurrentAddress(bgSync.address);
           checkLiveWeather(bgSync.coords.latitude, bgSync.coords.longitude);
           fetchOnlineRestaurants(false, bgSync.coords);
-          try {
-            const res = await api.post('/zones/check-customer-serviceable', bgSync.coords);
-            if (res.data && res.data.serviceable === false && !res.data.pendingLocation) {
-              setIsOutOfZone(true);
-              setZoneCheckMessage(res.data.message || 'This service is not available in your location.');
-            } else {
-              setIsOutOfZone(false);
-              setZoneCheckMessage('');
-            }
-          } catch (e) {
-            setIsOutOfZone(false);
-          }
           return;
+        } else if (bgSync.errorType === 'PERMISSION_DENIED') {
+          setGpsErrorState('permission_denied');
+          setLocationPermissionGranted(false);
+        } else if (bgSync.errorType === 'LOCATION_OFF') {
+          setGpsErrorState('gps_unavailable');
+        } else if (bgSync.errorType) {
+          setGpsErrorState('fetch_failed');
         }
 
         const hasPermission = await checkLocationPermission();
@@ -978,11 +981,12 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
         // Hardware GPS Lock if permission already granted
         if (hasPermission) {
           const gpsRes = await fetchCurrentGpsPositionDetailed(false);
-          if (gpsRes.success && gpsRes.fix) {
+          if (gpsRes.success && gpsRes.fix && !isDummyCoordinates(gpsRes.fix.latitude, gpsRes.fix.longitude)) {
             setShowLocationRequiredModal(false);
             const gps = gpsRes.fix;
             const coords = { latitude: gps.latitude, longitude: gps.longitude };
             setCustomerCoords(coords);
+            setGpsErrorState('ready');
             checkLiveWeather(gps.latitude, gps.longitude);
             fetchOnlineRestaurants(false, coords);
             const geo = await reverseGeocodeCoords(gps.latitude, gps.longitude);
@@ -993,7 +997,7 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
               tag: 'Home',
               houseNo: geo?.area || 'Current Location',
               landmark: full,
-              city: geo?.city || 'Bhopal',
+              city: geo?.city || '',
               pincode: geo?.pincode || '',
               fullAddress: full,
               latitude: gps.latitude,
@@ -1002,20 +1006,17 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
             };
             await savePermanentCustomerAddress(autoAddr);
             await setActiveDeliveryAddress(autoAddr);
-
-            try {
-              const res = await api.post('/zones/check-customer-serviceable', coords);
-              if (res.data && res.data.serviceable === false && !res.data.pendingLocation) {
-                setIsOutOfZone(true);
-                setZoneCheckMessage(res.data.message || 'This service is not available in your location.');
-              } else {
-                setIsOutOfZone(false);
-                setZoneCheckMessage('');
-              }
-            } catch (e) {
-              setIsOutOfZone(false);
-            }
+          } else {
+            setGpsErrorState(
+              gpsRes.errorType === 'PERMISSION_DENIED'
+                ? 'permission_denied'
+                : gpsRes.errorType === 'LOCATION_OFF'
+                  ? 'gps_unavailable'
+                  : 'fetch_failed'
+            );
           }
+        } else {
+          setGpsErrorState('permission_denied');
         }
       } catch (e) {
         console.log('[INIT GPS & WEATHER NOTICE]', e);
@@ -1024,7 +1025,7 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
 
     // 1. Preload & Instant cache restoration (0ms)
     loadCachedData();
-    restaurantDataService.preload().catch(() => {});
+    restaurantDataService.preload().catch(() => { });
     // 2. Fetch dynamic categories & online stores in background
     fetchDynamicCategories();
     fetchOnlineRestaurants();
@@ -1063,7 +1064,7 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
           latitude: lat,
           longitude: lon,
         };
-        savePermanentCustomerAddress(userSavedAddr).catch(() => {});
+        savePermanentCustomerAddress(userSavedAddr).catch(() => { });
       } else {
         const cachedAddr = await AsyncStorage.getItem('last_known_customer_address');
         if (cachedAddr) setCurrentAddress(cachedAddr);
@@ -1077,7 +1078,7 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
           if (Array.isArray(parsed) && parsed.length > 0) {
             setCategories(parsed);
           }
-        } catch (e) {}
+        } catch (e) { }
       }
 
       // Restore cached banners instantly for instant loading
@@ -1088,7 +1089,7 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
           if (Array.isArray(parsedBanners) && parsedBanners.length > 0) {
             setCustomerBanners(parsedBanners);
           }
-        } catch (e) {}
+        } catch (e) { }
       }
 
       const diskData = await restaurantDataService.loadFromDisk();
@@ -1097,7 +1098,7 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
         setPopularDishes(diskData.dishes);
         setLoadingRestaurants(false);
       }
-    } catch (e) {}
+    } catch (e) { }
   };
 
   // Silently re-compute distance in memory when GPS updates, ZERO network reloads
@@ -1133,21 +1134,10 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
     if (addr.latitude && addr.longitude) {
       const coords = { latitude: addr.latitude, longitude: addr.longitude };
       setCustomerCoords(coords);
+      setGpsErrorState('ready');
       checkLiveWeather(addr.latitude, addr.longitude);
-      try {
-        const res = await api.post('/zones/check-customer-serviceable', coords);
-        if (res.data && res.data.serviceable === false && !res.data.pendingLocation) {
-          setIsOutOfZone(true);
-          setZoneCheckMessage(res.data.message || 'This service is not available in your location.');
-        } else {
-          setIsOutOfZone(false);
-          setZoneCheckMessage('');
-          fetchDynamicCategories();
-          fetchOnlineRestaurants(true);
-        }
-      } catch (e) {
-        setIsOutOfZone(false);
-      }
+      fetchDynamicCategories();
+      fetchOnlineRestaurants(true);
     }
     // Permanently lock in local device storage
     await savePermanentCustomerAddress(addr);
@@ -1223,7 +1213,7 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
             cancellationReason: chosenReason,
           });
           backendResult = res2.data;
-        } catch (_) {}
+        } catch (_) { }
       }
 
       // 3. Purge storage & cart completely
@@ -1234,8 +1224,8 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
         'active_booking_id',
         'active_ride_id',
         'active_order_id',
-      ]).catch(() => {});
-      await CartService.clearCart().catch(() => {});
+      ]).catch(() => { });
+      await CartService.clearCart().catch(() => { });
 
       setActiveFoodOrder(null);
       setCartCount(0);
@@ -1288,8 +1278,8 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
         'active_booking_id',
         'active_ride_id',
         'active_order_id',
-      ]).catch(() => {});
-      CartService.clearCart().catch(() => {});
+      ]).catch(() => { });
+      CartService.clearCart().catch(() => { });
       setCartCount(0);
       setCartState(CartService.getCart());
     }
@@ -1317,7 +1307,7 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
           'active_booking_id',
           'active_ride_id',
           'active_order_id',
-        ]).catch(() => {});
+        ]).catch(() => { });
         setActiveFoodOrder(null);
         return;
       }
@@ -1348,10 +1338,10 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
               'active_booking_id',
               'active_ride_id',
               'active_order_id',
-            ]).catch(() => {});
+            ]).catch(() => { });
             setActiveFoodOrder(null);
           }
-        } catch (_) {}
+        } catch (_) { }
       }
 
       if (savedId && !cancelledOrdersRef.current.has(String(savedId))) {
@@ -1375,7 +1365,7 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
                 'active_booking_id',
                 'active_ride_id',
                 'active_order_id',
-              ]).catch(() => {});
+              ]).catch(() => { });
               setActiveFoodOrder(null);
               return;
             }
@@ -1399,15 +1389,15 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
                 'active_booking_id',
                 'active_ride_id',
                 'active_order_id',
-              ]).catch(() => {});
-              CartService.clearCart().catch(() => {});
+              ]).catch(() => { });
+              CartService.clearCart().catch(() => { });
               setCartCount(0);
               setCartState(CartService.getCart());
               order = null;
               setActiveFoodOrder(null);
             } else {
               order = b;
-              AsyncStorage.setItem('active_food_order_data', JSON.stringify(b)).catch(() => {});
+              AsyncStorage.setItem('active_food_order_data', JSON.stringify(b)).catch(() => { });
             }
           } else {
             AsyncStorage.multiRemove([
@@ -1417,7 +1407,7 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
               'active_booking_id',
               'active_ride_id',
               'active_order_id',
-            ]).catch(() => {});
+            ]).catch(() => { });
             setActiveFoodOrder(null);
           }
         } catch (e) {
@@ -1444,9 +1434,9 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
             ) {
               order = actB;
               if (actId) {
-                AsyncStorage.setItem('active_food_booking_id', actId).catch(() => {});
+                AsyncStorage.setItem('active_food_booking_id', actId).catch(() => { });
               }
-              AsyncStorage.setItem('active_food_order_data', JSON.stringify(actB)).catch(() => {});
+              AsyncStorage.setItem('active_food_order_data', JSON.stringify(actB)).catch(() => { });
             }
           }
 
@@ -1472,41 +1462,29 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
                 order = activeOne;
                 const realId = String(activeOne.bookingId || activeOne.rideId || activeOne._id || '');
                 if (realId) {
-                  AsyncStorage.setItem('active_food_booking_id', realId).catch(() => {});
+                  AsyncStorage.setItem('active_food_booking_id', realId).catch(() => { });
                 }
-                AsyncStorage.setItem('active_food_order_data', JSON.stringify(activeOne)).catch(() => {});
+                AsyncStorage.setItem('active_food_order_data', JSON.stringify(activeOne)).catch(() => { });
               }
             }
           }
-        } catch (e) {}
+        } catch (e) { }
       }
 
-      const activeStatuses = [
-        'BOOKING_REQUESTED',
-        'PENDING',
-        'PENDING_RESTAURANT',
-        'RINGING',
-        'RESTAURANT_ACCEPTED',
-        'PREPARING',
-        'FOOD_PREPARING',
-        'FOOD_READY',
-        'READY_FOR_PICKUP',
-        'READY',
-        'SEARCHING_FOR_RIDER',
-        'OUT_FOR_DELIVERY',
-        'ON_THE_WAY',
-        'PICKED_UP',
-        'ACCEPTED',
-        'PROVIDER_ASSIGNED',
-        'PROVIDER_ACCEPTED',
-        'PROVIDER_ON_THE_WAY',
-        'PROVIDER_ARRIVED',
-        'STARTED',
-        'SERVICE_STARTED',
-      ];
-
       const checkId = String(order?.bookingId || order?.rideId || order?._id || '');
-      if (order && !cancelledOrdersRef.current.has(checkId) && activeStatuses.includes((order.status || '').toUpperCase())) {
+      const stUpper = (order?.status || '').toUpperCase();
+      const isTerminated =
+        stUpper.includes('CANCEL') ||
+        stUpper === 'COMPLETED' ||
+        stUpper === 'DELIVERED' ||
+        stUpper === 'SERVICE_COMPLETED' ||
+        stUpper === 'RESTAURANT_DECLINED' ||
+        stUpper === 'NO_RESPONSE' ||
+        stUpper === 'TIMEOUT' ||
+        stUpper === 'REJECTED' ||
+        stUpper === 'EXPIRED';
+
+      if (order && !cancelledOrdersRef.current.has(checkId) && !isTerminated) {
         setActiveFoodOrder(order);
         setDeliveredOrderToReview(null);
       } else {
@@ -1526,7 +1504,7 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
               });
               setDeliveredOrderToReview(unreviewed || null);
             }
-          } catch (_) {}
+          } catch (_) { }
         }
       }
     } catch (e) {
@@ -1583,33 +1561,19 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
           'active_booking_id',
           'active_ride_id',
           'active_order_id',
-        ]).catch(() => {});
-        CartService.clearCart().catch(() => {});
+        ]).catch(() => { });
+        CartService.clearCart().catch(() => { });
         setCartCount(0);
         setCartState(CartService.getCart());
-      } else if (
-        st === 'PREPARING' ||
-        st === 'RESTAURANT_ACCEPTED' ||
-        st === 'FOOD_PREPARING' ||
-        st === 'FOOD_READY' ||
-        st === 'READY' ||
-        st === 'READY_FOR_PICKUP' ||
-        st === 'OUT_FOR_DELIVERY' ||
-        st === 'ON_THE_WAY' ||
-        st === 'PICKED_UP'
-      ) {
-        if (!cancelledOrdersRef.current.has(bId)) {
-          const normalizedStatus = (st === 'RESTAURANT_ACCEPTED' || st === 'FOOD_PREPARING')
-            ? 'PREPARING'
-            : (st === 'READY_FOR_PICKUP' ? 'FOOD_READY' : st);
-          setActiveFoodOrder((prev: any) => ({
-            ...(prev || {}),
-            ...(data?.booking || data || {}),
-            status: normalizedStatus,
-          }));
-        }
-      } else {
-        checkActiveFoodOrder();
+      } else if (!cancelledOrdersRef.current.has(bId)) {
+        const normalizedStatus = (st === 'RESTAURANT_ACCEPTED' || st === 'FOOD_PREPARING')
+          ? 'PREPARING'
+          : (st === 'READY_FOR_PICKUP' ? 'FOOD_READY' : st);
+        setActiveFoodOrder((prev: any) => ({
+          ...(prev || {}),
+          ...(data?.booking || data || {}),
+          status: normalizedStatus,
+        }));
       }
     };
 
@@ -1631,8 +1595,8 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
         'active_booking_id',
         'active_ride_id',
         'active_order_id',
-      ]).catch(() => {});
-      CartService.clearCart().catch(() => {});
+      ]).catch(() => { });
+      CartService.clearCart().catch(() => { });
       setCartCount(0);
       setCartState(CartService.getCart());
 
@@ -1754,27 +1718,80 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
     };
 
     const handleRestoUpdate = (data: any) => {
-      console.log('📢 [CUSTOMER HOME] Real-time RESTAURANT_UPDATED received:', data);
-      const targetId = String(data?.restaurantId || data?.userId || data?.id || data?.user?._id || '');
+      // Strictly ignore events from non-supplier accounts (e.g. Customer or Rider updates)
+      const evRole = String(data?.role || data?.user?.role || '').toLowerCase();
+      if (evRole && !['supplier', 'seller_partner', 'restaurant'].includes(evRole)) {
+        return;
+      }
+      console.log('📢 [CUSTOMER HOME] Real-time supplier/restaurant update received:', data);
+      const targetId = String(
+        data?.restaurantId || data?.supplierId || data?.userId || data?.id || data?.user?._id || data?.user?.id || ''
+      );
       if (!targetId) return;
 
       const updatedUser = data?.user || {};
-      const newName = (data?.name || updatedUser.name || data?.restaurantName || '').trim();
-      const newCategory = data?.categoryName || updatedUser.categoryName;
+      const newName = (data?.name || updatedUser.name || data?.restaurantName || updatedUser.restaurantName || '').trim();
+      const newCategory = data?.categoryName || updatedUser.categoryName || data?.businessCategoryName || updatedUser.businessCategoryName;
       const newOnline = data?.isOnline !== undefined
         ? Boolean(data.isOnline)
         : (data?.restaurant_status !== undefined ? data.restaurant_status === 'online' : undefined);
 
-      const newAddr = String(data?.fullAddress || data?.address || data?.location || updatedUser?.fullAddress || updatedUser?.address || updatedUser?.location || '').trim();
+      const newAddr = String(
+        data?.fullAddress || data?.address || data?.location ||
+        updatedUser?.fullAddress || updatedUser?.address || updatedUser?.location || ''
+      ).trim();
       const newLat = Number(data?.latitude || updatedUser?.latitude || (updatedUser?.locationCoords && updatedUser.locationCoords.latitude) || 0);
       const newLon = Number(data?.longitude || updatedUser?.longitude || (updatedUser?.locationCoords && updatedUser.locationCoords.longitude) || 0);
+      const newAppStatus = (data?.approvalStatus || updatedUser?.approvalStatus || data?.user?.approvalStatus || '').toUpperCase();
+      const newPhotos = data?.photos || updatedUser?.photos || [];
+      const newProfilePic = data?.profilePicture || updatedUser?.profilePicture || '';
+
+      // Invalidate cache immediately on store state update
+      restaurantDataService.invalidateCache();
 
       setRestaurants((prev) => {
         const exists = prev.some((r) => matchesRestaurant(r, targetId));
-        if (!exists && newOnline) {
-          setTimeout(() => fetchOnlineRestaurants(true), 100);
+        if (!exists) {
+          if (newOnline && (newAppStatus === 'APPROVED' || !newAppStatus)) {
+            // New store turned ONLINE! Prepend immediately in 0ms so customer sees it instantly without reload!
+            const newStoreObj: any = {
+              _id: targetId,
+              id: targetId,
+              restaurantId: targetId,
+              name: newName || 'Store Partner',
+              category: newCategory || 'General',
+              categoryName: newCategory || 'General',
+              isOnline: true,
+              restaurant_status: 'online',
+              approvalStatus: newAppStatus || 'APPROVED',
+              photos: newPhotos,
+              profilePicture: newProfilePic,
+              latitude: newLat,
+              longitude: newLon,
+              address: (newAddr && newAddr !== '[object Object]') ? newAddr : 'Store Location',
+              fullAddress: (newAddr && newAddr !== '[object Object]') ? newAddr : 'Store Location',
+              rawUser: { ...updatedUser, _id: targetId, name: newName, isOnline: true, restaurant_status: 'online' },
+            };
+            const canonical = getCanonicalRestaurantLocation(newStoreObj, customerCoords, 'CustomerHome_SocketNewStoreOnline');
+            const readyStore = {
+              ...newStoreObj,
+              latitude: canonical.latitude,
+              longitude: canonical.longitude,
+              address: canonical.address,
+              fullAddress: canonical.address,
+              distanceKm: canonical.distanceKm || 1.2,
+              distanceText: canonical.distanceText,
+              deliveryTime: canonical.deliveryTimeText,
+            };
+            setTimeout(() => {
+              restaurantDataService.invalidateCache();
+              fetchOnlineRestaurants(true);
+            }, 100);
+            return [readyStore, ...prev];
+          }
           return prev;
         }
+
         return prev.map((r) => {
           if (matchesRestaurant(r, targetId)) {
             const finalName = newName || r.name;
@@ -1790,6 +1807,9 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
               categoryName: finalCat,
               isOnline: finalOnline,
               restaurant_status: finalOnline ? 'online' : 'offline',
+              approvalStatus: newAppStatus || r.approvalStatus || 'APPROVED',
+              photos: newPhotos.length ? newPhotos : r.photos,
+              profilePicture: newProfilePic || r.profilePicture,
               latitude: lat,
               longitude: lon,
               address: (newAddr && newAddr !== '[object Object]') ? newAddr : r.fullAddress || r.address || r.location,
@@ -1813,6 +1833,9 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
                 name: finalName,
                 isOnline: finalOnline,
                 restaurant_status: finalOnline ? 'online' : 'offline',
+                approvalStatus: newAppStatus || r.approvalStatus || 'APPROVED',
+                photos: newPhotos.length ? newPhotos : r.rawUser?.photos,
+                profilePicture: newProfilePic || r.rawUser?.profilePicture,
                 latitude: canonical.latitude,
                 longitude: canonical.longitude,
                 address: canonical.address,
@@ -1830,9 +1853,8 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
           restaurantDataService.updateRestaurantNameInCache(targetId, newName);
         }
         setPopularDishes((prev) => {
-          const isSingle = prev.length === 1;
           return prev.map((d) => {
-            if (d.restaurant && (matchesRestaurant(d.restaurant, targetId) || isSingle)) {
+            if (d.restaurant && targetId && matchesRestaurant(d.restaurant, targetId)) {
               return {
                 ...d,
                 restaurant: {
@@ -1850,32 +1872,33 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
     };
 
     const handleRestoName = (data: any) => {
+      const evRole = String(data?.role || data?.user?.role || '').toLowerCase();
+      if (evRole && !['supplier', 'seller_partner', 'restaurant'].includes(evRole)) {
+        return;
+      }
       console.log('📢 [CUSTOMER HOME] Real-time RESTAURANT_NAME_UPDATED received:', data);
-      const targetId = String(data?.restaurantId || data?.userId || data?.id || data?.user?._id || '');
-      const newName = (data?.name || data?.restaurantName || data?.user?.name || '').trim();
+      const targetId = String(data?.restaurantId || data?.supplierId || data?.userId || data?.id || data?.user?._id || '');
+      if (!targetId) return;
+      const newName = (data?.restaurantName || data?.name || data?.user?.restaurantName || data?.user?.name || '').trim();
 
       if (newName) {
-        if (targetId) {
-          restaurantDataService.updateRestaurantNameInCache(targetId, newName);
-        }
+        restaurantDataService.updateRestaurantNameInCache(targetId, newName);
         setRestaurants((prev) => {
           if (!prev.length) return prev;
-          const isSingle = prev.length === 1;
           return prev.map((r) =>
-            matchesRestaurant(r, targetId) || isSingle
+            matchesRestaurant(r, targetId)
               ? {
-                  ...r,
-                  name: newName,
-                  rawUser: { ...(r.rawUser || {}), name: newName },
-                }
+                ...r,
+                name: newName,
+                rawUser: { ...(r.rawUser || {}), name: newName },
+              }
               : r
           );
         });
 
         setPopularDishes((prev) => {
-          const isSingle = prev.length === 1;
           return prev.map((d) => {
-            if (d.restaurant && (matchesRestaurant(d.restaurant, targetId) || isSingle)) {
+            if (d.restaurant && matchesRestaurant(d.restaurant, targetId)) {
               return {
                 ...d,
                 restaurant: {
@@ -1901,18 +1924,18 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
           prev.map((r) =>
             String(r._id) === String(data.restaurantId)
               ? {
-                  ...r,
+                ...r,
+                image: newImg,
+                images: data.photos && data.photos.length > 0 ? data.photos : (newImg ? [newImg] : []),
+                rawUser: {
+                  ...(r.rawUser || {}),
+                  coverImage: newImg,
+                  profilePicture: newImg,
                   image: newImg,
-                  images: data.photos && data.photos.length > 0 ? data.photos : (newImg ? [newImg] : []),
-                  rawUser: {
-                    ...(r.rawUser || {}),
-                    coverImage: newImg,
-                    profilePicture: newImg,
-                    image: newImg,
-                    photos: data.photos || [],
-                    supplierPhotos: data.supplierPhotos || [],
-                  },
-                }
+                  photos: data.photos || [],
+                  supplierPhotos: data.supplierPhotos || [],
+                },
+              }
               : r
           )
         );
@@ -2116,6 +2139,19 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
     socket.on('restaurant_offline', handleRestoUpdate);
     socket.on('restaurant_status_changed', handleRestoUpdate);
     socket.on('supplier_status_changed', handleRestoUpdate);
+    socket.on('SUPPLIER_ONLINE', handleRestoUpdate);
+    socket.on('supplier_online', handleRestoUpdate);
+    socket.on('STORE_ONLINE', handleRestoUpdate);
+    socket.on('SUPPLIER_OFFLINE', handleRestoUpdate);
+    socket.on('supplier_offline', handleRestoUpdate);
+    socket.on('STORE_OFFLINE', handleRestoUpdate);
+    socket.on('NEW_STORE_AVAILABILITY', handleRestoUpdate);
+    socket.on('STORE_WENT_OFFLINE', handleRestoUpdate);
+    socket.on('CUSTOMER_STORE_LIST_UPDATED', handleRestoUpdate);
+    socket.on('STORE_VISIBILITY_UPDATED', handleRestoUpdate);
+    socket.on('store_visibility_updated', handleRestoUpdate);
+    socket.on('SUPPLIER_APPROVED', handleRestoUpdate);
+    socket.on('supplier_approved', handleRestoUpdate);
     socket.on('category_created', handleCategoryChange);
     socket.on('category_updated', handleCategoryChange);
     socket.on('category_enabled', handleCategoryChange);
@@ -2155,6 +2191,19 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
       socket.off('RESTAURANT_IMAGE_UPDATED', handleRestoImage);
       socket.off('MENU_ITEM_CREATED', handleMenuChange);
       socket.off('MENU_ITEM_UPDATED', handleMenuChange);
+      socket.off('SUPPLIER_ONLINE', handleRestoUpdate);
+      socket.off('supplier_online', handleRestoUpdate);
+      socket.off('STORE_ONLINE', handleRestoUpdate);
+      socket.off('SUPPLIER_OFFLINE', handleRestoUpdate);
+      socket.off('supplier_offline', handleRestoUpdate);
+      socket.off('STORE_OFFLINE', handleRestoUpdate);
+      socket.off('NEW_STORE_AVAILABILITY', handleRestoUpdate);
+      socket.off('STORE_WENT_OFFLINE', handleRestoUpdate);
+      socket.off('CUSTOMER_STORE_LIST_UPDATED', handleRestoUpdate);
+      socket.off('STORE_VISIBILITY_UPDATED', handleRestoUpdate);
+      socket.off('store_visibility_updated', handleRestoUpdate);
+      socket.off('SUPPLIER_APPROVED', handleRestoUpdate);
+      socket.off('supplier_approved', handleRestoUpdate);
       socket.off('MENU_ITEM_DELETED', handleMenuChange);
       socket.off('MENU_ITEM_AVAILABILITY_UPDATED', handleMenuChange);
       socket.off('MENU_CATEGORY_UPDATED', handleMenuChange);
@@ -2253,9 +2302,10 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
   const isStoreOnline = (resto: any): boolean => {
     if (!resto) return false;
     const rawOnline = resto.isOnline !== undefined ? resto.isOnline : resto.rawUser?.isOnline;
-    const rawStatus = resto.restaurant_status || resto.rawUser?.restaurant_status || resto.status || resto.rawUser?.status;
+    const rawStatus = (resto.restaurant_status || resto.rawUser?.restaurant_status || resto.status || resto.rawUser?.status || '').toString().toLowerCase();
 
-    if (rawStatus === 'offline' && rawOnline === false) return false;
+    // If marked offline or explicitly false, store is NOT online
+    if (rawOnline === false || rawStatus === 'offline') return false;
 
     return Boolean(
       rawOnline === true ||
@@ -2269,11 +2319,9 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
     );
   };
 
-  // Strict Distance Filter: Customer Selected Location Radius (5.0 KM)
-  const MAX_STORE_DISTANCE_KM = 5.0;
-
-  const isWithin5km = (resto: any): boolean => {
-    if (!customerCoords?.latitude || !customerCoords?.longitude) return false;
+  // Strict 5.0 KM Haversine Radius Check (Requirement 3)
+  const isWithinStoreServiceRadius = (resto: any): boolean => {
+    if (!customerCoords?.latitude || !customerCoords?.longitude) return true;
     const rLat = Number(
       resto.businessLatitude ??
       resto.latitude ??
@@ -2290,31 +2338,53 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
       resto.locationCoords?.longitude ??
       0
     );
-    // Strict requirement: Restaurant coordinates missing or invalid => EXCLUDE
+    // Strict requirement: Store coordinates missing or invalid => EXCLUDE
     if (!rLat || !rLon || rLat === 0 || rLon === 0 || isNaN(rLat) || isNaN(rLon)) {
       return false;
     }
     const dist = calculateHaversineDistanceKm(customerCoords.latitude, customerCoords.longitude, rLat, rLon);
     if (dist === null || isNaN(dist)) return false;
-    return dist <= MAX_STORE_DISTANCE_KM;
+
+    const configuredRadius = Number(
+      resto.serviceRadius ??
+      resto.deliveryRadius ??
+      resto.rawUser?.serviceRadius ??
+      resto.rawUser?.deliveryRadius ??
+      5.0
+    );
+    const maxRadius = (!configuredRadius || isNaN(configuredRadius) || configuredRadius <= 0)
+      ? 5.0
+      : Math.min(configuredRadius, 5.0);
+
+    return dist <= maxRadius;
   };
 
-  // Strict Helper: Check if store is a Registered, Approved, Online Business within 5 KM
+  // Strict Helper: Check all 6 Business Conditions (Requirement 9)
   const isStoreEligibleAndOnline = (r: any): boolean => {
     if (!r) return false;
     if (!isBusinessOnly(r)) return false;
 
+    // 1. Admin approval status MUST be APPROVED
     const appStatus = String(r.approvalStatus || r.rawUser?.approvalStatus || '').toUpperCase();
-    if (appStatus && appStatus !== 'APPROVED') return false;
+    if (appStatus !== 'APPROVED') return false;
 
+    // 2. Store is active
+    if (r.isActive === false || r.rawUser?.isActive === false) return false;
+
+    // 3. Supplier availability is ONLINE
     if (!isStoreOnline(r)) return false;
 
-    // Must be strictly within 5.0 KM of customerCoords
-    if (!isWithin5km(r)) return false;
+    // 4. Store belongs to the customer's eligible service area
+    if (!isWithinStoreServiceRadius(r)) return false;
 
-    const items = Array.isArray(r.menuItems) ? r.menuItems : (Array.isArray(r.rawUser?.menuItems) ? r.rawUser.menuItems : []);
-    if (items.length === 0) return true;
-    return items.some((it: any) => it && it.name && it.isAvailable !== false && it.inStock !== false && it.isActive !== false);
+    // 5. Store has a valid category
+    const cat = String(
+      r.categoryName || r.businessCategoryName || r.category || r.businessType ||
+      r.rawUser?.categoryName || r.rawUser?.businessCategoryName || ''
+    ).trim();
+    if (!cat) return false;
+
+    return true;
   };
 
   // Helper: Verify whether dish/item belongs to Food category ONLY
@@ -2324,29 +2394,26 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
     return cat === 'Food';
   };
 
-  // Filter stores & restaurants: STRICTLY ONLINE ONLY + Business Only + 5KM
+  // Category-Wise Store Display (Requirement 5): Each supplier selects ONE category. No duplication across unrelated categories.
   const filteredRestaurants = useMemo(() => {
     return (restaurants || [])
       .filter((resto) => {
         if (!isStoreEligibleAndOnline(resto)) return false;
         if (filterCatNormalized === 'all') return true;
-        const catIdMatch =
-          resto.businessCategoryId &&
-          (String(resto.businessCategoryId) === String(selectedCat) || String(resto.businessCategoryId).toLowerCase() === filterCatNormalized);
-        const catNameMatch =
-          (resto.businessCategoryName && resto.businessCategoryName.toLowerCase().includes(filterCatNormalized)) ||
-          (resto.categoryName && resto.categoryName.toLowerCase().includes(filterCatNormalized)) ||
-          (resto.businessType && resto.businessType.toLowerCase().includes(filterCatNormalized));
-        const dishMatch = resto.menuItems?.some((item: any) =>
-          item.name?.toLowerCase().includes(filterCatNormalized) ||
-          item.category?.toLowerCase().includes(filterCatNormalized)
+
+        const storeCatId = String(resto.businessCategoryId || resto.categoryId || resto.rawUser?.businessCategoryId || resto.rawUser?.categoryId || '').toLowerCase();
+        const storeCatName = String(resto.businessCategoryName || resto.categoryName || resto.category || resto.businessType || resto.rawUser?.businessCategoryName || resto.rawUser?.categoryName || '').toLowerCase().trim();
+        const activeCatKey = String(selectedCat).toLowerCase().trim();
+
+        const catIdMatch = Boolean(storeCatId && (storeCatId === activeCatKey || storeCatId === filterCatNormalized));
+        const catNameMatch = Boolean(
+          storeCatName &&
+          (storeCatName === filterCatNormalized ||
+            storeCatName === activeCatKey ||
+            storeCatName.includes(filterCatNormalized) ||
+            filterCatNormalized.includes(storeCatName))
         );
-        const featuredMatch = resto.featuredDish?.toLowerCase().includes(filterCatNormalized);
-        const nameMatch =
-          (resto.name && resto.name.toLowerCase().includes(filterCatNormalized)) ||
-          (resto.restaurantName && resto.restaurantName.toLowerCase().includes(filterCatNormalized)) ||
-          (resto.businessName && resto.businessName.toLowerCase().includes(filterCatNormalized));
-        return Boolean(catIdMatch || catNameMatch || dishMatch || featuredMatch || nameMatch);
+        return Boolean(catIdMatch || catNameMatch);
       })
       .sort((a, b) => (a.distanceKm || 99) - (b.distanceKm || 99));
   }, [restaurants, filterCatNormalized, selectedCat, customerCoords?.latitude, customerCoords?.longitude]);
@@ -2375,7 +2442,14 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
 
   // 3. Dynamic Categories derived strictly from active Admin categories in database
   const activeInStockCategories = useMemo(() => {
-    const adminActiveList = (categories || []).filter((c: any) => !c.isAll && c.isActive !== false);
+    // Strict: Real images only (no dummy categories without images)
+    const adminActiveList = (categories || []).filter((c: any) =>
+      !c.isAll &&
+      c.isActive !== false &&
+      c.image &&
+      typeof c.image === 'string' &&
+      c.image.trim() !== ''
+    );
     return adminActiveList.map((c: any) => {
       const catName = String(c.name || '').trim();
       const catNameLower = catName.toLowerCase();
@@ -2813,7 +2887,7 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
         style={[{ flex: 1 }, isDark && { backgroundColor: currentColors.background }]}
         showsVerticalScrollIndicator={false}
         contentContainerStyle={{ paddingBottom: 16, flexGrow: 1 }}
-        stickyHeaderIndices={!isOutOfZone ? [1] : undefined}
+        stickyHeaderIndices={[1]}
         onScroll={handleMainScroll}
         scrollEventThrottle={16}
         removeClippedSubviews={false}
@@ -2825,8 +2899,8 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
         <View style={[styles.topAddressHeaderRow, isDark && { backgroundColor: currentColors.background }]}>
           {/* Deliver to Location Dropdown */}
           <TouchableOpacity style={styles.locationWrapWhite} onPress={() => setShowMapLocationModal(true)} activeOpacity={0.85}>
-            <View style={[styles.locationPinCircle, isOutOfZone && { backgroundColor: "#FBBF24" }]}>
-              <Text style={{ fontSize: 14 }}>{isOutOfZone ? "↗" : "📍"}</Text>
+            <View style={styles.locationPinCircle}>
+              <Text style={{ fontSize: 14 }}>📍</Text>
             </View>
             <View style={{ flex: 1, paddingRight: 4 }}>
               <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
@@ -2839,23 +2913,8 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
                 <Text style={[styles.arrowDownIconWhite, { fontSize: 14 }, isDark && { color: currentColors.mutedText }]}>∨</Text>
               </View>
               <Text style={[styles.locationTextWhite, isDark && { color: currentColors.secondaryText }]} numberOfLines={1}>
-                {currentAddress || "Locating..."}
+                {currentAddress || "Locating your position..."}
               </Text>
-              {isOutOfZone && (
-                <View style={{
-                  paddingHorizontal: 7,
-                  paddingVertical: 2,
-                  borderRadius: 6,
-                  alignSelf: "flex-start",
-                  marginTop: 3,
-                  borderWidth: 1,
-                  borderColor: "#F472B6",
-                }}>
-                  <Text style={{ fontSize: 9.5, color: "#DB2777", fontWeight: "800" }}>
-                    ⤴ Tap here to change your location
-                  </Text>
-                </View>
-              )}
             </View>
           </TouchableOpacity>
 
@@ -2904,122 +2963,51 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
         </View>
 
         {/* CHILD 1: STICKY SEARCH BAR (OPENS DEDICATED SEARCH SCREEN) */}
-        {!isOutOfZone ? (
-          <Animated.View style={[styles.heroSearchStickyContainer, isDark && { backgroundColor: currentColors.background }, { transform: [{ translateY: searchBarShiftAnim }] }]}>
-            <View style={styles.heroSearchRow}>
+        <Animated.View style={[styles.heroSearchStickyContainer, isDark && { backgroundColor: currentColors.background }, { transform: [{ translateY: searchBarShiftAnim }] }]}>
+          <View style={styles.heroSearchRow}>
+            <TouchableOpacity
+              style={[styles.pillSearchWrap, { overflow: 'hidden' }, isDark && { backgroundColor: currentColors.elevatedSurface, borderColor: currentColors.border, borderWidth: 1 }]}
+              activeOpacity={0.88}
+              onPress={() => setShowSearchModal(true)}
+            >
+              {/* Search Icon with clean brand blue color */}
+              <View style={{ width: 20, height: 20, marginRight: 8, justifyContent: 'center', alignItems: 'center' }}>
+                <Icon name="search" size={20} color="#2563EB" />
+              </View>
+
+              <View style={styles.animatedPlaceholderContainer}>
+                <Animated.View
+                  style={{
+                    transform: [{ translateY: searchTranslateYAnim }],
+                    opacity: searchFadeAnim,
+                  }}
+                >
+                  <Text style={[styles.pillPlaceholderText, { color: isDark ? currentColors.mutedText : '#334155', fontWeight: '500' }]}>
+                    {SEARCH_PHRASES[searchPhraseIdx] || 'Search Food, Fashion, Kirana & More...'}
+                  </Text>
+                </Animated.View>
+              </View>
+
               <TouchableOpacity
-                style={[styles.pillSearchWrap, { overflow: 'hidden' }, isDark && { backgroundColor: currentColors.elevatedSurface, borderColor: currentColors.border, borderWidth: 1 }]}
-                activeOpacity={0.88}
+                style={styles.searchMicDividerWrap}
+                activeOpacity={0.7}
                 onPress={() => setShowSearchModal(true)}
               >
-                {/* Search Icon with clean brand blue color */}
-                <View style={{ width: 20, height: 20, marginRight: 8, justifyContent: 'center', alignItems: 'center' }}>
-                  <Icon name="search" size={20} color="#2563EB" />
-                </View>
-
-                <View style={styles.animatedPlaceholderContainer}>
-                  <Animated.View
-                    style={{
-                      transform: [{ translateY: searchTranslateYAnim }],
-                      opacity: searchFadeAnim,
-                    }}
-                  >
-                    <Text style={[styles.pillPlaceholderText, { color: isDark ? currentColors.mutedText : '#334155', fontWeight: '500' }]}>
-                      {SEARCH_PHRASES[searchPhraseIdx] || 'Search Food, Fashion, Kirana & More...'}
-                    </Text>
-                  </Animated.View>
-                </View>
-
-                <TouchableOpacity
-                  style={styles.searchMicDividerWrap}
-                  activeOpacity={0.7}
-                  onPress={() => setShowSearchModal(true)}
-                >
-                  <Text style={[styles.searchDividerPipe, isDark && { color: currentColors.divider }]}>|</Text>
-                  <Icon name="mic" size={17} color="#E11D48" />
-                </TouchableOpacity>
+                <Text style={[styles.searchDividerPipe, isDark && { color: currentColors.divider }]}>|</Text>
+                <Icon name="mic" size={17} color="#E11D48" />
               </TouchableOpacity>
+            </TouchableOpacity>
 
-              <TouchableOpacity
-                style={[styles.heroFilterBtn, { backgroundColor: '#EFF6FF', borderWidth: 1, borderColor: '#BFDBFE' }]}
-                onPress={handleRequestPermissionAndFetch}
-                activeOpacity={0.8}
-              >
-                <Icon name="location-outline" size={19} color="#0066FF" />
-              </TouchableOpacity>
-            </View>
-          </Animated.View>
-        ) : (
-          <View />
-        )}
-
-        {isOutOfZone ? (
-          /* ============================================================ */
-          /* OUT OF ZONE SCREEN: CLEAN VECTOR CARD (NO HARDCODED BANNER)  */
-          /* ============================================================ */
-          <View style={{ width: "100%", alignItems: "center", backgroundColor: "#FFFFFF", paddingBottom: 30 }}>
-            <View style={{ width: SCREEN_WIDTH - 32, alignItems: "center", backgroundColor: "#F8FAFC", borderRadius: 24, paddingVertical: 40, paddingHorizontal: 20, marginVertical: 20, borderWidth: 1, borderColor: "#E2E8F0" }}>
-              <View style={{ width: 80, height: 80, borderRadius: 40, backgroundColor: "#EFF6FF", alignItems: "center", justifyContent: "center", marginBottom: 16 }}>
-                <Text style={{ fontSize: 38 }}>📍</Text>
-              </View>
-              <Text style={{ fontSize: 20, fontWeight: "800", color: "#1E293B", textAlign: "center", marginBottom: 8 }}>
-                Currently Not Serviceable
-              </Text>
-              <Text style={{ fontSize: 14, color: "#64748B", textAlign: "center", lineHeight: 20, marginBottom: 24 }}>
-                We haven't launched in this area yet. Please select another location to explore available stores and services.
-              </Text>
-              <TouchableOpacity
-                activeOpacity={0.85}
-                onPress={() => setShowMapLocationModal(true)}
-                style={{
-                  width: "100%",
-                  height: 50,
-                  borderRadius: 25,
-                  backgroundColor: "#0066FF",
-                  flexDirection: "row",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  gap: 8,
-                  elevation: 4,
-                  shadowColor: "#0066FF",
-                  shadowOffset: { width: 0, height: 4 },
-                  shadowOpacity: 0.3,
-                  shadowRadius: 8,
-                }}
-              >
-                <Text style={{ fontSize: 18 }}>🎯</Text>
-                <Text style={{ color: "#FFFFFF", fontSize: 15, fontWeight: "800" }}>
-                  Change Your Location ›
-                </Text>
-              </TouchableOpacity>
-            </View>
-
-            {/* Secondary Option: Refresh GPS */}
             <TouchableOpacity
-              activeOpacity={0.75}
-              onPress={async () => {
-                const fresh = await fetchCurrentGpsPosition(true);
-                if (fresh) {
-                  setCustomerCoords({ latitude: fresh.latitude, longitude: fresh.longitude });
-                }
-              }}
-              style={{
-                marginTop: 16,
-                paddingHorizontal: 16,
-                paddingVertical: 8,
-                borderRadius: 20,
-                backgroundColor: "#F1F5F9",
-                borderWidth: 1,
-                borderColor: "#CBD5E1",
-              }}
+              style={[styles.heroFilterBtn, { backgroundColor: '#EFF6FF', borderWidth: 1, borderColor: '#BFDBFE' }]}
+              onPress={handleRequestPermissionAndFetch}
+              activeOpacity={0.8}
             >
-              <Text style={{ fontSize: 12, color: "#475569", fontWeight: "700" }}>
-                🔄 Refresh GPS Location
-              </Text>
+              <Icon name="location-outline" size={19} color="#0066FF" />
             </TouchableOpacity>
           </View>
-        ) : (
-          <>
+        </Animated.View>
+
         {/* ============================================================ */}
         {/* TOP HERO BANNER CAROUSEL (ADMIN UPLOADED BANNERS ONLY)       */}
         {/* ============================================================ */}
@@ -3051,7 +3039,7 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
         {/* ============================================================ */}
         {/* CATEGORIES CONTAINER - SINGLE LINE (DIRECTLY UNDER BANNER)   */}
         {/* ============================================================ */}
-        {activeInStockCategories.length > 0 && (
+        {activeInStockCategories.length > 0 ? (
           <View style={styles.categoriesContainer}>
             <ScrollView
               horizontal
@@ -3062,6 +3050,8 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
               {activeInStockCategories.map((item: any) => renderCategoryPill(item))}
             </ScrollView>
           </View>
+        ) : (
+          <CategoryListSkeleton />
         )}
 
         {/* Real-time Rain Weather Alert Notice */}
@@ -3109,96 +3099,96 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
           };
 
           return (
-          <View style={styles.activeOrderBanner}>
-            <TouchableOpacity
-              style={{ flex: 1, flexDirection: 'row', alignItems: 'center' }}
-              activeOpacity={0.9}
-              onPress={navToTracking}
-            >
-              <View
-                style={[
-                  styles.activeOrderIconCircle,
-                  {
-                    backgroundColor:
-                      activeFoodOrder.status === 'FOOD_READY' || activeFoodOrder.status === 'READY'
-                        ? '#DCFCE7'
-                        : activeFoodOrder.status === 'OUT_FOR_DELIVERY'
-                        ? '#DBEAFE'
-                        : '#EFF6FF',
-                  },
-                ]}
+            <View style={styles.activeOrderBanner}>
+              <TouchableOpacity
+                style={{ flex: 1, flexDirection: 'row', alignItems: 'center' }}
+                activeOpacity={0.9}
+                onPress={navToTracking}
               >
-                <Text style={{ fontSize: 22 }}>
-                  {activeFoodOrder.status === 'FOOD_READY' || activeFoodOrder.status === 'READY'
-                    ? (isBannerFood ? '🍲' : '📦')
-                    : activeFoodOrder.status === 'OUT_FOR_DELIVERY'
-                    ? '🛵'
-                    : (isBannerFood ? '🍳' : getCategoryIcon(bannerCleanCat))}
-                </Text>
-              </View>
-
-              <View style={{ flex: 1, marginLeft: 10 }}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-                  <Text style={styles.activeOrderTitle} numberOfLines={1}>
-                    {activeFoodOrder.restaurantName || `${bannerCleanCat} Order`}
+                <View
+                  style={[
+                    styles.activeOrderIconCircle,
+                    {
+                      backgroundColor:
+                        activeFoodOrder.status === 'FOOD_READY' || activeFoodOrder.status === 'READY'
+                          ? '#DCFCE7'
+                          : activeFoodOrder.status === 'OUT_FOR_DELIVERY'
+                            ? '#DBEAFE'
+                            : '#EFF6FF',
+                    },
+                  ]}
+                >
+                  <Text style={{ fontSize: 22 }}>
+                    {activeFoodOrder.status === 'FOOD_READY' || activeFoodOrder.status === 'READY'
+                      ? (isBannerFood ? '🍲' : '📦')
+                      : activeFoodOrder.status === 'OUT_FOR_DELIVERY'
+                        ? '🛵'
+                        : (isBannerFood ? '🍳' : getCategoryIcon(bannerCleanCat))}
                   </Text>
-                  <View
-                    style={[
-                      styles.activeOrderBadge,
-                      {
-                        backgroundColor:
-                          activeFoodOrder.status === 'FOOD_READY' || activeFoodOrder.status === 'READY'
-                            ? '#16A34A'
-                            : activeFoodOrder.status === 'OUT_FOR_DELIVERY'
-                            ? '#0066FF'
-                            : '#0066FF',
-                      },
-                    ]}
-                  >
-                    <Text style={styles.activeOrderBadgeText}>
-                      {activeFoodOrder.status === 'FOOD_READY' || activeFoodOrder.status === 'READY'
-                        ? (isBannerFood ? 'ORDER READY' : `${bannerCleanCat.toUpperCase()} READY`)
-                        : activeFoodOrder.status === 'OUT_FOR_DELIVERY'
-                        ? 'DELIVERING'
-                        : (isBannerFood ? 'PREPARING' : `${bannerCleanCat.toUpperCase()} PACKING`)}
+                </View>
+
+                <View style={{ flex: 1, marginLeft: 10 }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <Text style={styles.activeOrderTitle} numberOfLines={1}>
+                      {activeFoodOrder.restaurantName || `${bannerCleanCat} Order`}
                     </Text>
+                    <View
+                      style={[
+                        styles.activeOrderBadge,
+                        {
+                          backgroundColor:
+                            activeFoodOrder.status === 'FOOD_READY' || activeFoodOrder.status === 'READY'
+                              ? '#16A34A'
+                              : activeFoodOrder.status === 'OUT_FOR_DELIVERY'
+                                ? '#0066FF'
+                                : '#0066FF',
+                        },
+                      ]}
+                    >
+                      <Text style={styles.activeOrderBadgeText}>
+                        {activeFoodOrder.status === 'FOOD_READY' || activeFoodOrder.status === 'READY'
+                          ? (isBannerFood ? 'ORDER READY' : `${bannerCleanCat.toUpperCase()} READY`)
+                          : activeFoodOrder.status === 'OUT_FOR_DELIVERY'
+                            ? 'DELIVERING'
+                            : (isBannerFood ? 'PREPARING' : `${bannerCleanCat.toUpperCase()} PACKING`)}
+                      </Text>
+                    </View>
                   </View>
+                  <Text style={styles.activeOrderSub} numberOfLines={1}>
+                    #{String(activeFoodOrder.bookingId || '').slice(-6)} • ₹{activeFoodOrder.price} • Tap to track
+                  </Text>
                 </View>
-                <Text style={styles.activeOrderSub} numberOfLines={1}>
-                  #{String(activeFoodOrder.bookingId || '').slice(-6)} • ₹{activeFoodOrder.price} • Tap to track
-                </Text>
-              </View>
-            </TouchableOpacity>
+              </TouchableOpacity>
 
-            {/* DIRECT TRACK ORDER BUTTON */}
-            <TouchableOpacity
-              style={styles.trackActiveOrderBtn}
-              activeOpacity={0.8}
-              onPress={navToTracking}
-            >
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
-                <Icon name="navigate-sharp" size={13} color="#FFFFFF" />
-                <Text style={styles.trackActiveOrderBtnText}>Track</Text>
-              </View>
-            </TouchableOpacity>
-
-            {/* DIRECT CANCEL ORDER BUTTON */}
-            <TouchableOpacity
-              style={styles.cancelActiveOrderBtn}
-              activeOpacity={0.8}
-              disabled={cancelingActiveOrder}
-              onPress={() => handleCancelActiveOrder(activeFoodOrder)}
-            >
-              {cancelingActiveOrder ? (
-                <ActivityIndicator size="small" color="#EF4444" />
-              ) : (
+              {/* DIRECT TRACK ORDER BUTTON */}
+              <TouchableOpacity
+                style={styles.trackActiveOrderBtn}
+                activeOpacity={0.8}
+                onPress={navToTracking}
+              >
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
-                  <Text style={styles.cancelActiveOrderBtnText}>Cancel</Text>
-                  <Icon name="close" size={13} color="#EF4444" />
+                  <Icon name="navigate-sharp" size={13} color="#FFFFFF" />
+                  <Text style={styles.trackActiveOrderBtnText}>Track</Text>
                 </View>
-              )}
-            </TouchableOpacity>
-          </View>
+              </TouchableOpacity>
+
+              {/* DIRECT CANCEL ORDER BUTTON */}
+              <TouchableOpacity
+                style={styles.cancelActiveOrderBtn}
+                activeOpacity={0.8}
+                disabled={cancelingActiveOrder}
+                onPress={() => handleCancelActiveOrder(activeFoodOrder)}
+              >
+                {cancelingActiveOrder ? (
+                  <ActivityIndicator size="small" color="#EF4444" />
+                ) : (
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                    <Text style={styles.cancelActiveOrderBtnText}>Cancel</Text>
+                    <Icon name="close" size={13} color="#EF4444" />
+                  </View>
+                )}
+              </TouchableOpacity>
+            </View>
           );
         })()}
 
@@ -3361,91 +3351,7 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
           </View>
         )}
 
-        {isOutOfZone ? (
-          /* ============================================================ */
-          /* OUT OF ZONE SCREEN: HIDE STORE LIST COMPLETELY */
-          /* ============================================================ */
-          <View style={{
-            marginHorizontal: 16,
-            marginVertical: 18,
-            padding: 24,
-            backgroundColor: '#FFFFFF',
-            borderRadius: 24,
-            borderWidth: 1.5,
-            borderColor: '#FCA5A5',
-            alignItems: 'center',
-            shadowColor: '#EF4444',
-            shadowOffset: { width: 0, height: 6 },
-            shadowOpacity: 0.1,
-            shadowRadius: 14,
-            elevation: 4,
-          }}>
-            <View style={{
-              width: 72,
-              height: 72,
-              borderRadius: 36,
-              backgroundColor: '#FEF2F2',
-              alignItems: 'center',
-              justifyContent: 'center',
-              marginBottom: 16,
-              borderWidth: 2,
-              borderColor: '#FECACA',
-            }}>
-              <Text style={{ fontSize: 36 }}>📍</Text>
-            </View>
-            <View style={{
-              backgroundColor: '#FEE2E2',
-              paddingHorizontal: 12,
-              paddingVertical: 4,
-              borderRadius: 20,
-              marginBottom: 10,
-            }}>
-              <Text style={{ fontSize: 11, fontWeight: '800', color: '#DC2626', letterSpacing: 0.8 }}>OUT OF SERVICE AREA</Text>
-            </View>
-            <Text style={{
-              fontSize: 18,
-              fontWeight: '800',
-              color: '#0F172A',
-              textAlign: 'center',
-              marginBottom: 8,
-            }}>
-              Stores are not available in your location
-            </Text>
-            <Text style={{
-              fontSize: 13,
-              color: '#64748B',
-              textAlign: 'center',
-              lineHeight: 20,
-              marginBottom: 20,
-              paddingHorizontal: 8,
-            }}>
-              Aapki current GPS location hamari active delivery service boundary ke bahar hai. Hamari service filhal Bhopal ke designated delivery zones (New Bhopal, Old Bhopal, BHEL) me uplabdh hai.
-            </Text>
-            <TouchableOpacity
-              activeOpacity={0.8}
-              onPress={async () => {
-                const fresh = await fetchCurrentGpsPosition(true);
-                if (fresh) setCustomerCoords({ latitude: fresh.latitude, longitude: fresh.longitude });
-              }}
-              style={{
-                backgroundColor: '#DC2626',
-                paddingHorizontal: 24,
-                paddingVertical: 12,
-                borderRadius: 14,
-                flexDirection: 'row',
-                alignItems: 'center',
-                gap: 8,
-                shadowColor: '#DC2626',
-                shadowOffset: { width: 0, height: 3 },
-                shadowOpacity: 0.3,
-                shadowRadius: 6,
-                elevation: 3,
-              }}
-            >
-              <Text style={{ color: '#FFFFFF', fontWeight: '800', fontSize: 14 }}>🔄 Refresh GPS Location</Text>
-            </TouchableOpacity>
-          </View>
-        ) : loadingRestaurants ? (
+        {loadingRestaurants ? (
           /* Modern Skeleton Cards for First Visit - NEVER an infinite spinner */
           <ScrollView
             horizontal
@@ -3584,27 +3490,31 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
               <View style={styles.serviceUnavailableCard}>
                 <View style={styles.serviceUnavailableIconWrap}>
                   <Icon
-                    name={(locationPermissionGranted === false && !customerCoords) ? "lock-closed" : "location-outline"}
+                    name={(gpsErrorState === 'permission_denied' || (locationPermissionGranted === false && !customerCoords)) ? "lock-closed" : "location-outline"}
                     size={40}
                     color="#0066FF"
                   />
                 </View>
                 <Text style={styles.serviceUnavailableTitle}>
-                  {locationPermissionGranted === false && !customerCoords
-                    ? 'Location permission needed'
-                    : !customerCoords
-                    ? 'Detecting your location...'
-                    : 'No stores currently open nearby'}
+                  {(gpsErrorState === 'permission_denied' || (locationPermissionGranted === false && !customerCoords))
+                    ? 'Location permission required.'
+                    : gpsErrorState === 'gps_unavailable' && !customerCoords
+                      ? 'GPS unavailable.'
+                      : gpsErrorState === 'fetch_failed' && !customerCoords
+                        ? 'Unable to fetch current location. Retry.'
+                        : !customerCoords
+                          ? 'Locating your position...'
+                          : 'No stores currently open within 5 KM'}
                 </Text>
                 <Text style={styles.serviceUnavailableSubtitle}>
-                  {locationPermissionGranted === false && !customerCoords
-                    ? 'Please enable location permissions in your phone settings to see nearby stores.'
+                  {(gpsErrorState === 'permission_denied' || (locationPermissionGranted === false && !customerCoords))
+                    ? 'Please enable location permissions in your phone settings to see nearby stores within 5 KM.'
                     : !customerCoords
-                    ? 'Getting your current device location, or tap below to choose your delivery address.'
-                    : 'All partner stores in this area are currently offline. Check back shortly or change location.'}
+                      ? 'Acquiring accurate device GPS signal, or tap below to select your delivery address.'
+                      : 'No partner stores are currently online within 5 KM of your location. Check back shortly or change location.'}
                 </Text>
                 <View style={styles.serviceUnavailableActionsRow}>
-                  {locationPermissionGranted === false && !customerCoords ? (
+                  {(gpsErrorState === 'permission_denied' || (locationPermissionGranted === false && !customerCoords)) ? (
                     <TouchableOpacity
                       style={styles.retryBtn}
                       activeOpacity={0.8}
@@ -3762,9 +3672,6 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
           </>
         )}
 
-
-        </>
-      )}
       </ScrollView>
       {/* ============================================================ */}
       {/* 7 & 8. AUTO-ADJUSTED BOTTOM NAVIGATION BAR & ACTIVE CARD */}
@@ -3792,10 +3699,10 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
               const itemsCount = Array.isArray(activeFoodOrder.items)
                 ? activeFoodOrder.items.length
                 : Array.isArray(activeFoodOrder.cartItems)
-                ? activeFoodOrder.cartItems.length
-                : typeof activeFoodOrder.cartItems === 'object' && activeFoodOrder.cartItems !== null
-                ? Object.keys(activeFoodOrder.cartItems).length
-                : 1;
+                  ? activeFoodOrder.cartItems.length
+                  : typeof activeFoodOrder.cartItems === 'object' && activeFoodOrder.cartItems !== null
+                    ? Object.keys(activeFoodOrder.cartItems).length
+                    : 1;
 
               const cleanCat = resolveCategoryName(activeFoodOrder);
               const isFoodCategory = cleanCat.toLowerCase() === 'food';
@@ -4224,7 +4131,7 @@ const CustomerHomeScreen = ({ navigation, route }: any) => {
           setIsSearchFocused(true);
         }}
       />
-          {/* Dedicated Zomato-Style Search Screen Modal */}
+      {/* Dedicated Zomato-Style Search Screen Modal */}
       <CustomerSearchModal
         visible={showSearchModal}
         onClose={() => setShowSearchModal(false)}

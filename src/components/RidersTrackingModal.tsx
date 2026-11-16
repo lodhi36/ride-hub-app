@@ -140,12 +140,12 @@ export const RidersTrackingModal: React.FC<RidersTrackingModalProps> = ({
     };
   }, [socket, visible, selectedRiderForMap]);
 
-  // Leaflet HTML generation for Rider tracking map
+  // Leaflet HTML generation for Rider tracking map (No hardcoded fallback coords)
   const getMapHtml = (rider: AssignedRider) => {
-    const rLat = rider.latitude || 23.2599;
-    const rLon = rider.longitude || 77.4126;
-    const sLat = rider.storeLatitude || 23.2599;
-    const sLon = rider.storeLongitude || 77.4126;
+    const rLat = Number(rider.latitude || 0);
+    const rLon = Number(rider.longitude || 0);
+    const sLat = Number(rider.storeLatitude || 0);
+    const sLon = Number(rider.storeLongitude || 0);
     const rName = (rider.riderName || 'Rider').replace(/'/g, '');
     const sName = (rider.storeName || 'Store').replace(/'/g, '');
 
@@ -282,59 +282,90 @@ export const RidersTrackingModal: React.FC<RidersTrackingModalProps> = ({
           const riderLon = ${rLon};
           const storeLat = ${sLat};
           const storeLon = ${sLon};
+          const hasRider = Boolean(riderLat !== 0 && riderLon !== 0 && !isNaN(riderLat) && !isNaN(riderLon));
+          const hasStore = Boolean(storeLat !== 0 && storeLon !== 0 && !isNaN(storeLat) && !isNaN(storeLon));
+          const hasAny = hasRider || hasStore;
+          const initLat = hasRider ? riderLat : (hasStore ? storeLat : 0);
+          const initLon = hasRider ? riderLon : (hasStore ? storeLon : 0);
 
-          const map = L.map('map', { zoomControl: false }).setView([riderLat, riderLon], 15);
+          const mapEl = document.getElementById('map');
+          if (mapEl && !hasAny) mapEl.style.visibility = 'hidden';
+          const map = L.map('map', { zoomControl: false });
+          if (hasAny) {
+            map.setView([initLat, initLon], 15);
+          }
 
           L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
             maxZoom: 19,
             attribution: '© OpenStreetMap'
           }).addTo(map);
 
-          // Store Marker (Exact Same Pink Teardrop Cutlery Icon as Rider Home Screen)
-          const storeHtml = '<div class="custom-resto-pin-wrapper">' +
-            '<div class="resto-pin-shadow"></div>' +
-            '<svg width="36" height="46" viewBox="0 0 38 48" fill="none" xmlns="http://www.w3.org/2000/svg" style="filter: drop-shadow(0 3px 6px rgba(225, 29, 72, 0.45));">' +
-            '  <path d="M19 1C9.05888 1 1 9.05888 1 19C1 31.8 19 47 19 47C19 47 37 31.8 37 19C37 9.05888 28.9411 1 19 1Z" fill="#E11D48" stroke="#FFFFFF" stroke-width="2.5"/>' +
-            '  <path d="M14 11V15C14 16.1 14.9 17 16 17V25H17V17C18.1 17 19 16.1 19 15V11H18V14H17V11H16V14H15V11H14Z" fill="#FFFFFF"/>' +
-            '  <path d="M21 11V25H22.5V17H24C24 13.5 22.5 11 21 11Z" fill="#FFFFFF"/>' +
-            '</svg>' +
-            '</div>';
-          const storeIcon = L.divIcon({
-            className: 'custom-pin store-pin',
-            html: storeHtml,
-            iconSize: [0, 0],
-            iconAnchor: [0, 0]
-          });
-          const storeMarker = L.marker([storeLat, storeLon], { icon: storeIcon }).addTo(map);
-          storeMarker.bindPopup('<div class="custom-popup">🏪 ${sName}</div>');
+          let storeMarker = null;
+          if (hasStore) {
+            const storeHtml = '<div class="custom-resto-pin-wrapper">' +
+              '<div class="resto-pin-shadow"></div>' +
+              '<svg width="36" height="46" viewBox="0 0 38 48" fill="none" xmlns="http://www.w3.org/2000/svg" style="filter: drop-shadow(0 3px 6px rgba(225, 29, 72, 0.45));">' +
+              '  <path d="M19 1C9.05888 1 1 9.05888 1 19C1 31.8 19 47 19 47C19 47 37 31.8 37 19C37 9.05888 28.9411 1 19 1Z" fill="#E11D48" stroke="#FFFFFF" stroke-width="2.5"/>' +
+              '  <path d="M14 11V15C14 16.1 14.9 17 16 17V25H17V17C18.1 17 19 16.1 19 15V11H18V14H17V11H16V14H15V11H14Z" fill="#FFFFFF"/>' +
+              '  <path d="M21 11V25H22.5V17H24C24 13.5 22.5 11 21 11Z" fill="#FFFFFF"/>' +
+              '</svg>' +
+              '</div>';
+            const storeIcon = L.divIcon({
+              className: 'custom-pin store-pin',
+              html: storeHtml,
+              iconSize: [0, 0],
+              iconAnchor: [0, 0]
+            });
+            storeMarker = L.marker([storeLat, storeLon], { icon: storeIcon }).addTo(map);
+            storeMarker.bindPopup('<div class="custom-popup">🏪 ${sName}</div>');
+          }
 
-          // Rider Marker (Animated Bike PNG from First Screen)
           const riderIcon = L.divIcon({
             className: 'driver-marker-icon',
             html: '<div class="marker-wrapper" id="driver-wrapper"><div class="bike-signal-ring"></div><div class="bike-shadow-pulse" id="bike-shadow"></div><div class="bike-rotator" id="bike-rotator"><div class="bike-idler-container" id="bike-idler"><div class="bike-engine-vibe"><img src="${bikeBase64}" class="bike-img" alt="Driver"/></div></div></div></div>',
             iconSize: [70, 70],
             iconAnchor: [35, 35]
           });
-          let riderMarker = L.marker([riderLat, riderLon], { icon: riderIcon }).addTo(map);
-          riderMarker.bindPopup('<div class="custom-popup">🛵 ${rName}</div>').openPopup();
+          let riderMarker = null;
+          if (hasRider) {
+            riderMarker = L.marker([riderLat, riderLon], { icon: riderIcon }).addTo(map);
+            riderMarker.bindPopup('<div class="custom-popup">🛵 ${rName}</div>').openPopup();
+          }
 
-          // Connect store and rider with dashed blue line
-          const line = L.polyline([[storeLat, storeLon], [riderLat, riderLon]], {
-            color: '#2563EB',
-            weight: 4,
-            dashArray: '8, 8',
-            opacity: 0.85
-          }).addTo(map);
+          let roadRouteLine = null;
+          function fetchOsrmRoute(fromLat, fromLon, toLat, toLon) {
+            if (!fromLat || !fromLon || !toLat || !toLon) return;
+            const url = 'https://router.project-osrm.org/route/v1/driving/' + fromLon + ',' + fromLat + ';' + toLon + ',' + toLat + '?overview=full&geometries=geojson';
+            fetch(url)
+              .then(r => r.json())
+              .then(d => {
+                if (d && d.routes && d.routes[0] && d.routes[0].geometry && d.routes[0].geometry.coordinates) {
+                  const coords = d.routes[0].geometry.coordinates.map(c => [c[1], c[0]]);
+                  if (roadRouteLine) roadRouteLine.setLatLngs(coords);
+                  else roadRouteLine = L.polyline(coords, { color: '#2563EB', weight: 4.5, opacity: 0.9 }).addTo(map);
+                }
+              })
+              .catch(() => {});
+          }
 
-          // Fit bounds to show both store and rider
-          const group = new L.featureGroup([storeMarker, riderMarker]);
-          map.fitBounds(group.getBounds().pad(0.35));
+          if (hasStore && hasRider) {
+            fetchOsrmRoute(riderLat, riderLon, storeLat, storeLon);
+            const group = new L.featureGroup([storeMarker, riderMarker]);
+            map.fitBounds(group.getBounds().pad(0.35));
+          }
 
           // Smooth marker movement function
           window.updateRiderMarker = function(newLat, newLon) {
-            if (riderMarker) {
+            if (!newLat || !newLon || isNaN(newLat) || isNaN(newLon)) return;
+            if (mapEl && mapEl.style.visibility === 'hidden') mapEl.style.visibility = 'visible';
+            if (!riderMarker) {
+              riderMarker = L.marker([newLat, newLon], { icon: riderIcon }).addTo(map);
+              map.setView([newLat, newLon], 15);
+            } else {
               riderMarker.setLatLng([newLat, newLon]);
-              line.setLatLngs([[storeLat, storeLon], [newLat, newLon]]);
+            }
+            if (hasStore) {
+              fetchOsrmRoute(newLat, newLon, storeLat, storeLon);
             }
           };
         </script>

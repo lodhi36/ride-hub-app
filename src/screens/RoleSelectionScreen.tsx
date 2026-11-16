@@ -19,15 +19,102 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { WebView } from 'react-native-webview';
 import { AuthContext } from '../context/AuthContext';
 import { useTheme } from '../context/ThemeContext';
-import api from '../services/api';
-import { LOCAL_URL, BASE_URL } from '../config/apiConfig';
+import api, { clearApiCachedAuth } from '../services/api';
+import { LOCAL_URL, BASE_URL, resolveUploadUrl } from '../config/apiConfig';
 import { rideStore } from '../services/rideStore';
+import { LottieAnimation } from '../components/LottieAnimation';
+import { useSocket } from '../context/SocketContext';
 
 const { width, height } = Dimensions.get('window');
 
 const RoleSelectionScreen = ({ navigation }: any) => {
   const { user, updateUser } = useContext(AuthContext);
   const { isDark } = useTheme();
+  const { socket } = useSocket();
+
+  // ── DYNAMIC ADMIN LOTTIE FOR ROLE SELECTION SCREEN ──
+  const [roleScreenMedia, setRoleScreenMedia] = useState<any>(null);
+  const [roleMediaLoaded, setRoleMediaLoaded] = useState(false);
+
+  const fetchRoleScreenMedia = useCallback(async () => {
+    try {
+      // Try cache first for instant render
+      const cached = await AsyncStorage.getItem('cache_screen_media_ROLE_SELECTION');
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (parsed?.isActive && (parsed?.lottieUrl || parsed?.mediaUrl)) {
+          setRoleScreenMedia(parsed);
+        }
+      }
+    } catch (_) {}
+
+    try {
+      const res = await api.get('/screen-media/ROLE_SELECTION');
+      const sc = res.data?.screen || res.data?.media || res.data;
+      if (sc && sc.isActive) {
+        const rawUrl = sc.lottieUrl || (sc.currentMediaType === 'LOTTIE' ? sc.mediaUrl : null);
+        if (rawUrl) {
+          const mediaObj = {
+            ...sc,
+            lottieUrl: rawUrl,
+          };
+          setRoleScreenMedia(mediaObj);
+          AsyncStorage.setItem('cache_screen_media_ROLE_SELECTION', JSON.stringify(mediaObj)).catch(() => {});
+        } else {
+          setRoleScreenMedia(null);
+        }
+      } else {
+        setRoleScreenMedia(null);
+      }
+    } catch (_) {}
+    setRoleMediaLoaded(true);
+  }, []);
+
+  useEffect(() => {
+    fetchRoleScreenMedia();
+  }, [fetchRoleScreenMedia]);
+
+  useFocusEffect(
+    useCallback(() => {
+      fetchRoleScreenMedia();
+    }, [fetchRoleScreenMedia])
+  );
+
+  // ⚡ REAL-TIME: Socket.IO listener for live admin uploads/updates without reload
+  useEffect(() => {
+    if (!socket) return;
+
+    const onScreenMediaUpdate = (data: any) => {
+      const sid = String(data?.screenId || '').toUpperCase();
+      if (sid === 'ROLE_SELECTION') {
+        console.log('⚡ [RoleSelectionScreen] Real-time screen_media update received via Socket!');
+        if (data?.isActive) {
+          const rawUrl = data.lottieUrl || (data.currentMediaType === 'LOTTIE' ? data.mediaUrl : null);
+          if (rawUrl) {
+            const mediaObj = {
+              ...data,
+              lottieUrl: rawUrl,
+            };
+            setRoleScreenMedia(mediaObj);
+            AsyncStorage.setItem('cache_screen_media_ROLE_SELECTION', JSON.stringify(mediaObj)).catch(() => {});
+          } else {
+            setRoleScreenMedia(null);
+          }
+        } else {
+          setRoleScreenMedia(null);
+          AsyncStorage.removeItem('cache_screen_media_ROLE_SELECTION').catch(() => {});
+        }
+      }
+    };
+
+    socket.on('screen_media_updated', onScreenMediaUpdate);
+    socket.on('screen_media_role_selection', onScreenMediaUpdate);
+
+    return () => {
+      socket.off('screen_media_updated', onScreenMediaUpdate);
+      socket.off('screen_media_role_selection', onScreenMediaUpdate);
+    };
+  }, [socket]);
 
   // Auto-Play Intro Video (Ultra-Fast Progressive Playback)
   const [isVideoMuted, setIsVideoMuted] = useState(false);
@@ -283,7 +370,7 @@ const RoleSelectionScreen = ({ navigation }: any) => {
       const delivUser = await AsyncStorage.getItem('deliveryUser');
       setHasCustSession(Boolean(custToken && custUser));
       setHasSuppSession(Boolean(suppToken && suppUser));
-      setHasDeliverySession(Boolean(delivToken && delivUser));
+      setHasDeliverySession(Boolean(delivToken || delivUser));
     } catch (e) {}
   };
 
@@ -303,8 +390,11 @@ const RoleSelectionScreen = ({ navigation }: any) => {
         try {
           const parsed = JSON.parse(custUserStr);
           if (parsed) {
+            clearApiCachedAuth();
+            await AsyncStorage.removeItem('userData');
             await AsyncStorage.setItem('userToken', custToken);
             await AsyncStorage.setItem('activeRole', 'CUSTOMER');
+            clearApiCachedAuth();
             updateUser(parsed);
             navigation.navigate('CustomerHomeScreen');
             return;
@@ -319,17 +409,42 @@ const RoleSelectionScreen = ({ navigation }: any) => {
     try {
       const delivToken = await AsyncStorage.getItem('deliveryToken');
       const delivUserStr = await AsyncStorage.getItem('deliveryUser');
-      if (delivToken && delivUserStr) {
+      if (delivToken) {
+        let parsed: any = null;
+        if (delivUserStr) {
+          try {
+            parsed = JSON.parse(delivUserStr);
+          } catch (e) {}
+        }
+        clearApiCachedAuth();
+        await AsyncStorage.removeItem('userData');
+        await AsyncStorage.setItem('userToken', delivToken);
+        await AsyncStorage.setItem('activeRole', 'DELIVERY');
+        clearApiCachedAuth();
+        if (parsed) {
+          updateUser(parsed);
+        }
+
+        // Check for active non-completed ride so Delivery Partner directly opens Active Order without flashing home screen
+        let activeOrder: any = null;
         try {
-          const parsed = JSON.parse(delivUserStr);
-          if (parsed) {
-            await AsyncStorage.setItem('userToken', delivToken);
-            await AsyncStorage.setItem('activeRole', 'DELIVERY');
-            updateUser(parsed);
-            navigation.navigate('DeliveryRiderHomeScreen', { riderName: parsed?.name, riderId: parsed?._id || parsed?.id });
-            return;
+          const storedRide = await AsyncStorage.getItem('active_rider_ride');
+          if (storedRide) {
+            const parsedRide = JSON.parse(storedRide);
+            const st = String(parsedRide.status || '').toUpperCase();
+            const isDone = st === 'COMPLETED' || st === 'DELIVERED' || st.includes('CANCEL');
+            if (!isDone) {
+              activeOrder = parsedRide;
+            }
           }
-        } catch (e) {}
+        } catch (_) {}
+
+        navigation.navigate('DeliveryRiderHomeScreen', {
+          riderName: parsed?.name,
+          riderId: parsed?._id || parsed?.id,
+          initialActiveOrder: activeOrder,
+        });
+        return;
       }
     } catch (e) {}
     navigation.navigate('DeliveryRegistration', { initialMode: 'login' });
@@ -349,6 +464,9 @@ const RoleSelectionScreen = ({ navigation }: any) => {
               return;
             }
             if (appStatus === 'PENDING') {
+              clearApiCachedAuth();
+              await AsyncStorage.setItem('userToken', suppToken);
+              await AsyncStorage.setItem('activeRole', 'SUPPLIER');
               navigation.navigate('SellerPendingApprovalScreen', {
                 user: parsed,
                 userId: parsed._id || parsed.id,
@@ -356,11 +474,14 @@ const RoleSelectionScreen = ({ navigation }: any) => {
               return;
             }
 
+            clearApiCachedAuth();
+            await AsyncStorage.removeItem('userData');
             await AsyncStorage.setItem('userToken', suppToken);
             await AsyncStorage.setItem('activeRole', 'SUPPLIER');
+            clearApiCachedAuth();
             updateUser(parsed);
             navigation.navigate('RiderHomeScreen', {
-              riderName: parsed.name || parsed.restaurantName || 'Supplier Partner',
+              riderName: parsed.restaurantName || parsed.businessName || parsed.name || 'Store Partner',
               riderId: parsed._id || parsed.id,
             });
             return;
@@ -382,7 +503,7 @@ const RoleSelectionScreen = ({ navigation }: any) => {
         contentContainerStyle={styles.scrollContent}
         showsVerticalScrollIndicator={false}
       >
-        {/* 1. Top Auto-Play Video Banner */}
+        {/* 1. Top Banner: Shows Admin Lottie if uploaded, else video */}
         <Animated.View
           style={[
             styles.videoBannerWrapper,
@@ -393,60 +514,77 @@ const RoleSelectionScreen = ({ navigation }: any) => {
           ]}
         >
           <View style={styles.videoCardContainer}>
-            {/* Native Instant Thumbnail Poster while WebView boots (Zero delay visual) */}
-            <Image
-              source={require('../assets/bhopal_lake_hero.jpg')}
-              style={[StyleSheet.absoluteFill, { width: '100%', height: '100%' }]}
-              resizeMode="cover"
-            />
-            <WebView
-              ref={webViewRef}
-              originWhitelist={['*']}
-              source={{ html: videoHtml, baseUrl: cleanHost }}
-              style={[styles.videoWebView, { opacity: isVideoReady ? 1 : 0 }]}
-              allowsInlineMediaPlayback={true}
-              mediaPlaybackRequiresUserAction={false}
-              javaScriptEnabled={true}
-              domStorageEnabled={true}
-              cacheEnabled={true}
-              scrollEnabled={false}
-              androidHardwareAccelerationDisabled={false}
-              androidLayerType="hardware"
-              renderToHardwareTextureAndroid={true}
-              mixedContentMode="always"
-              onMessage={(event) => {
-                try {
-                  const data = JSON.parse(event.nativeEvent.data);
-                  if (data.type === 'VIDEO_PLAYING') {
-                    console.log('🎬 [RoleSelectionScreen] VIDEO_PLAYING event received! Ultra-fast video is playing smoothly!');
-                    setIsVideoReady(true);
-                  } else if (data.type === 'VIDEO_ERROR') {
-                    console.log('RoleSelectionScreen Video Notice:', data.error, data.currentSrc);
-                  }
-                } catch (e) {}
-              }}
-            />
-            <TouchableOpacity
-              style={styles.videoAudioBtn}
-              onPress={() => {
-                const nextMuted = !isVideoMuted;
-                setIsVideoMuted(nextMuted);
-                webViewRef.current?.injectJavaScript(`
-                  (function() {
-                    var v = document.getElementById('roleVideo');
-                    if (v) {
-                      v.muted = ${nextMuted};
-                      v.volume = ${nextMuted ? 0 : 1.0};
-                      v.play();
-                    }
-                  })();
-                  true;
-                `);
-              }}
-              activeOpacity={0.8}
-            >
-              <Text style={styles.videoAudioBtnText}>{isVideoMuted ? '🔇 Unmute' : '🔊 Sound On'}</Text>
-            </TouchableOpacity>
+            {roleScreenMedia?.lottieUrl ? (
+              /* ── DYNAMIC ADMIN LOTTIE ANIMATION (Full Frame Cover) ── */
+              <LottieAnimation
+                key={roleScreenMedia.lottieUrl}
+                source={resolveUploadUrl(roleScreenMedia.lottieUrl)}
+                width="100%"
+                height="100%"
+                speed={roleScreenMedia.lottieConfig?.speed || 1}
+                loop={true}
+                autoPlay={true}
+                preserveAspectRatio="xMidYMid slice"
+                style={{ width: '100%', height: '100%' }}
+              />
+            ) : (
+              <>
+                {/* Native Instant Thumbnail Poster while WebView boots (Zero delay visual) */}
+                <Image
+                  source={require('../assets/bhopal_lake_hero.jpg')}
+                  style={[StyleSheet.absoluteFill, { width: '100%', height: '100%' }]}
+                  resizeMode="cover"
+                />
+                <WebView
+                  ref={webViewRef}
+                  originWhitelist={['*']}
+                  source={{ html: videoHtml, baseUrl: cleanHost }}
+                  style={[styles.videoWebView, { opacity: isVideoReady ? 1 : 0 }]}
+                  allowsInlineMediaPlayback={true}
+                  mediaPlaybackRequiresUserAction={false}
+                  javaScriptEnabled={true}
+                  domStorageEnabled={true}
+                  cacheEnabled={true}
+                  scrollEnabled={false}
+                  androidHardwareAccelerationDisabled={false}
+                  androidLayerType="hardware"
+                  renderToHardwareTextureAndroid={true}
+                  mixedContentMode="always"
+                  onMessage={(event) => {
+                    try {
+                      const data = JSON.parse(event.nativeEvent.data);
+                      if (data.type === 'VIDEO_PLAYING') {
+                        console.log('🎬 [RoleSelectionScreen] VIDEO_PLAYING event received! Ultra-fast video is playing smoothly!');
+                        setIsVideoReady(true);
+                      } else if (data.type === 'VIDEO_ERROR') {
+                        console.log('RoleSelectionScreen Video Notice:', data.error, data.currentSrc);
+                      }
+                    } catch (e) {}
+                  }}
+                />
+                <TouchableOpacity
+                  style={styles.videoAudioBtn}
+                  onPress={() => {
+                    const nextMuted = !isVideoMuted;
+                    setIsVideoMuted(nextMuted);
+                    webViewRef.current?.injectJavaScript(`
+                      (function() {
+                        var v = document.getElementById('roleVideo');
+                        if (v) {
+                          v.muted = ${nextMuted};
+                          v.volume = ${nextMuted ? 0 : 1.0};
+                          v.play();
+                        }
+                      })();
+                      true;
+                    `);
+                  }}
+                  activeOpacity={0.8}
+                >
+                  <Text style={styles.videoAudioBtnText}>{isVideoMuted ? '🔇 Unmute' : '🔊 Sound On'}</Text>
+                </TouchableOpacity>
+              </>
+            )}
           </View>
         </Animated.View>
 
@@ -647,7 +785,7 @@ const styles = StyleSheet.create({
     top: 0,
     left: 0,
     right: 0,
-    height: 320,
+    height: 360,
     backgroundColor: '#0066FF',
     borderBottomLeftRadius: 36,
     borderBottomRightRadius: 36,
@@ -826,8 +964,8 @@ const styles = StyleSheet.create({
   },
   videoCardContainer: {
     width: width - 28,
-    height: 195,
-    borderRadius: 20,
+    height: 234,
+    borderRadius: 22,
     overflow: 'hidden',
     backgroundColor: '#000000',
     borderWidth: 1.5,

@@ -34,9 +34,11 @@ import { CartService } from '../services/CartService';
 import { getCanonicalRestaurantLocation } from '../services/LocationAddressService';
 import { getSellerCategoryType, getCategoryTerminology } from './RiderHomeScreen';
 import Icon from '../components/PngIcon';
+import { LottieAnimation } from '../components/LottieAnimation';
 import { getCategoryIcon } from '../services/CategoryHelper';
 
 const { width } = Dimensions.get('window');
+const AnimatedTouchable = Animated.createAnimatedComponent(TouchableOpacity);
 
 const RestaurantProfileScreen = ({ route, navigation }: any) => {
   const { isDark, currentColors } = useTheme('customer');
@@ -73,6 +75,57 @@ const RestaurantProfileScreen = ({ route, navigation }: any) => {
   // Search state — ONLY searches inside THIS restaurant's menu
   const [isSearchActive, setIsSearchActive] = useState<boolean>(false);
   const [searchQuery, setSearchQuery] = useState<string>('');
+
+  // ── SPEC PART 8, 9 & 10: SUPPLIER SHOWCASE 3 PHOTOS & LOTTIE ANIMATION ──
+  const PHOTO_LABELS = ['Store Front & Board', 'Inside Store & Ambience', 'Products & Specialties'];
+  const [activePhotoIndex, setActivePhotoIndex] = useState<number>(0);
+  const photoScrollRef = useRef<FlatList>(null);
+  const isUserInteractingWithSlider = useRef<boolean>(false);
+
+  // Collect exactly 3 store photos or fall back to profile image
+  const showcasePhotos: string[] = useMemo(() => {
+    const list: string[] = [];
+    if (Array.isArray(restaurant?.storePhotos) && restaurant.storePhotos.length > 0) {
+      restaurant.storePhotos.forEach((p: any) => {
+        const u = typeof p === 'string' ? p : p?.url;
+        if (u && typeof u === 'string' && u.trim() && !list.includes(u)) {
+          list.push(u);
+        }
+      });
+    }
+    if (list.length === 0) {
+      const rawCandidate =
+        restaurant?.profilePicture ||
+        restaurant?.coverImage ||
+        restaurant?.image ||
+        restaurant?.rawUser?.profilePicture ||
+        restaurant?.rawUser?.coverImage ||
+        restaurant?.rawUser?.image ||
+        (Array.isArray(restaurant?.images) && restaurant.images[0]) ||
+        null;
+      if (rawCandidate && typeof rawCandidate === 'string' && !rawCandidate.startsWith('data:image')) {
+        list.push(rawCandidate);
+      }
+    }
+    return list;
+  }, [restaurant]);
+
+  // 3.5-second Auto-Slider with pause on touch
+  useEffect(() => {
+    if (showcasePhotos.length <= 1) return;
+    const interval = setInterval(() => {
+      if (isUserInteractingWithSlider.current) return;
+      setActivePhotoIndex((prev) => {
+        const next = (prev + 1) % showcasePhotos.length;
+        try {
+          photoScrollRef.current?.scrollToIndex({ index: next, animated: true });
+        } catch (e) {}
+        return next;
+      });
+    }, 3500);
+
+    return () => clearInterval(interval);
+  }, [showcasePhotos.length]);
   const searchInputRef = useRef<TextInput>(null);
   const scrollY = useRef(new Animated.Value(0)).current;
 
@@ -368,6 +421,19 @@ const RestaurantProfileScreen = ({ route, navigation }: any) => {
     socket.on('restaurant_name_updated', handleNameUpdate);
     socket.on('RESTAURANT_NAME_UPDATED', handleNameUpdate);
     socket.on('RESTAURANT_UPDATED', handleRestoUpdate);
+    const handleSupplierShowcase = (data: any) => {
+      const targetId = String(data?.supplierId || data?.restaurantId || '');
+      if (targetId && String(rId) && targetId === String(rId)) {
+        console.log('⚡ [RESTAURANT PROFILE] Live supplier showcase/animation updated via socket:', data);
+        if (data.supplierLottieAnimation !== undefined) {
+          setRestaurant((prev: any) => ({
+            ...(prev || {}),
+            supplierLottieAnimation: data.supplierLottieAnimation,
+          }));
+        }
+      }
+    };
+    socket.on('supplier_showcase_updated', handleSupplierShowcase);
     socket.on('MENU_ITEM_CREATED', handleItemCreated);
     socket.on('menu_item_added', handleItemCreated);
     socket.on('MENU_ITEM_UPDATED', handleItemUpdated);
@@ -383,6 +449,7 @@ const RestaurantProfileScreen = ({ route, navigation }: any) => {
       socket.off('restaurant_name_updated', handleNameUpdate);
       socket.off('RESTAURANT_NAME_UPDATED', handleNameUpdate);
       socket.off('RESTAURANT_UPDATED', handleRestoUpdate);
+      socket.off('supplier_showcase_updated', handleSupplierShowcase);
       socket.off('MENU_ITEM_CREATED', handleItemCreated);
       socket.off('menu_item_added', handleItemCreated);
       socket.off('MENU_ITEM_UPDATED', handleItemUpdated);
@@ -823,6 +890,118 @@ const RestaurantProfileScreen = ({ route, navigation }: any) => {
     return total + (dish ? (dish.price || 0) * qty : 0);
   }, 0);
 
+  // Floating Cart Banner Animation (Slide up/down + Fade in/out + Spring + Scroll auto-hide)
+  const cartAnim = useRef(new Animated.Value(cartItemCount > 0 ? 1 : 0)).current;
+  const [cartBannerVisible, setCartBannerVisible] = useState<boolean>(cartItemCount > 0);
+  const isBannerVisibleRef = useRef<boolean>(cartItemCount > 0);
+  const lastScrollY = useRef<number>(0);
+  const isScrollingDown = useRef<boolean>(false);
+
+  const showCartBanner = () => {
+    if (cartItemCount === 0) return;
+    if (isBannerVisibleRef.current) return;
+    isBannerVisibleRef.current = true;
+    setCartBannerVisible(true);
+    Animated.spring(cartAnim, {
+      toValue: 1,
+      tension: 65,
+      friction: 9,
+      useNativeDriver: true,
+    }).start();
+  };
+
+  const hideCartBanner = () => {
+    if (!isBannerVisibleRef.current) return;
+    isBannerVisibleRef.current = false;
+    Animated.timing(cartAnim, {
+      toValue: 0,
+      duration: 220,
+      useNativeDriver: true,
+    }).start(() => {
+      if (cartItemCount === 0) {
+        setCartBannerVisible(false);
+      }
+    });
+  };
+
+  useEffect(() => {
+    if (cartItemCount > 0) {
+      isScrollingDown.current = false;
+      isBannerVisibleRef.current = true;
+      setCartBannerVisible(true);
+      Animated.spring(cartAnim, {
+        toValue: 1,
+        tension: 65,
+        friction: 9,
+        useNativeDriver: true,
+      }).start();
+    } else {
+      isScrollingDown.current = false;
+      isBannerVisibleRef.current = false;
+      Animated.timing(cartAnim, {
+        toValue: 0,
+        duration: 220,
+        useNativeDriver: true,
+      }).start(() => {
+        setCartBannerVisible(false);
+      });
+    }
+  }, [cartItemCount]);
+
+  const handleScroll = (event: any) => {
+    const currentY = event.nativeEvent.contentOffset.y;
+    const diff = currentY - lastScrollY.current;
+
+    // Near the top of the menu
+    if (currentY <= 15) {
+      if (isScrollingDown.current) {
+        isScrollingDown.current = false;
+        showCartBanner();
+      }
+      lastScrollY.current = currentY;
+      return;
+    }
+
+    // Ignore micro jitter
+    if (Math.abs(diff) < 8) return;
+
+    if (diff > 0 && currentY > 40) {
+      // User is scrolling down into dishes (swipe up) -> Hide banner
+      if (!isScrollingDown.current) {
+        isScrollingDown.current = true;
+        hideCartBanner();
+      }
+    } else if (diff < 0) {
+      // User is scrolling up towards top (swipe down) -> Show banner
+      if (isScrollingDown.current) {
+        isScrollingDown.current = false;
+        showCartBanner();
+      }
+    }
+
+    lastScrollY.current = currentY;
+  };
+
+  const bannerTranslateY = cartAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: [110, 0],
+  });
+
+  const bannerOpacity = cartAnim.interpolate({
+    inputRange: [0, 0.3, 1],
+    outputRange: [0, 0.7, 1],
+  });
+
+  const bannerScale = cartAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0.93, 1],
+  });
+
+  const menuPillTranslateY = cartAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0, -68],
+  });
+
   // Restaurant details from DB
   const restoName = (restaurant?.name || restaurant?.restaurantName || initialResto?.name || initialResto?.restaurantName || restaurant?.username || 'Restaurant Partner').trim();
   const restoArea = canonicalLocation.locality || canonicalLocation.address || 'Store Location';
@@ -888,7 +1067,44 @@ const RestaurantProfileScreen = ({ route, navigation }: any) => {
       {/* ============================================================ */}
       <View style={styles.fixedRestaurantHeaderWrap}>
         <View style={styles.restaurantHeaderWrap}>
+          {/* DYNAMIC TOP BANNER: Priority #1 = Supplier Uploaded Lottie Animation; Fallback = Store Real Image */}
           {(() => {
+            const hasLottie = Boolean(
+              restaurant?.supplierLottieAnimation?.isActive !== false &&
+              (restaurant?.supplierLottieAnimation?.url || restaurant?.supplierLottieAnimation?.rawJson)
+            );
+
+            if (hasLottie) {
+              const lottieSrc = restaurant?.supplierLottieAnimation?.rawJson || restaurant?.supplierLottieAnimation?.url;
+              return (
+                <View style={{
+                  width: '100%',
+                  height: 220, // Frame enlarged downward (from 190px to 220px)
+                  backgroundColor: isDark ? '#1E293B' : '#0F172A',
+                  marginBottom: 10,
+                  borderRadius: 14,
+                  overflow: 'hidden',
+                  elevation: 3,
+                  shadowColor: '#000',
+                  shadowOffset: { width: 0, height: 2 },
+                  shadowOpacity: 0.15,
+                  shadowRadius: 4,
+                }}>
+                  {/* Natural unzoomed Lottie filling the enlarged frame cleanly */}
+                  <LottieAnimation
+                    source={lottieSrc}
+                    width="100%"
+                    height="100%"
+                    speed={1.5}
+                    loop={true}
+                    autoplay={true}
+                    preserveAspectRatio="xMidYMid meet"
+                    style={{ width: '100%', height: '100%' }}
+                  />
+                </View>
+              );
+            }
+
             const rawCandidate =
               restaurant?.profilePicture ||
               restaurant?.coverImage ||
@@ -1190,11 +1406,13 @@ const RestaurantProfileScreen = ({ route, navigation }: any) => {
         showsVerticalScrollIndicator={true}
         style={{ flex: 1 }}
         contentContainerStyle={{
-          paddingBottom: cartItemCount > 0 ? 140 : 80,
+          paddingBottom: cartItemCount > 0 ? 170 : 90,
           flexGrow: 1,
         }}
         removeClippedSubviews={false}
         nestedScrollEnabled={true}
+        onScroll={handleScroll}
+        scrollEventThrottle={16}
       >
 
         {/* ============================================================ */}
@@ -1482,31 +1700,59 @@ const RestaurantProfileScreen = ({ route, navigation }: any) => {
       </ScrollView>
 
       {/* ============================================================ */}
-      {/* FLOATING BUTTON (Quick Category Selector) */}
+      {/* FLOATING BUTTON (Quick Category Selector - Synchronized Animation) */}
       {/* ============================================================ */}
-      <TouchableOpacity
-        style={[styles.floatingMenuPill, { bottom: cartItemCount > 0 ? 90 : 24 }]}
+      <AnimatedTouchable
+        style={[
+          styles.floatingMenuPill,
+          {
+            bottom: 24,
+            transform: [{ translateY: menuPillTranslateY }],
+          },
+        ]}
         onPress={() => setMenuModalVisible(true)}
-        activeOpacity={0.9}
+        activeOpacity={0.88}
       >
         <Text style={styles.floatingMenuCutlery}>{isRestaurant ? '🍴' : (terminology.menuNavIcon || '📦')}</Text>
         <Text style={styles.floatingMenuLabel}>{isRestaurant ? 'Menu' : terminology.menuNavLabel}</Text>
-      </TouchableOpacity>
+      </AnimatedTouchable>
 
       {/* ============================================================ */}
-      {/* 9. STICKY CART BAR (Bottom Sticky when >= 1 item in cart) */}
+      {/* 9. FLOATING CART BANNER (Smooth Spring Transition & Floating Pill Design) */}
       {/* ============================================================ */}
-      {cartItemCount > 0 ? (
-        <View style={styles.stickyCartBar}>
-          <View style={styles.stickyCartInfo}>
-            <Text style={styles.stickyCartCountText}>
-              {cartItemCount} {cartItemCount === 1 ? 'ITEM' : 'ITEMS'} ADDED
-            </Text>
-            <Text style={styles.stickyCartTotalText}>₹{cartTotalPrice}</Text>
+      {cartBannerVisible ? (
+        <Animated.View
+          style={[
+            styles.floatingCartBanner,
+            {
+              opacity: bannerOpacity,
+              transform: [
+                { translateY: bannerTranslateY },
+                { scale: bannerScale },
+              ],
+            },
+          ]}
+        >
+          {/* Left: Cart Badge & Details */}
+          <View style={styles.floatingCartLeft}>
+            <View style={styles.floatingCartBadge}>
+              <Icon name="cart" size={17} color="#0066FF" />
+              <View style={styles.floatingCartCountPill}>
+                <Text style={styles.floatingCartCountNumber}>{cartItemCount}</Text>
+              </View>
+            </View>
+
+            <View style={styles.floatingCartTextCol}>
+              <Text style={styles.floatingCartLabel}>
+                {cartItemCount} {cartItemCount === 1 ? 'ITEM' : 'ITEMS'} ADDED
+              </Text>
+              <Text style={styles.floatingCartPrice}>₹{cartTotalPrice}</Text>
+            </View>
           </View>
 
+          {/* Right: View Cart Action Button */}
           <TouchableOpacity
-            style={styles.stickyCartContinueBtn}
+            style={styles.floatingCartActionBtn}
             onPress={() =>
               navigation.navigate('CartScreen', {
                 restaurantId: rId,
@@ -1520,9 +1766,10 @@ const RestaurantProfileScreen = ({ route, navigation }: any) => {
             }
             activeOpacity={0.85}
           >
-            <Text style={styles.stickyCartContinueText}>Continue ➔</Text>
+            <Text style={styles.floatingCartActionText}>View Cart</Text>
+            <Text style={styles.floatingCartActionArrow}>➔</Text>
           </TouchableOpacity>
-        </View>
+        </Animated.View>
       ) : null}
 
       {/* ============================================================ */}
@@ -2771,50 +3018,101 @@ const getStyles = (colors: any, isDark: boolean) => StyleSheet.create({
     letterSpacing: 0.3,
   },
 
-  /* STICKY CART BAR */
-  stickyCartBar: {
+  /* FLOATING CART BANNER */
+  floatingCartBanner: {
     position: 'absolute',
-    bottom: 12,
-    left: 16,
-    right: 16,
-    backgroundColor: '#0066FF',
-    borderRadius: 16,
-    paddingHorizontal: 18,
+    bottom: 16,
+    left: 14,
+    right: 14,
+    backgroundColor: isDark ? '#0F172A' : '#0B132B',
+    borderRadius: 22,
+    paddingHorizontal: 16,
     paddingVertical: 12,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    elevation: 10,
+    elevation: 14,
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.35,
+    shadowRadius: 10,
     zIndex: 100,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.12)',
   },
-  stickyCartInfo: {
+  floatingCartLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  floatingCartBadge: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: '#FFFFFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+    position: 'relative',
+  },
+  floatingCartCountPill: {
+    position: 'absolute',
+    top: -4,
+    right: -4,
+    backgroundColor: '#0066FF',
+    borderRadius: 10,
+    minWidth: 18,
+    height: 18,
+    paddingHorizontal: 4,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1.5,
+    borderColor: '#FFFFFF',
+  },
+  floatingCartCountNumber: {
+    color: '#FFFFFF',
+    fontSize: 10,
+    fontWeight: '900',
+  },
+  floatingCartTextCol: {
     flexDirection: 'column',
   },
-  stickyCartCountText: {
-    color: '#EFF6FF',
+  floatingCartLabel: {
+    color: '#94A3B8',
     fontSize: 11,
     fontWeight: '800',
-    letterSpacing: 0.5,
+    letterSpacing: 0.6,
+    textTransform: 'uppercase',
   },
-  stickyCartTotalText: {
+  floatingCartPrice: {
     color: '#FFFFFF',
-    fontSize: 17,
-    fontWeight: '800',
+    fontSize: 18,
+    fontWeight: '900',
+    letterSpacing: 0.3,
   },
-  stickyCartContinueBtn: {
-    backgroundColor: 'rgba(255, 255, 255, 0.25)',
-    paddingHorizontal: 18,
-    paddingVertical: 9,
-    borderRadius: 10,
+  floatingCartActionBtn: {
+    backgroundColor: '#0066FF',
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 14,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    shadowColor: '#0066FF',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.35,
+    shadowRadius: 6,
+    elevation: 3,
   },
-  stickyCartContinueText: {
+  floatingCartActionText: {
     color: '#FFFFFF',
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: '800',
+    letterSpacing: 0.3,
+  },
+  floatingCartActionArrow: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: '900',
   },
 
   /* SKELETON LOADING */

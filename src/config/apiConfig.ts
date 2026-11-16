@@ -5,15 +5,15 @@
 // Cloud URL: https://sachin24.onrender.com
 // ============================================================
 
-export const USE_CLOUD = true; // true = connects directly to Render cloud backend
+export const USE_CLOUD = false; // false = connects to Localhost / Computer IP
 export const CLOUD_URL = 'https://sachin24.onrender.com';
 
 export const USE_LOCALHOST = false;
-export const CENTRAL_IP = '10.166.80.3';
+export const CENTRAL_IP = '10.54.190.85'; // Computer IP on local network / Wi-Fi
 export const CENTRAL_PORT = '5000';
 
-// Production Release Lock: Always point directly to Render Cloud Backend
-export const LOCAL_URL = CLOUD_URL;
+// Connect using Computer's Local IP or USB adb reverse
+export const LOCAL_URL = USE_LOCALHOST ? `http://127.0.0.1:${CENTRAL_PORT}` : `http://${CENTRAL_IP}:${CENTRAL_PORT}`;
 
 // Base URL for all REST API calls
 export const BASE_URL = `${LOCAL_URL}/api`;
@@ -31,9 +31,8 @@ export const REQUEST_TIMEOUT = 35000;
 export const MAPPLI_TOKEN = 'eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6IjFkOGVjM2NlZTljODQyOWY5MTY2MTNkOGVmMzU2NGQ4IiwiaCI6Im11cm11cjY0In0=';
 export const LOCATIONIQ_KEY = '11c8e94d2cb34945948b31fc14356b31';
 
-// India Map Default Center & Radius
-export const DEFAULT_INDIA_LAT = 23.2505;
-export const DEFAULT_INDIA_LON = 77.4065;
+// SPEC PART 1: ZERO DUMMY LOCATION POLICY
+// Hardcoded dummy/fallback coordinates are strictly prohibited across the entire Ride Hub system.
 export const MATCHING_RADIUS_KM = 4.0;
 
 // OpenRouteService / OSRM Real Road Routing Endpoints
@@ -64,11 +63,22 @@ export const resolveUploadUrl = (img?: string): string => {
   if (!img || typeof img !== 'string') return '';
   const trimmed = img.trim();
   if (!trimmed) return '';
+
+  const serverUrl = getDynamicServerUrl();
+
+  // If URL already points to an older/alternative IP (e.g. http://10.xxx:5000/uploads/...), rewrite to active serverUrl
+  if (/^https?:\/\/[^\/]+(:\d+)?\/(uploads|api)\//.test(trimmed)) {
+    const cleanPath = trimmed.replace(/^https?:\/\/[^\/]+(:\d+)?\/(api\/)?(uploads\/)?/, '');
+    if (USE_CLOUD || serverUrl.includes('onrender.com')) {
+      return `${CLOUD_UPLOADS_CDN}/${cleanPath}`;
+    }
+    return `${serverUrl}/uploads/${cleanPath}`;
+  }
+
   if (trimmed.startsWith('http://') || trimmed.startsWith('https://') || trimmed.startsWith('data:')) {
     return trimmed;
   }
   const cleanPath = trimmed.replace(/^\/?(api\/)?(uploads\/)?/, '');
-  const serverUrl = getDynamicServerUrl();
 
   // On Render Cloud backend, resolve directly to Raw GitHub CDN for zero 404s and instant edge caching
   if (USE_CLOUD || serverUrl.includes('onrender.com')) {

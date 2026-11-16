@@ -1,3 +1,4 @@
+import FastStorage from '../services/FastStorage';
 import React, { useState, useEffect } from 'react';
 import {
   View,
@@ -23,8 +24,11 @@ const { width } = Dimensions.get('window');
 
 export default function CategoriesScreen({ navigation }: any) {
   const { isDark } = useTheme('customer');
-  const [categories, setCategories] = useState<any[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [categories, setCategories] = useState<any[]>(() => {
+    const cached = FastStorage.getItemSync<any[]>('@cached_customer_categories');
+    return Array.isArray(cached) && cached.length > 0 ? cached.filter((c: any) => !c.isAll) : [];
+  });
+  const [loading, setLoading] = useState(() => categories.length === 0);
   const [searchQuery, setSearchQuery] = useState('');
 
   const fetchCategories = async () => {
@@ -54,12 +58,15 @@ export default function CategoriesScreen({ navigation }: any) {
       else if (data && Array.isArray(data.categories)) loadedCategories = data.categories;
       else if (data && Array.isArray(data.data)) loadedCategories = data.data;
 
-      console.log('[CATEGORIES_PARSED_DATA]', JSON.stringify(loadedCategories));
-
-      const activeList = loadedCategories.filter((c: any) => c.isActive !== false);
-      console.log('[CATEGORIES_STATE_UPDATED]', JSON.stringify(activeList));
-
+      // Strict: ONLY show categories that have a valid uploaded image (no dummy categories without images)
+      const activeList = loadedCategories.filter((c: any) => 
+        c.isActive !== false && 
+        c.image && 
+        typeof c.image === 'string' && 
+        c.image.trim() !== ''
+      );
       setCategories(activeList);
+      FastStorage.setItem('@cached_customer_categories', activeList, 60 * 60 * 1000);
     } catch (e) {
       console.log('[CATEGORIES_ERROR]', e);
       setCategories([]);

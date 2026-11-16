@@ -404,14 +404,19 @@ export const FaceAuthModal: React.FC<FaceAuthModalProps> = ({
       useNativeDriver: true,
     }).start();
 
-    // Store Role-Specific Session Keys
+    // Store Role-Specific Session Keys without cross-account contamination
     try {
+      await AsyncStorage.removeItem('userData');
       if (token) {
         await AsyncStorage.setItem('userToken', token);
       }
       if (role === 'customer') {
         if (token) await AsyncStorage.setItem('customerToken', token);
-        if (userObj) await AsyncStorage.setItem('customerUser', JSON.stringify(userObj));
+        if (userObj) {
+          await AsyncStorage.setItem('customerUser', JSON.stringify(userObj));
+          await AsyncStorage.setItem('registeredCustomerId', String(userObj._id || userObj.id || ''));
+          await AsyncStorage.setItem('registeredCustomerName', String(userObj.name || 'Customer'));
+        }
         await AsyncStorage.setItem('activeRole', 'CUSTOMER');
       } else if (role === 'rider') {
         if (token) await AsyncStorage.setItem('deliveryToken', token);
@@ -419,7 +424,10 @@ export const FaceAuthModal: React.FC<FaceAuthModalProps> = ({
         await AsyncStorage.setItem('activeRole', 'DELIVERY');
       } else if (role === 'supplier') {
         if (token) await AsyncStorage.setItem('supplierToken', token);
-        if (userObj) await AsyncStorage.setItem('supplierUser', JSON.stringify(userObj));
+        if (userObj) {
+          await AsyncStorage.setItem('supplierUser', JSON.stringify(userObj));
+          await AsyncStorage.setItem('registeredSupplierId', String(userObj._id || userObj.id || ''));
+        }
         await AsyncStorage.setItem('activeRole', 'SUPPLIER');
       }
     } catch (e) {}

@@ -82,16 +82,43 @@ const CustomerProfileScreen = ({ navigation }: any) => {
       : `${UPLOADS_URL}${rawPic.replace('/uploads', '')}`
     : null;
 
-  // Sync with Auth user object
+  // Strict identity sync: reset & refetch authoritative customer profile whenever user changes
   useEffect(() => {
-    if (user) {
-      if (user.name) setCustomerName(user.name);
-      if (user.phoneNumber || user.phone) {
-        setCustomerPhone(user.phoneNumber || user.phone || '');
-      }
-      if (user.email) setCustomerEmail(user.email);
+    const authRole = String(user?.role || '').toLowerCase();
+    if (!user || (authRole && !['customer', 'user'].includes(authRole))) {
+      setCustomerName('Customer');
+      setEditNameText('');
+      setCustomerPhone('Not Provided');
+      setCustomerEmail('');
+      return;
     }
-  }, [user]);
+    setCustomerName(user.name || user.username || 'Customer');
+    setEditNameText(user.name || user.username || 'Customer');
+    setCustomerPhone(user.phoneNumber || user.phone || 'Not Provided');
+    setCustomerEmail(user.email || '');
+
+    let mounted = true;
+    const refreshCustomerFromBackend = async () => {
+      try {
+        const custToken = await AsyncStorage.getItem('customerToken');
+        if (!custToken) return;
+        const res = await api.get('/auth/me', {
+          headers: { Authorization: `Bearer ${custToken}`, 'X-Role': 'customer' },
+        });
+        const dbUser = res.data?.user;
+        const dbRole = String(dbUser?.role || '').toLowerCase();
+        if (mounted && res.data?.success && dbUser && (!dbRole || ['customer', 'user'].includes(dbRole))) {
+          setCustomerName(dbUser.name || dbUser.username || 'Customer');
+          setEditNameText(dbUser.name || dbUser.username || 'Customer');
+          setCustomerPhone(dbUser.phoneNumber || dbUser.phone || 'Not Provided');
+          setCustomerEmail(dbUser.email || '');
+          await updateUser(dbUser);
+        }
+      } catch (_) {}
+    };
+    refreshCustomerFromBackend();
+    return () => { mounted = false; };
+  }, [user?._id, user?.id]);
 
   // Load permanent saved delivery address
   useEffect(() => {
@@ -162,7 +189,7 @@ const CustomerProfileScreen = ({ navigation }: any) => {
         const updatedPhoto = res.data.photoUrl;
         const uId = user?._id || user?.id;
         if (uId) {
-          await api.put(`/users/${uId}`, { profilePicture: updatedPhoto }).catch(() => {});
+          await api.put(`/profile/${uId}`, { profilePicture: updatedPhoto }).catch(() => {});
         }
         await updateUser({ profilePicture: updatedPhoto });
         Alert.alert('Success', 'Profile photo updated successfully!');
@@ -216,16 +243,17 @@ const CustomerProfileScreen = ({ navigation }: any) => {
     }
     try {
       setUploading(true);
-      const uId = user?._id || user?.id;
-      if (uId) {
-        await api.put(`/users/${uId}`, { name: trimmed }).catch(() => {});
+      const res = await api.put('/users/update-profile', { name: trimmed });
+      if (!res.data?.success) {
+        throw new Error(res.data?.message || 'Could not update name');
       }
-      await updateUser({ name: trimmed });
-      setCustomerName(trimmed);
+      const nextUser = res.data.user ? { ...res.data.user } : { name: trimmed };
+      await updateUser(nextUser);
+      setCustomerName(nextUser.name || trimmed);
       setIsEditingName(false);
       Alert.alert('Success', 'Name updated successfully!');
-    } catch (e) {
-      Alert.alert('Error', 'Could not update name.');
+    } catch (e: any) {
+      Alert.alert('Error', e?.response?.data?.message || 'Could not update name.');
     } finally {
       setUploading(false);
     }
@@ -301,7 +329,6 @@ const CustomerProfileScreen = ({ navigation }: any) => {
           phone: cleanPhone,
         };
         await updateUser(updatedData);
-        await AsyncStorage.setItem('user_phone', cleanPhone);
         setCustomerPhone(cleanPhone);
         setShowPhoneModal(false);
         setNewPhoneInput('');
@@ -326,6 +353,14 @@ const CustomerProfileScreen = ({ navigation }: any) => {
         text: 'Log Out',
         style: 'destructive',
         onPress: async () => {
+          try {
+            const FastStorage = require('../services/FastStorage').default;
+            if (FastStorage?.clearUserSession) await FastStorage.clearUserSession();
+          } catch (_) {}
+          try {
+            const { clearCustomerAddressCache } = require('../services/LocationAddressService');
+            if (clearCustomerAddressCache) await clearCustomerAddressCache();
+          } catch (_) {}
           await logout('CUSTOMER');
           navigation.reset({
             index: 0,

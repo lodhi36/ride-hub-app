@@ -18,11 +18,13 @@ import {
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { AuthContext } from '../context/AuthContext';
 import api from '../services/api';
-import { BASE_URL, LOCAL_URL } from '../config/apiConfig';
+import { BASE_URL, LOCAL_URL, resolveUploadUrl } from '../config/apiConfig';
 import Icon from '../components/PngIcon';
 import ImagePicker from 'react-native-image-crop-picker';
 import { fetchCurrentGpsPosition, reverseGeocodeCoords } from '../services/LocationAddressService';
 import HindiTermsModal from '../components/HindiTermsModal';
+import { LottieAnimation } from '../components/LottieAnimation';
+import { useSocket } from '../context/SocketContext';
 
 const { width, height } = Dimensions.get('window');
 
@@ -37,6 +39,26 @@ const DEFAULT_CATEGORY_IMAGES: Record<string, string> = {
   electronics: 'https://images.unsplash.com/photo-1581092160607-ee22621dd758?w=500&auto=format&fit=crop&q=80',
   repair: 'https://images.unsplash.com/photo-1581092160607-ee22621dd758?w=500&auto=format&fit=crop&q=80',
   cleaning: 'https://images.unsplash.com/photo-1581578731548-c64695cc6952?w=500&auto=format&fit=crop&q=80',
+};
+
+export const getCategoryIcon = (cat: any) => {
+  if (cat?.icon && cat.icon !== 'sparkles-outline') {
+    return cat.icon;
+  }
+  const name = ((typeof cat === 'string' ? cat : cat?.name) || '').toLowerCase();
+  if (name.includes('restaurant') || name.includes('food') || name.includes('dish')) return '🍽️';
+  if (name.includes('beauty') || name.includes('cosmetic') || name.includes('salon')) return '💄';
+  if (name.includes('grocery') || name.includes('kirana') || name.includes('mart')) return '🏪';
+  if (name.includes('veg') || name.includes('sabji') || name.includes('vegetable')) return '🥦';
+  if (name.includes('fruit')) return '🍎';
+  if (name.includes('snack') || name.includes('namkeen') || name.includes('sweet')) return '🥨';
+  if (name.includes('oil') || name.includes('ghee')) return '🌻';
+  if (name.includes('station') || name.includes('book') || name.includes('pen')) return '📚';
+  if (name.includes('fashion') || name.includes('cloth') || name.includes('wear')) return '👕';
+  if (name.includes('toy')) return '🧸';
+  if (name.includes('electr')) return '⚡';
+  if (name.includes('pharma') || name.includes('medic')) return '💊';
+  return '🛍️';
 };
 
 export const STANDARD_PARTNER_TYPES = [
@@ -56,6 +78,7 @@ export default function RiderRegistrationScreen({ route, navigation }: any) {
   const initialMode = route?.params?.initialMode;
   const [isLogin, setIsLogin] = useState(initialMode !== 'signup');
   const [selectedBusinessType, setSelectedBusinessType] = useState<string>('restaurant');
+  const [selectedCategories, setSelectedCategories] = useState<string[]>(['restaurant']);
 
   // Categories State
   const [categories, setCategories] = useState<any[]>([]);
@@ -97,6 +120,47 @@ export default function RiderRegistrationScreen({ route, navigation }: any) {
   const [agreedToTerms, setAgreedToTerms] = useState<boolean>(true);
 
   const [loading, setLoading] = useState(false);
+  const [supplierMedia, setSupplierMedia] = useState<any>(null);
+
+  let socket: any = null;
+  try {
+    const sockCtx = useSocket();
+    socket = sockCtx?.socket;
+  } catch (_) {}
+
+  // Live Screen Media Fetch & Socket Sync from Admin Panel (SUPPLIER_SIGNUP)
+  useEffect(() => {
+    let mounted = true;
+    const fetchSupplierMedia = () => {
+      api.get('/screen-media/SUPPLIER_SIGNUP')
+        .then((res) => {
+          if (!mounted) return;
+          if (res.data?.success && res.data?.screen) {
+            setSupplierMedia(res.data.screen);
+          }
+        })
+        .catch(() => {});
+    };
+    fetchSupplierMedia();
+
+    if (socket) {
+      const handleMediaUpdate = (data: any) => {
+        if (!mounted || !data) return;
+        const sid = String(data.screenId || '').toUpperCase();
+        if (sid === 'SUPPLIER_SIGNUP' || sid === 'SUPPLIER_LOGIN') {
+          setSupplierMedia(data);
+        }
+      };
+      socket.on('screen_media_updated', handleMediaUpdate);
+      socket.on('screen_media_supplier_signup', handleMediaUpdate);
+      return () => {
+        mounted = false;
+        socket.off('screen_media_updated', handleMediaUpdate);
+        socket.off('screen_media_supplier_signup', handleMediaUpdate);
+      };
+    }
+    return () => { mounted = false; };
+  }, [socket]);
   const [detectingGps, setDetectingGps] = useState(false);
 
   useEffect(() => {
@@ -129,7 +193,13 @@ export default function RiderRegistrationScreen({ route, navigation }: any) {
       setLoadingCategories(true);
       const res = await api.get('/categories');
       if (res.data?.success && Array.isArray(res.data.categories)) {
-        const activeCats = res.data.categories.filter((c: any) => c.isActive !== false);
+        // Strict: ONLY show categories that have a valid uploaded image (no dummy categories without images)
+        const activeCats = res.data.categories.filter((c: any) => 
+          c.isActive !== false && 
+          c.image && 
+          typeof c.image === 'string' && 
+          c.image.trim() !== ''
+        );
         setCategories(activeCats);
         if (activeCats.length > 0) {
           setSelectedCategoryId(activeCats[0]._id);
@@ -141,6 +211,24 @@ export default function RiderRegistrationScreen({ route, navigation }: any) {
     } finally {
       setLoadingCategories(false);
     }
+  };
+
+  const toggleCategorySelection = (catItem: any) => {
+    const key = (catItem.name || catItem.label || catItem.id || '').toLowerCase().trim();
+    setSelectedCategories((prev) => {
+      const exists = prev.includes(key);
+      let updated: string[];
+      if (exists) {
+        if (prev.length === 1) return prev;
+        updated = prev.filter((k) => k !== key);
+      } else {
+        updated = [...prev, key];
+      }
+      setSelectedBusinessType(updated[0] || 'restaurant');
+      setSelectedCategoryId(catItem._id || catItem.id || '');
+      setSelectedCategoryName(catItem.name || catItem.label || '');
+      return updated;
+    });
   };
 
   const getCategoryImageUrl = (img?: string, name?: string) => {
@@ -244,8 +332,8 @@ export default function RiderRegistrationScreen({ route, navigation }: any) {
 
     await login(token, refreshToken || '', user);
 
-    const appStatus = user.approvalStatus || 'APPROVED';
-    if (appStatus === 'PENDING') {
+    const appStatus = String(user.approvalStatus || 'PENDING').toUpperCase();
+    if (appStatus !== 'APPROVED') {
       navigation.replace('SellerPendingApprovalScreen', {
         user,
         userId: user._id || user.id,
@@ -307,7 +395,12 @@ export default function RiderRegistrationScreen({ route, navigation }: any) {
       }
     } catch (err: any) {
       const msg = err.response?.data?.message || 'Failed to send OTP. Please try again.';
-      if (err.response?.data?.notFound && isLogin) {
+      if (err.response?.data?.errorType === 'ROLE_CONFLICT') {
+        Alert.alert('रोल प्रतिबंध (Role Restriction)', msg, [
+          { text: 'रोल बदलें (Change Role)', onPress: () => navigation.navigate('RoleSelection') },
+          { text: 'ठीक है (OK)', style: 'cancel' },
+        ]);
+      } else if (err.response?.data?.notFound && isLogin) {
         Alert.alert('Account Not Found', 'No supplier account found with this number. Please Register your store.', [
           {
             text: 'Register Store',
@@ -359,7 +452,14 @@ export default function RiderRegistrationScreen({ route, navigation }: any) {
       }
     } catch (err: any) {
       const msg = err.response?.data?.message || 'Invalid or expired OTP. Please try again.';
-      Alert.alert('Login Failed', msg);
+      if (err.response?.data?.errorType === 'ROLE_CONFLICT') {
+        Alert.alert('रोल प्रतिबंध (Role Restriction)', msg, [
+          { text: 'रोल बदलें (Change Role)', onPress: () => navigation.navigate('RoleSelection') },
+          { text: 'ठीक है (OK)', style: 'cancel' },
+        ]);
+      } else {
+        Alert.alert('Login Failed', msg);
+      }
     } finally {
       setVerifyingOtp(false);
     }
@@ -438,7 +538,14 @@ export default function RiderRegistrationScreen({ route, navigation }: any) {
       }
     } catch (err: any) {
       const msg = err.response?.data?.message || 'Registration failed. Please try again.';
-      Alert.alert('Registration Error', msg);
+      if (err.response?.data?.errorType === 'ROLE_CONFLICT') {
+        Alert.alert('रोल प्रतिबंध (Role Restriction)', msg, [
+          { text: 'रोल बदलें (Change Role)', onPress: () => navigation.navigate('RoleSelection') },
+          { text: 'ठीक है (OK)', style: 'cancel' },
+        ]);
+      } else {
+        Alert.alert('Registration Error', msg);
+      }
     } finally {
       setVerifyingOtp(false);
     }
@@ -470,7 +577,14 @@ export default function RiderRegistrationScreen({ route, navigation }: any) {
       }
     } catch (err: any) {
       const msg = err.response?.data?.message || 'Login failed. Please check your credentials.';
-      Alert.alert('Login Failed', msg);
+      if (err.response?.data?.errorType === 'ROLE_CONFLICT') {
+        Alert.alert('रोल प्रतिबंध (Role Restriction)', msg, [
+          { text: 'रोल बदलें (Change Role)', onPress: () => navigation.navigate('RoleSelection') },
+          { text: 'ठीक है (OK)', style: 'cancel' },
+        ]);
+      } else {
+        Alert.alert('Login Failed', msg);
+      }
     } finally {
       setLoading(false);
     }
@@ -480,36 +594,97 @@ export default function RiderRegistrationScreen({ route, navigation }: any) {
     <SafeAreaView style={styles.container}>
       <StatusBar hidden={false} barStyle="light-content" backgroundColor="#0066FF" />
 
-      <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-        <ScrollView contentContainerStyle={styles.scrollContent} bounces={false} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
-          {/* Header Banner */}
+      <KeyboardAvoidingView
+        style={{ flex: 1 }}
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        keyboardVerticalOffset={Platform.OS === 'ios' ? 64 : 0}
+      >
+        <ScrollView
+          contentContainerStyle={[styles.scrollContent, { paddingBottom: 220 }]}
+          bounces={true}
+          showsVerticalScrollIndicator={false}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="interactive"
+          automaticallyAdjustKeyboardInsets={true}
+        >
+          {/* Header Banner (Live from Admin Screen Media or Default Artwork) */}
           <View style={styles.headerBackground}>
-            <Image source={require('../banner/l.png')} style={styles.personImage} resizeMode="contain" />
+            {supplierMedia && supplierMedia.isActive && (supplierMedia.lottieUrl || supplierMedia.imageUrl || supplierMedia.mediaUrl) ? (
+              supplierMedia.lottieUrl ? (
+                <View style={styles.mediaContainerWrap}>
+                  <LottieAnimation
+                    source={{ uri: resolveUploadUrl(supplierMedia.lottieUrl) }}
+                    height={160}
+                    speed={supplierMedia.lottieConfig?.speed || 1.0}
+                    loop={supplierMedia.lottieConfig?.loop !== false}
+                    autoplay={true}
+                  />
+                </View>
+              ) : (
+                <Image
+                  source={{ uri: resolveUploadUrl(supplierMedia.imageUrl || supplierMedia.mediaUrl) }}
+                  style={styles.personImage}
+                  resizeMode="cover"
+                />
+              )
+            ) : (
+              <Image source={require('../banner/l.png')} style={styles.personImage} resizeMode="contain" />
+            )}
             <View style={styles.gradientOverlay} />
 
             <View style={styles.headerContent}>
-              <TouchableOpacity
-                style={styles.backBtn}
-                onPress={() => navigation.goBack()}
-                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-              >
-                <Icon name="arrow-back" size={16} color="#FFFFFF" />
-                <Text style={styles.backBtnText}>Role Select</Text>
-              </TouchableOpacity>
+              <View style={styles.topNavRow}>
+                <TouchableOpacity
+                  style={styles.backBtn}
+                  onPress={() => navigation.goBack()}
+                  hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                >
+                  <Icon name="arrow-back" size={16} color="#FFFFFF" />
+                  <Text style={styles.backBtnText}>Role Select</Text>
+                </TouchableOpacity>
 
-              <View style={styles.brandRow}>
-                <Text style={styles.rideText}>RIDE</Text>
-                <Text style={styles.hubText}>HUB</Text>
-              </View>
-              <View style={styles.expressRow}>
-                <Text style={styles.speedLine}>—</Text>
-                <Text style={styles.expressText}>SUPPLIER & MERCHANT PORTAL</Text>
-                <Text style={styles.speedLine}>—</Text>
+                <View style={styles.centerBrandLogo}>
+                  <View style={styles.logoBarsIcon}>
+                    <View style={[styles.barItem, { height: 10 }]} />
+                    <View style={[styles.barItem, { height: 16 }]} />
+                    <View style={[styles.barItem, { height: 22 }]} />
+                    <View style={[styles.barItem, { height: 14 }]} />
+                    <View style={[styles.barItem, { height: 8 }]} />
+                  </View>
+                  <View style={styles.logoArrowCircle}>
+                    <Text style={styles.logoArrowText}>➔</Text>
+                  </View>
+                  <Text style={styles.rideHubBrandText}>
+                    Ride<Text style={styles.hubBrandText}>Hub</Text>
+                  </Text>
+                </View>
+
+                <View style={styles.locationPill}>
+                  <Text style={styles.locationPinIcon}>📍</Text>
+                  <Text style={styles.locationPillText}>Bhopal</Text>
+                </View>
               </View>
 
-              <View style={styles.trustedBadge}>
-                <Text style={styles.trustedStar}>★</Text>
-                <Text style={styles.trustedText}>Verified Supplier Network</Text>
+              <View style={styles.heroTitlesWrap}>
+                <Text style={styles.heroPortalTitle}>
+                  Ride<Text style={{ color: '#00E5FF' }}>Hub</Text>
+                </Text>
+                <Text style={styles.heroPortalSub}>Supplier & Merchant Portal</Text>
+
+                <View style={styles.heroBulletsList}>
+                  <View style={styles.bulletItemRow}>
+                    <Text style={styles.bulletCheckIcon}>✓</Text>
+                    <Text style={styles.bulletText}>Register Your Store</Text>
+                  </View>
+                  <View style={styles.bulletItemRow}>
+                    <Text style={styles.bulletCheckIcon}>✓</Text>
+                    <Text style={styles.bulletText}>Get More Customers</Text>
+                  </View>
+                  <View style={styles.bulletItemRow}>
+                    <Text style={styles.bulletCheckIcon}>✓</Text>
+                    <Text style={styles.bulletText}>Grow Your Business</Text>
+                  </View>
+                </View>
               </View>
             </View>
           </View>
@@ -553,22 +728,11 @@ export default function RiderRegistrationScreen({ route, navigation }: any) {
                 <Text style={styles.mainTitle}>Supplier Partner Login</Text>
                 <Text style={styles.subSubtitle}>Log in with your registered mobile number and OTP</Text>
 
-                {/* Partner Categories Carousel */}
-                <View style={{ marginBottom: 18, width: '100%' }}>
-                  <Text style={{ fontSize: 11, fontWeight: '800', color: '#64748B', marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.6, textAlign: 'center' }}>
-                    Supported Store Categories
+                {/* Value Props Bar */}
+                <View style={styles.perksRow}>
+                  <Text style={styles.perksText}>
+                    ⚡ Live Store Orders • 💰 Instant Daily Payout • 📊 Business Growth
                   </Text>
-                  <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingVertical: 2, paddingHorizontal: 4 }}>
-                    {categories.map((cat: any) => {
-                      const imgUri = getCategoryImageUrl(cat.image, cat.name);
-                      return (
-                        <View key={`login_cat_${cat._id}`} style={styles.loginCatChip}>
-                          <Image source={{ uri: imgUri }} style={styles.loginCatThumb} resizeMode="cover" />
-                          <Text style={styles.loginCatText} numberOfLines={1}>{cat.name}</Text>
-                        </View>
-                      );
-                    })}
-                  </ScrollView>
                 </View>
 
                 {/* Mobile Number Input */}
@@ -737,29 +901,61 @@ export default function RiderRegistrationScreen({ route, navigation }: any) {
                   />
                 </View>
 
-                {/* 2. Business Category & Type */}
+                {/* 2. Business Category & Type (Live Dynamic from Admin Backend) */}
                 <Text style={styles.sectionHeader}>2. Business Type & Category</Text>
+                <Text style={styles.categoryInstruction}>
+                  Select Business Category (Choose one or more):
+                </Text>
 
                 <View style={{ marginBottom: 16 }}>
-                  <Text style={styles.inputLabel}>Select Business Category:</Text>
-                  <View style={styles.btypeGrid}>
-                    {STANDARD_PARTNER_TYPES.map((b) => {
-                      const isSelected = selectedBusinessType === b.id;
-                      return (
-                        <TouchableOpacity
-                          key={b.id}
-                          style={[styles.btypeCard, isSelected && styles.btypeCardActive]}
-                          onPress={() => setSelectedBusinessType(b.id)}
-                          activeOpacity={0.7}
-                        >
-                          <Text style={styles.btypeIcon}>{b.icon}</Text>
-                          <Text style={[styles.btypeTitle, isSelected && styles.btypeTitleActive]}>
-                            {b.label}
-                          </Text>
-                        </TouchableOpacity>
-                      );
-                    })}
-                  </View>
+                  {loadingCategories && categories.length === 0 ? (
+                    <View style={{ paddingVertical: 20, alignItems: 'center' }}>
+                      <ActivityIndicator size="small" color="#0066FF" />
+                      <Text style={{ fontSize: 12, color: '#64748B', marginTop: 6 }}>Loading categories from Admin...</Text>
+                    </View>
+                  ) : (
+                    <View style={styles.btypeGrid}>
+                      {(categories.length > 0 ? categories : STANDARD_PARTNER_TYPES).map((cat: any) => {
+                        const catKey = (cat.name || cat.label || cat.id || '').toLowerCase().trim();
+                        const isSelected = selectedCategories.includes(catKey) || selectedBusinessType === catKey;
+                        const catName = cat.name || cat.label;
+                        const catIcon = getCategoryIcon(cat);
+                        const hasImg = cat.image && typeof cat.image === 'string' && cat.image.trim().length > 0;
+
+                        return (
+                          <TouchableOpacity
+                            key={cat._id || cat.id || catKey}
+                            style={[styles.btypeCard, isSelected && styles.btypeCardActive]}
+                            onPress={() => toggleCategorySelection(cat)}
+                            activeOpacity={0.75}
+                          >
+                            {isSelected && (
+                              <View style={styles.btypeCheckBadge}>
+                                <Text style={styles.btypeCheckText}>✓</Text>
+                              </View>
+                            )}
+
+                            {hasImg ? (
+                              <Image
+                                source={{ uri: resolveUploadUrl(cat.image) }}
+                                style={styles.btypeThumbImg}
+                                resizeMode="contain"
+                              />
+                            ) : (
+                              <Text style={styles.btypeIcon}>{catIcon}</Text>
+                            )}
+
+                            <Text
+                              style={[styles.btypeTitle, isSelected && styles.btypeTitleActive]}
+                              numberOfLines={2}
+                            >
+                              {catName}
+                            </Text>
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </View>
+                  )}
                 </View>
 
                 {/* 3. Business Name & Address */}
@@ -907,6 +1103,24 @@ export default function RiderRegistrationScreen({ route, navigation }: any) {
               </View>
             )}
 
+            {/* Bottom Trust Badges (Matching Image 3) */}
+            <View style={styles.trustBadgesRow}>
+              <View style={styles.trustBadgeItem}>
+                <Text style={styles.trustBadgeIcon}>🏪</Text>
+                <Text style={styles.trustBadgeText}>More Customers</Text>
+              </View>
+              <View style={styles.trustBadgeDivider} />
+              <View style={styles.trustBadgeItem}>
+                <Text style={styles.trustBadgeIcon}>📈</Text>
+                <Text style={styles.trustBadgeText}>Business Growth</Text>
+              </View>
+              <View style={styles.trustBadgeDivider} />
+              <View style={styles.trustBadgeItem}>
+                <Text style={styles.trustBadgeIcon}>🛡️</Text>
+                <Text style={styles.trustBadgeText}>Trusted Platform</Text>
+              </View>
+            </View>
+
             <View style={styles.footerBrand}>
               <Text style={styles.footerBrandText}>RIDE HUB MULTI VENDOR MERCHANT NETWORK</Text>
             </View>
@@ -937,10 +1151,20 @@ const styles = StyleSheet.create({
     backgroundColor: '#F8FAFC',
   },
   headerBackground: {
-    height: 180,
+    paddingTop: Platform.OS === 'android' ? (StatusBar.currentHeight || 28) + 12 : 44,
+    paddingBottom: 24,
     backgroundColor: '#0066FF',
-    justifyContent: 'flex-end',
     position: 'relative',
+  },
+  mediaContainerWrap: {
+    position: 'absolute',
+    top: 40,
+    right: 10,
+    width: 170,
+    height: 160,
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 2,
   },
   personImage: {
     position: 'absolute',
@@ -1207,32 +1431,40 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: 8,
+    justifyContent: 'flex-start',
   },
   btypeCard: {
     width: (width - 56) / 4,
     backgroundColor: '#F8FAFC',
-    borderRadius: 12,
-    paddingVertical: 10,
+    borderRadius: 14,
+    paddingVertical: 12,
+    paddingHorizontal: 4,
     alignItems: 'center',
+    justifyContent: 'center',
     borderWidth: 1.5,
     borderColor: '#E2E8F0',
+    position: 'relative',
+    marginBottom: 8,
   },
   btypeCardActive: {
     backgroundColor: '#EFF6FF',
     borderColor: '#0066FF',
+    borderWidth: 2,
   },
   btypeIcon: {
-    fontSize: 22,
-    marginBottom: 4,
+    fontSize: 26,
+    marginBottom: 6,
   },
   btypeTitle: {
-    fontSize: 10,
+    fontSize: 10.5,
     fontWeight: '700',
-    color: '#64748B',
+    color: '#334155',
     textAlign: 'center',
+    lineHeight: 13,
   },
   btypeTitleActive: {
     color: '#0066FF',
+    fontWeight: '800',
   },
   loginCatChip: {
     alignItems: 'center',
@@ -1288,5 +1520,163 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: '#0F172A',
     lineHeight: 17,
+  },
+  topNavRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    width: '100%',
+    marginBottom: 8,
+  },
+  centerBrandLogo: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  logoBarsIcon: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    gap: 2,
+    marginRight: 4,
+  },
+  barItem: {
+    width: 3,
+    backgroundColor: '#38BDF8',
+    borderRadius: 2,
+  },
+  logoArrowCircle: {
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: '#00E5FF',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 4,
+  },
+  logoArrowText: {
+    fontSize: 10,
+    fontWeight: '900',
+    color: '#0066FF',
+  },
+  rideHubBrandText: {
+    fontSize: 18,
+    fontWeight: '900',
+    color: '#FFFFFF',
+    letterSpacing: 0.5,
+  },
+  hubBrandText: {
+    color: '#00E5FF',
+  },
+  locationPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(15, 23, 42, 0.45)',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.2)',
+  },
+  locationPinIcon: {
+    fontSize: 11,
+    marginRight: 4,
+  },
+  locationPillText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#FFFFFF',
+  },
+  heroTitlesWrap: {
+    marginTop: 4,
+  },
+  heroPortalTitle: {
+    fontSize: 24,
+    fontWeight: '900',
+    color: '#FFFFFF',
+    letterSpacing: 0.5,
+  },
+  heroPortalSub: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#E0F2FE',
+    letterSpacing: 0.8,
+    marginBottom: 8,
+  },
+  heroBulletsList: {
+    gap: 3,
+  },
+  bulletItemRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  bulletCheckIcon: {
+    fontSize: 11,
+    color: '#FBBF24',
+    fontWeight: '900',
+    marginRight: 6,
+  },
+  bulletText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#FFFFFF',
+  },
+  categoryInstruction: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#64748B',
+    marginBottom: 10,
+  },
+  btypeCheckBadge: {
+    position: 'absolute',
+    top: 4,
+    right: 4,
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    backgroundColor: '#0066FF',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 10,
+  },
+  btypeCheckText: {
+    fontSize: 9,
+    fontWeight: '900',
+    color: '#FFFFFF',
+  },
+  btypeThumbImg: {
+    width: 32,
+    height: 32,
+    marginBottom: 4,
+  },
+  trustBadgesRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-around',
+    backgroundColor: '#F0F9FF',
+    borderRadius: 14,
+    paddingVertical: 12,
+    paddingHorizontal: 8,
+    marginTop: 18,
+    borderWidth: 1,
+    borderColor: '#BAE6FD',
+  },
+  trustBadgeItem: {
+    alignItems: 'center',
+    flex: 1,
+  },
+  trustBadgeDivider: {
+    width: 1,
+    height: 24,
+    backgroundColor: '#BAE6FD',
+  },
+  trustBadgeIcon: {
+    fontSize: 18,
+    marginBottom: 2,
+  },
+  trustBadgeText: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#0369A1',
+    textAlign: 'center',
   },
 });

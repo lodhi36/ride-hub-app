@@ -33,7 +33,9 @@ const ContactSupportScreen = ({ navigation }: any) => {
     try {
       let userData: any = null;
       try {
-        const u = await AsyncStorage.getItem('userData');
+        const activeRole = await AsyncStorage.getItem('activeRole');
+        const key = activeRole === 'SUPPLIER' ? 'supplierUser' : (activeRole === 'DELIVERY' ? 'deliveryUser' : 'customerUser');
+        const u = await AsyncStorage.getItem(key);
         if (u) userData = JSON.parse(u);
       } catch (e) {}
 

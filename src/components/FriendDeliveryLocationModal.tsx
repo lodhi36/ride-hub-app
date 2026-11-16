@@ -23,70 +23,12 @@ import {
   fetchCurrentGpsPositionDetailed,
   reverseGeocodeCoords,
   isValidCoordinates,
+  isDummyCoordinates,
 } from '../services/LocationAddressService';
 import { OSRM_ROUTING_URL } from '../config/apiConfig';
 import { useTheme } from '../context/ThemeContext';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
-
-// Operational Delivery Zones of Bhopal (for Leaflet polygon overlay)
-const BHOPAL_MAP_ZONES = [
-  {
-    name: 'North Bhopal & Karond Zone',
-    color: '#0066FF',
-    coords: [
-      [23.3280, 77.4050],
-      [23.3200, 77.4250],
-      [23.2800, 77.4450],
-      [23.2500, 77.4400],
-      [23.2200, 77.3950],
-      [23.2450, 77.3650],
-      [23.2950, 77.3500],
-      [23.3280, 77.4050],
-    ],
-  },
-  {
-    name: 'Arwaliya & Huzur Tahsil Zone',
-    color: '#F59E0B',
-    coords: [
-      [23.3400, 77.3900],
-      [23.3400, 77.4550],
-      [23.3100, 77.4750],
-      [23.2850, 77.4500],
-      [23.2650, 77.4200],
-      [23.2700, 77.3850],
-      [23.2950, 77.3700],
-      [23.3200, 77.3800],
-      [23.3400, 77.3900],
-    ],
-  },
-  {
-    name: 'New Bhopal (MP Nagar • Arera • Kolar)',
-    color: '#10B981',
-    coords: [
-      [23.2450, 77.4100],
-      [23.2400, 77.4500],
-      [23.2100, 77.4600],
-      [23.1700, 77.4400],
-      [23.1600, 77.4000],
-      [23.1800, 77.3800],
-      [23.2200, 77.3950],
-      [23.2450, 77.4100],
-    ],
-  },
-  {
-    name: 'BHEL & East Bhopal (Indrapuri • Piplani)',
-    color: '#8B5CF6',
-    coords: [
-      [23.2900, 77.4450],
-      [23.2800, 77.4950],
-      [23.2350, 77.5000],
-      [23.2150, 77.4600],
-      [23.2450, 77.4400],
-      [23.2900, 77.4450],
-    ],
-  },
-];
 
 export interface FriendLocationData {
   latitude: number;
@@ -123,34 +65,32 @@ export const FriendDeliveryLocationModal: React.FC<FriendDeliveryLocationModalPr
   restaurantId,
   onConfirm,
 }) => {
-  const [selectedLat, setSelectedLat] = useState<number>(
-    initialCoords && isValidCoordinates(initialCoords.latitude, initialCoords.longitude)
-      ? initialCoords.latitude
-      : 23.2330 // Default: Bhopal MP Nagar
-  );
-  const [selectedLon, setSelectedLon] = useState<number>(
-    initialCoords && isValidCoordinates(initialCoords.latitude, initialCoords.longitude)
-      ? initialCoords.longitude
-      : 77.4350
-  );
+  const validInit =
+    initialCoords &&
+    isValidCoordinates(initialCoords.latitude, initialCoords.longitude) &&
+    !isDummyCoordinates(initialCoords.latitude, initialCoords.longitude)
+      ? initialCoords
+      : restaurantCoords &&
+        isValidCoordinates(restaurantCoords.latitude, restaurantCoords.longitude) &&
+        !isDummyCoordinates(restaurantCoords.latitude, restaurantCoords.longitude)
+      ? restaurantCoords
+      : null;
+
+  const [selectedLat, setSelectedLat] = useState<number>(validInit ? validInit.latitude : 0);
+  const [selectedLon, setSelectedLon] = useState<number>(validInit ? validInit.longitude : 0);
   const [friendName, setFriendName] = useState<string>(initialName);
   const [friendPhone, setFriendPhone] = useState<string>(initialPhone);
-  const [addressTitle, setAddressTitle] = useState<string>('Selected Location');
-  const [fullAddressText, setFullAddressText] = useState<string>('Detecting location...');
+  const [addressTitle, setAddressTitle] = useState<string>('Friend Delivery Location');
+  const [fullAddressText, setFullAddressText] = useState<string>('Locating your position...');
   const [localityText, setLocalityText] = useState<string>('');
   const [landmarkText, setLandmarkText] = useState<string>('');
+  const [gpsStatusMsg, setGpsStatusMsg] = useState<string>(validInit ? '' : 'Locating your position...');
 
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [isSearching, setIsSearching] = useState<boolean>(false);
   const [searchResults, setSearchResults] = useState<any[]>([]);
 
-  // Validation 1: Zone Check State
-  const [isCheckingZone, setIsCheckingZone] = useState<boolean>(false);
-  const [isInsideZone, setIsInsideZone] = useState<boolean | null>(null);
-  const [zoneId, setZoneId] = useState<string>('');
-  const [zoneErrorMessage, setZoneErrorMessage] = useState<string>('');
-
-  // Validation 2: 5 KM Road Distance State
+  // 5 KM Road Distance Validation State
   const [isCalculatingDistance, setIsCalculatingDistance] = useState<boolean>(false);
   const [roadDistanceKm, setRoadDistanceKm] = useState<number | null>(null);
   const [isWithin5Km, setIsWithin5Km] = useState<boolean | null>(null);
@@ -166,10 +106,14 @@ export const FriendDeliveryLocationModal: React.FC<FriendDeliveryLocationModalPr
     if (visible) {
       if (initialName) setFriendName(initialName);
       if (initialPhone) setFriendPhone(initialPhone);
-      if (initialCoords && isValidCoordinates(initialCoords.latitude, initialCoords.longitude)) {
+      if (
+        initialCoords &&
+        isValidCoordinates(initialCoords.latitude, initialCoords.longitude) &&
+        !isDummyCoordinates(initialCoords.latitude, initialCoords.longitude)
+      ) {
         updatePin(initialCoords.latitude, initialCoords.longitude);
       } else {
-        updatePin(23.2330, 77.4350);
+        handleDetectCurrentGps();
       }
     }
   }, [visible]);
@@ -192,11 +136,11 @@ export const FriendDeliveryLocationModal: React.FC<FriendDeliveryLocationModalPr
     try {
       const geo = await reverseGeocodeCoords(lat, lon);
       if (geo) {
-        const area = geo.area || geo.city || 'Bhopal';
+        const area = geo.area || geo.city || 'Selected Location';
         setAddressTitle(area);
         setLocalityText(area);
         setLandmarkText(geo.landmark || area);
-        setFullAddressText(geo.fullAddress || `${area}, Bhopal, Madhya Pradesh`);
+        setFullAddressText(geo.fullAddress || area);
       } else {
         setAddressTitle('Pin Location');
         setFullAddressText(`Coordinates: ${lat.toFixed(4)}, ${lon.toFixed(4)}`);
@@ -204,34 +148,6 @@ export const FriendDeliveryLocationModal: React.FC<FriendDeliveryLocationModalPr
     } catch (_) {
       setAddressTitle('Pin Location');
       setFullAddressText(`Coordinates: ${lat.toFixed(4)}, ${lon.toFixed(4)}`);
-    }
-  };
-
-  // 1. DELIVERY ZONE VALIDATION
-  const checkDeliveryZone = async (lat: number, lon: number) => {
-    setIsCheckingZone(true);
-    setZoneErrorMessage('');
-    try {
-      const res = await api.post('/zones/check-customer-serviceable', {
-        latitude: lat,
-        longitude: lon,
-      });
-      if (res.data && res.data.serviceable === true) {
-        setIsInsideZone(true);
-        setZoneId(res.data.zone?.zoneId || 'bhopal_zone');
-        setZoneErrorMessage('');
-      } else {
-        setIsInsideZone(false);
-        setZoneErrorMessage('Sorry! This location is out of our delivery zone.');
-      }
-    } catch (err) {
-      // Backend check error fallback
-      console.warn('[Zone Check Error]', err);
-      // Assume outside if failed to verify safely
-      setIsInsideZone(false);
-      setZoneErrorMessage('Sorry! This location is out of our delivery zone.');
-    } finally {
-      setIsCheckingZone(false);
     }
   };
 
@@ -354,10 +270,11 @@ export const FriendDeliveryLocationModal: React.FC<FriendDeliveryLocationModalPr
 
   // Master Pin Update Trigger
   const updatePin = (lat: number, lon: number) => {
+    if (!isValidCoordinates(lat, lon) || isDummyCoordinates(lat, lon)) return;
     setSelectedLat(lat);
     setSelectedLon(lon);
+    setGpsStatusMsg('');
     resolveAddress(lat, lon);
-    checkDeliveryZone(lat, lon);
     checkRestaurant5KmRadius(lat, lon);
 
     // Inject into Leaflet WebView
@@ -386,7 +303,7 @@ export const FriendDeliveryLocationModal: React.FC<FriendDeliveryLocationModalPr
     try {
       setIsSearching(true);
       const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(
-        text + ', Bhopal, Madhya Pradesh, India'
+        text.trim()
       )}&limit=5&countrycodes=in`;
       const res = await fetch(url, { headers: { 'User-Agent': 'RideHubApp/2.0' } });
       const data = await res.json();
@@ -413,14 +330,26 @@ export const FriendDeliveryLocationModal: React.FC<FriendDeliveryLocationModalPr
   const handleDetectCurrentGps = async () => {
     try {
       setDetectingGps(true);
-      const detailed = await fetchCurrentGpsPositionDetailed();
-      if (detailed && detailed.fix && isValidCoordinates(detailed.fix.latitude, detailed.fix.longitude)) {
+      setGpsStatusMsg('Locating your position...');
+      const detailed = await fetchCurrentGpsPositionDetailed(false);
+      if (detailed && detailed.fix && !isDummyCoordinates(detailed.fix.latitude, detailed.fix.longitude)) {
         updatePin(detailed.fix.latitude, detailed.fix.longitude);
       } else {
-        Alert.alert('GPS Notice', detailed?.message || 'Unable to fetch GPS. You can drag the pin on the map.');
+        const msg =
+          detailed?.errorType === 'PERMISSION_DENIED'
+            ? 'Location permission required.'
+            : detailed?.errorType === 'LOCATION_OFF'
+            ? 'GPS unavailable.'
+            : 'Unable to fetch current location. Retry.';
+        setGpsStatusMsg(msg);
+        if (!isValidCoordinates(selectedLat, selectedLon)) {
+          setFullAddressText(msg);
+        }
+        Alert.alert('GPS Status', msg);
       }
     } catch (_) {
-      Alert.alert('GPS Notice', 'Unable to fetch current GPS. Please drag the pin to your friend\'s location.');
+      setGpsStatusMsg('Unable to fetch current location. Retry.');
+      Alert.alert('GPS Status', 'Unable to fetch current location. Retry.');
     } finally {
       setDetectingGps(false);
     }
@@ -437,18 +366,8 @@ export const FriendDeliveryLocationModal: React.FC<FriendDeliveryLocationModalPr
       Alert.alert('Valid Mobile Number Required', 'Please enter your friend’s valid 10-digit mobile number.');
       return;
     }
-    if (!isValidCoordinates(selectedLat, selectedLon)) {
+    if (!isValidCoordinates(selectedLat, selectedLon) || isDummyCoordinates(selectedLat, selectedLon)) {
       Alert.alert('Location Required', 'Please choose your friend’s delivery location on the map.');
-      return;
-    }
-
-    // Enforcement of Zone check
-    if (isInsideZone === false) {
-      Alert.alert(
-        'Out of Delivery Zone',
-        'Sorry! This location is out of our delivery zone.',
-        [{ text: 'OK' }]
-      );
       return;
     }
 
@@ -471,16 +390,14 @@ export const FriendDeliveryLocationModal: React.FC<FriendDeliveryLocationModalPr
       landmark: landmarkText,
       recipientName: friendName.trim(),
       recipientPhone: cleanPhone,
-      zoneId,
       roadDistanceKm: roadDistanceKm || undefined,
     });
     setConfirming(false);
     onClose();
   };
 
-  // Leaflet HTML
+  // Leaflet HTML (Clean OpenStreetMap without zone polygon overlays or hardcoded fallbacks)
   const mapHtml = useMemo(() => {
-    const zonesJson = JSON.stringify(BHOPAL_MAP_ZONES);
     const hasResto = Boolean(restaurantCoords && isValidCoordinates(restaurantCoords.latitude, restaurantCoords.longitude));
     const restoLat = hasResto ? restaurantCoords!.latitude : 0;
     const restoLon = hasResto ? restaurantCoords!.longitude : 0;
@@ -545,23 +462,25 @@ export const FriendDeliveryLocationModal: React.FC<FriendDeliveryLocationModalPr
 <body>
   <div id="map"></div>
   <script>
+    var hasPin = ${isValidCoordinates(selectedLat, selectedLon) && !isDummyCoordinates(selectedLat, selectedLon)};
+    var hasResto = ${hasResto};
+    var restoLat = ${restoLat};
+    var restoLon = ${restoLon};
+    var initLat = hasPin ? ${selectedLat} : (hasResto ? restoLat : 0);
+    var initLon = hasPin ? ${selectedLon} : (hasResto ? restoLon : 0);
+    var hasView = Boolean(initLat !== 0 && initLon !== 0 && !isNaN(initLat) && !isNaN(initLon));
+
+    var mapEl = document.getElementById('map');
+    if (mapEl && !hasView) mapEl.style.visibility = 'hidden';
     var map = L.map('map', {
       zoomControl: false,
       attributionControl: false
-    }).setView([${selectedLat}, ${selectedLon}], 14);
+    });
+    if (hasView) {
+      map.setView([initLat, initLon], 14);
+    }
 
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
-
-    var zones = ${zonesJson};
-    zones.forEach(function(z) {
-      L.polygon(z.coords, {
-        color: z.color,
-        fillColor: z.color,
-        fillOpacity: 0.12,
-        weight: 2,
-        dashArray: '4, 4'
-      }).addTo(map);
-    });
 
     var pinIcon = L.divIcon({
       className: 'pin-container',
@@ -570,17 +489,14 @@ export const FriendDeliveryLocationModal: React.FC<FriendDeliveryLocationModalPr
       iconAnchor: [19, 38]
     });
 
-    var marker = L.marker([${selectedLat}, ${selectedLon}], {
+    var marker = hasView ? L.marker([initLat, initLon], {
       icon: pinIcon,
       draggable: true
-    }).addTo(map);
+    }).addTo(map) : null;
 
-    var hasResto = ${hasResto};
-    var restoLat = ${restoLat};
-    var restoLon = ${restoLon};
     var restoMarker = null;
 
-    if (hasResto && restoLat > 0) {
+    if (hasResto && restoLat !== 0 && restoLon !== 0) {
       var restoIcon = L.divIcon({
         className: 'resto-pin-container',
         html: '<div class="resto-pin">🍽️</div>',
@@ -591,19 +507,27 @@ export const FriendDeliveryLocationModal: React.FC<FriendDeliveryLocationModalPr
       restoMarker.bindTooltip('${restaurantName}', { permanent: false });
     }
 
-    marker.on('dragend', function(e) {
-      var pos = marker.getLatLng();
-      if (window.ReactNativeWebView) {
-        window.ReactNativeWebView.postMessage(JSON.stringify({
-          type: 'PIN_MOVED',
-          lat: pos.lat,
-          lon: pos.lng
-        }));
-      }
-    });
+    function bindDrag(m) {
+      m.on('dragend', function(e) {
+        var pos = m.getLatLng();
+        if (window.ReactNativeWebView) {
+          window.ReactNativeWebView.postMessage(JSON.stringify({
+            type: 'PIN_MOVED',
+            lat: pos.lat,
+            lon: pos.lng
+          }));
+        }
+      });
+    }
+    if (marker) bindDrag(marker);
 
     map.on('click', function(e) {
-      marker.setLatLng(e.latlng);
+      if (!marker) {
+        marker = L.marker(e.latlng, { icon: pinIcon, draggable: true }).addTo(map);
+        bindDrag(marker);
+      } else {
+        marker.setLatLng(e.latlng);
+      }
       if (window.ReactNativeWebView) {
         window.ReactNativeWebView.postMessage(JSON.stringify({
           type: 'PIN_MOVED',
@@ -614,7 +538,14 @@ export const FriendDeliveryLocationModal: React.FC<FriendDeliveryLocationModalPr
     });
 
     window.setPinLocation = function(lat, lon) {
-      if (marker) {
+      if (!lat || !lon || isNaN(lat) || isNaN(lon)) return;
+      var el = document.getElementById('map');
+      if (el && el.style.visibility === 'hidden') el.style.visibility = 'visible';
+      if (!marker) {
+        marker = L.marker([lat, lon], { icon: pinIcon, draggable: true }).addTo(map);
+        bindDrag(marker);
+        map.setView([lat, lon], 14, { animate: true });
+      } else {
         marker.setLatLng([lat, lon]);
         map.panTo([lat, lon], { animate: true });
       }
@@ -772,25 +703,7 @@ export const FriendDeliveryLocationModal: React.FC<FriendDeliveryLocationModalPr
               </Text>
             </View>
 
-            {/* VALIDATION 1: ZONE CHECK STATUS */}
-            {isCheckingZone ? (
-              <View style={styles.statusCheckingRow}>
-                <ActivityIndicator size="small" color="#0066FF" />
-                <Text style={styles.statusCheckingText}>Checking delivery service zone...</Text>
-              </View>
-            ) : isInsideZone === true ? (
-              <View style={styles.statusSuccessRow}>
-                <Icon name="checkmark-circle" size={18} color="#16A34A" style={{ marginRight: 6 }} />
-                <Text style={styles.statusSuccessText}>Delivery address is within our service zone.</Text>
-              </View>
-            ) : isInsideZone === false ? (
-              <View style={styles.statusErrorRow}>
-                <Icon name="close-circle" size={18} color="#DC2626" style={{ marginRight: 6 }} />
-                <Text style={styles.statusErrorText}>Sorry! This location is out of our delivery zone.</Text>
-              </View>
-            ) : null}
-
-            {/* VALIDATION 2: 5 KM RESTAURANT RADIUS CHECK STATUS */}
+            {/* VALIDATION: 5 KM RESTAURANT RADIUS CHECK STATUS */}
             {restaurantCoords && (
               isCalculatingDistance ? (
                 <View style={styles.statusCheckingRow}>
@@ -818,7 +731,7 @@ export const FriendDeliveryLocationModal: React.FC<FriendDeliveryLocationModalPr
             <TouchableOpacity
               style={[
                 styles.confirmBtn,
-                (isInsideZone === false || isWithin5Km === false) && styles.confirmBtnDisabled,
+                isWithin5Km === false && styles.confirmBtnDisabled,
               ]}
               onPress={handleConfirm}
               disabled={confirming}
@@ -827,9 +740,7 @@ export const FriendDeliveryLocationModal: React.FC<FriendDeliveryLocationModalPr
                 <ActivityIndicator color="#FFFFFF" size="small" />
               ) : (
                 <Text style={styles.confirmBtnText}>
-                  {isInsideZone === false
-                    ? 'Cannot Deliver (Outside Zone)'
-                    : isWithin5Km === false
+                  {isWithin5Km === false
                     ? 'Cannot Deliver (Outside 5 KM)'
                     : 'Confirm Friend Delivery Location'}
                 </Text>

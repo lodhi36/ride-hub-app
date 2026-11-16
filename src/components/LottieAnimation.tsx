@@ -1,6 +1,8 @@
-import React, { useMemo, memo } from 'react';
+import React, { useMemo, useState, useEffect, useRef, memo } from 'react';
 import { View, StyleSheet, StyleProp, ViewStyle, DimensionValue } from 'react-native';
 import { WebView } from 'react-native-webview';
+import { resolveUploadUrl, LOCAL_URL } from '../config/apiConfig';
+import { LOTTIE_WEB_PLAYER_JS } from '../assets/lottie_player';
 
 interface LottieAnimationProps {
   source: any;
@@ -12,9 +14,13 @@ interface LottieAnimationProps {
   autoPlay?: boolean;
   speed?: number;
   preserveAspectRatio?: string;
+  isPlaying?: boolean;
 }
 
-export const LottieAnimation: React.FC<LottieAnimationProps> = memo(({
+// Global in-memory cache for remote Lottie JSONs
+const _lottieMemoryCache = new Map<string, any>();
+
+const LottieAnimationComponent: React.FC<LottieAnimationProps> = ({
   source,
   width = '100%',
   height = 200,
@@ -24,33 +30,108 @@ export const LottieAnimation: React.FC<LottieAnimationProps> = memo(({
   autoPlay,
   speed = 1.0,
   preserveAspectRatio = 'xMidYMid meet',
+  isPlaying,
 }) => {
   const effectiveAutoplay = autoPlay !== undefined ? autoPlay : autoplay;
+  const webViewRef = useRef<WebView>(null);
 
-  // Extract a stable clean URL without volatile timestamp queries to prevent infinite WebView reloads
-  const cleanUrl = useMemo(() => {
+  // Extract remote URL if source is string or { uri }
+  const remoteUrl = useMemo(() => {
     if (!source) return null;
+    let u: string | null = null;
     if (typeof source === 'string') {
-      const isHttp = source.startsWith('http://') || source.startsWith('https://') || source.startsWith('/');
-      return isHttp ? source.split('?')[0] : null;
+      const isUrl = source.startsWith('http://') || source.startsWith('https://') || source.startsWith('/');
+      if (isUrl) u = source;
+    } else if (source?.uri && typeof source.uri === 'string') {
+      u = source.uri;
     }
-    if (source?.uri && typeof source.uri === 'string') {
-      return source.uri.split('?')[0];
+    if (!u) return null;
+    return resolveUploadUrl(u) || u;
+  }, [source]);
+
+  // Handle dynamic play/pause commands to WebView
+  useEffect(() => {
+    if (isPlaying !== undefined && webViewRef.current) {
+      if (isPlaying) {
+        webViewRef.current.injectJavaScript('if (window.currentAnimInstance) { window.currentAnimInstance.play(); } true;');
+      } else {
+        webViewRef.current.injectJavaScript('if (window.currentAnimInstance) { window.currentAnimInstance.pause(); } true;');
+      }
+    }
+  }, [isPlaying]);
+
+  // Is source direct JSON?
+  const directData = useMemo(() => {
+    if (!source) return null;
+    if (typeof source === 'object' && !source.uri && (source.v || source.layers || source.assets)) {
+      return source;
     }
     return null;
   }, [source]);
 
-  const htmlContent = useMemo(() => {
-    if (!source) return '';
-
-    let animDataStr = 'null';
-    if (!cleanUrl) {
-      if (typeof source === 'object') {
-        animDataStr = JSON.stringify(source);
-      } else if (typeof source === 'string') {
-        animDataStr = source.trim();
-      }
+  const [remoteJson, setRemoteJson] = useState<any>(() => {
+    if (directData) return directData;
+    if (remoteUrl && _lottieMemoryCache.has(remoteUrl)) {
+      return _lottieMemoryCache.get(remoteUrl);
     }
+    return null;
+  });
+
+  useEffect(() => {
+    if (directData) {
+      setRemoteJson(directData);
+      return;
+    }
+    if (!remoteUrl) {
+      setRemoteJson(null);
+      return;
+    }
+    if (_lottieMemoryCache.has(remoteUrl)) {
+      setRemoteJson(_lottieMemoryCache.get(remoteUrl));
+      return;
+    }
+
+    let isMounted = true;
+    fetch(remoteUrl)
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+      })
+      .then((data) => {
+        if (data && (data.v || data.layers || typeof data === 'object')) {
+          _lottieMemoryCache.set(remoteUrl, data);
+          if (isMounted) {
+            setRemoteJson(data);
+          }
+        }
+      })
+      .catch((err) => {
+        console.warn(`[LottieAnimation] Fallback fetch for ${remoteUrl}:`, err.message);
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [remoteUrl, directData]);
+
+  const activeAnimData = directData || remoteJson;
+
+  const htmlContent = useMemo(() => {
+    // If we have neither directData nor remoteUrl nor remoteJson, return empty
+    if (!directData && !remoteUrl && !activeAnimData) return '';
+
+    let animDataSnippet = '';
+    if (activeAnimData) {
+      try {
+        const str = JSON.stringify(activeAnimData);
+        if (str.length < 2000000) { // Under 2MB
+          animDataSnippet = `animOptions.animationData = ${str};`;
+        }
+      } catch (_) {}
+    }
+
+    const pathSnippet = remoteUrl ? `animOptions.path = "${remoteUrl}";` : '';
+    const initialPlay = isPlaying !== undefined ? isPlaying : effectiveAutoplay;
 
     return `
       <!DOCTYPE html>
@@ -85,100 +166,111 @@ export const LottieAnimation: React.FC<LottieAnimationProps> = memo(({
             svg {
               width: 100% !important;
               height: 100% !important;
-              max-width: 100%;
-              max-height: 100%;
+              position: absolute !important;
+              top: 0 !important;
+              left: 0 !important;
+              transform-origin: center center;
             }
           </style>
-          <script src="https://cdnjs.cloudflare.com/ajax/libs/lottie-web/5.12.2/lottie.min.js"></script>
+          <script>${LOTTIE_WEB_PLAYER_JS}</script>
         </head>
         <body>
           <div id="lottie-box"></div>
           <script>
-            var retryCount = 0;
-            var animInstance = null;
-            var animLoaded = false;
-
-            function loadFallback() {
-              if (animLoaded) return;
-              var s = document.createElement('script');
-              s.src = 'https://unpkg.com/lottie-web@5.12.2/build/player/lottie.min.js';
-              s.onload = initLottie;
-              document.head.appendChild(s);
-            }
-
-            function initLottie() {
-              if (animLoaded) return;
+            (function() {
               var container = document.getElementById('lottie-box');
               if (!container) return;
-
-              if (window.lottie || window.bodymovin) {
-                var player = window.lottie || window.bodymovin;
-                try {
-                  animLoaded = true;
-                  container.innerHTML = '';
-                  var animConfig = {
-                    container: container,
-                    renderer: 'svg',
-                    loop: ${loop},
-                    autoplay: ${effectiveAutoplay},
-                    rendererSettings: {
-                      preserveAspectRatio: '${preserveAspectRatio}'
-                    }
-                  };
-                  ${cleanUrl ? `animConfig.path = ${JSON.stringify(cleanUrl)};` : `animConfig.animationData = ${animDataStr};`}
-                  animInstance = player.loadAnimation(animConfig);
-                  if (animInstance && animInstance.setSpeed) {
-                    animInstance.setSpeed(${speed});
-                  }
-                  // Native lottie-web handles loop seamlessly without redundant event listeners
-                } catch(e) {
-                  animLoaded = false;
-                  console.error('Lottie Error:', e);
+              var player = window.lottie || window.bodymovin;
+              if (!player) return;
+              try {
+                if (window.currentAnimInstance && window.currentAnimInstance.destroy) {
+                  window.currentAnimInstance.destroy();
                 }
-              } else if (retryCount < 40) {
-                retryCount++;
-                setTimeout(initLottie, 50);
-              } else if (retryCount === 40) {
-                retryCount++;
-                loadFallback();
+                var animOptions = {
+                  container: container,
+                  renderer: 'svg',
+                  loop: ${loop},
+                  autoplay: ${initialPlay},
+                  rendererSettings: {
+                    preserveAspectRatio: '${preserveAspectRatio}',
+                    progressiveLoad: true,
+                    hideOnTransparent: true
+                  }
+                };
+                ${animDataSnippet ? animDataSnippet : pathSnippet}
+                if (!animOptions.animationData && !animOptions.path) {
+                  ${pathSnippet}
+                }
+                var animInstance = player.loadAnimation(animOptions);
+                window.currentAnimInstance = animInstance;
+                if (animInstance && animInstance.setSpeed) {
+                  animInstance.setSpeed(${speed});
+                }
+                ${initialPlay ? '' : 'if (animInstance) { animInstance.pause(); }'}
+              } catch(e) {
+                console.error('Lottie Render Error:', e);
               }
-            }
-
-            if (document.readyState === 'complete' || document.readyState === 'interactive') {
-              initLottie();
-            } else {
-              document.addEventListener('DOMContentLoaded', initLottie, { once: true });
-            }
+            })();
           </script>
         </body>
       </html>
     `;
-  }, [cleanUrl, loop, effectiveAutoplay, speed, preserveAspectRatio]);
+  }, [activeAnimData, remoteUrl, directData, loop, effectiveAutoplay, speed, preserveAspectRatio, isPlaying]);
+
+  // Handle dynamic speed changes via JS injection without recreating WebView
+  useEffect(() => {
+    if (speed !== undefined && webViewRef.current) {
+      webViewRef.current.injectJavaScript(`if (window.currentAnimInstance && window.currentAnimInstance.setSpeed) { window.currentAnimInstance.setSpeed(${speed}); } true;`);
+    }
+  }, [speed]);
+
+  // Stable memoized source object to prevent unnecessary reload of WebView
+  const webViewSource = useMemo(() => {
+    if (!htmlContent) return null;
+    return { html: htmlContent, baseUrl: LOCAL_URL };
+  }, [htmlContent]);
 
   if (!source) return null;
 
   return (
     <View style={[{ width, height, overflow: 'hidden', backgroundColor: 'transparent' }, style]}>
-      <WebView
-        originWhitelist={['*']}
-        source={{ html: htmlContent }}
-        style={[styles.webView, { opacity: 0.99 }]}
-        containerStyle={styles.webViewContainer}
-        scrollEnabled={false}
-        showsHorizontalScrollIndicator={false}
-        showsVerticalScrollIndicator={false}
-        overScrollMode="never"
-        javaScriptEnabled={true}
-        domStorageEnabled={true}
-        scalesPageToFit={false}
-        transparent={true}
-        mixedContentMode="always"
-        androidLayerType="hardware"
-        cacheEnabled={true}
-        cacheMode="LOAD_DEFAULT"
-      />
+      {webViewSource ? (
+        <WebView
+          ref={webViewRef as any}
+          originWhitelist={['*']}
+          source={webViewSource}
+          style={[styles.webView, { opacity: 0.99 }]}
+          containerStyle={styles.webViewContainer}
+          scrollEnabled={false}
+          showsHorizontalScrollIndicator={false}
+          showsVerticalScrollIndicator={false}
+          overScrollMode="never"
+          javaScriptEnabled={true}
+          domStorageEnabled={true}
+          scalesPageToFit={false}
+          transparent={true}
+          mixedContentMode="always"
+          androidLayerType="hardware"
+          allowFileAccess={true}
+          allowUniversalAccessFromFileURLs={true}
+        />
+      ) : (
+        <View style={{ flex: 1, backgroundColor: 'transparent' }} />
+      )}
     </View>
   );
+};
+
+export const LottieAnimation = memo(LottieAnimationComponent, (prev, next) => {
+  const prevSrc = typeof prev.source === 'string' ? prev.source : (prev.source?.uri || (prev.source ? 'obj' : ''));
+  const nextSrc = typeof next.source === 'string' ? next.source : (next.source?.uri || (next.source ? 'obj' : ''));
+  if (prevSrc !== nextSrc) return false;
+  if (prev.width !== next.width || prev.height !== next.height) return false;
+  if (prev.loop !== next.loop) return false;
+  if (prev.isPlaying !== next.isPlaying) return false;
+  if (prev.autoplay !== next.autoplay || prev.autoPlay !== next.autoPlay) return false;
+  if (prev.preserveAspectRatio !== next.preserveAspectRatio) return false;
+  return true;
 });
 
 const styles = StyleSheet.create({

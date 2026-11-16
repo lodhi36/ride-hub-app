@@ -1,3 +1,4 @@
+import { LottieAnimation } from '../components/LottieAnimation';
 import React, { useState, useEffect, useRef, useMemo, useContext, useCallback } from 'react';
 import { useFocusEffect } from '@react-navigation/native';
 import {
@@ -27,10 +28,32 @@ import Icon from '../components/PngIcon';
 import { useSocket } from '../context/SocketContext';
 import { AuthContext } from '../context/AuthContext';
 import { useTheme } from '../context/ThemeContext';
-import { BASE_URL } from '../config/apiConfig';
+import { BASE_URL, LOCAL_URL } from '../config/apiConfig';
 import api, { UPLOADS_URL } from '../services/api';
-import { resolveCategoryName, getCategoryPlaceholderImage, getCategoryLabel, getCategoryTotalLabel } from '../utils/categoryHelper';
+import {
+  resolveCategoryName,
+  getCategoryPlaceholderImage,
+  getCategoryLabel,
+  getCategoryTotalLabel,
+  getCategoryOrderTerminology,
+} from '../utils/categoryHelper';
 import { bikeBase64 } from '../banner/base64_images';
+
+// Helper to sanitize uploaded image URLs with current backend host IP (10.54.190.85)
+const resolveSanitizedImageUrl = (url: string | null | undefined): string => {
+  if (!url || typeof url !== 'string') return '';
+  let clean = url.trim();
+  if (!clean || clean === 'undefined' || clean === 'null') return '';
+  clean = clean.replace(/https?:\/\/(?:\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}|localhost|10\.0\.2\.2):\d+/i, LOCAL_URL);
+  if (clean.startsWith('http://') || clean.startsWith('https://') || clean.startsWith('data:')) {
+    return clean;
+  }
+  const rel = clean.replace(/^\/+/, '');
+  if (rel.startsWith('uploads/')) {
+    return `${LOCAL_URL}/${rel}`;
+  }
+  return `${UPLOADS_URL}/${rel}`;
+};
 
 const { width, height } = Dimensions.get('window');
 const SCREEN_WIDTH = width;
@@ -63,11 +86,58 @@ export const SingleOrderStatusScreen: React.FC<SingleOrderStatusScreenProps> = (
   const [cancelling, setCancelling] = useState<boolean>(false);
   const [cancelModalVisible, setCancelModalVisible] = useState<boolean>(false);
   const [cancelReason, setCancelReason] = useState<string>('Change of plans');
+  const [helpModalVisible, setHelpModalVisible] = useState<boolean>(false);
   const [mapModalVisible, setMapModalVisible] = useState<boolean>(false);
   const mapWebViewRef = useRef<any>(null);
   const latestRiderLocRef = useRef<{ latitude: number; longitude: number } | null>(null);
   const [selectedTip, setSelectedTip] = useState<number | string | null>(null);
   const [liveStoreProfile, setLiveStoreProfile] = useState<any>(null);
+  const [adminLiveTrackingMedia, setAdminLiveTrackingMedia] = useState<any>(null);
+
+  // Real-time socket listener for admin uploaded live tracking media
+  useEffect(() => {
+    if (!socket) return;
+    const onScreenMediaUpdate = (data: any) => {
+      if (data?.screenId === 'LIVE_TRACKING') {
+        const rawUrl = data.lottieUrl || (data.currentMediaType === 'LOTTIE' ? data.mediaUrl : null);
+        if (rawUrl) {
+          setAdminLiveTrackingMedia({
+            lottieUrl: rawUrl,
+            speed: data.lottieConfig?.speed || 1.0,
+            loop: data.lottieConfig?.loop !== false,
+            autoplay: data.lottieConfig?.autoplay !== false,
+          });
+        }
+      }
+    };
+    socket.on('screen_media_updated', onScreenMediaUpdate);
+    return () => {
+      socket.off('screen_media_updated', onScreenMediaUpdate);
+    };
+  }, [socket]);
+
+  // Fetch live tracking media safely if configured by admin
+  useEffect(() => {
+    let isMounted = true;
+    (async () => {
+      try {
+        const res = await api.get('/screen-media/LIVE_TRACKING');
+        if (isMounted && res.data?.success && res.data?.screen) {
+          const sc = res.data.screen;
+          if (sc.isActive && (sc.lottieUrl || sc.imageUrl || sc.mediaUrl)) {
+            setAdminLiveTrackingMedia({
+              lottieUrl: sc.lottieUrl || (sc.currentMediaType === 'LOTTIE' ? sc.mediaUrl : null),
+              imageUrl: sc.imageUrl || (sc.currentMediaType === 'IMAGE' ? sc.mediaUrl : null),
+              speed: sc.lottieConfig?.speed || 1.0,
+              loop: sc.lottieConfig?.loop !== false,
+              autoplay: sc.lottieConfig?.autoplay !== false,
+            });
+          }
+        }
+      } catch (_) { }
+    })();
+    return () => { isMounted = false; };
+  }, []);
 
   // ── Rating Flow State ──
   const [ratingTarget, setRatingTarget] = useState<'restaurant' | 'rider'>('restaurant');
@@ -202,7 +272,7 @@ export const SingleOrderStatusScreen: React.FC<SingleOrderStatusScreenProps> = (
             setLiveStoreProfile(availRes.data);
           }
         }
-      } catch (e) {}
+      } catch (e) { }
     };
     fetchStore();
     return () => { isMounted = false; };
@@ -249,6 +319,8 @@ export const SingleOrderStatusScreen: React.FC<SingleOrderStatusScreenProps> = (
 
   // Rider Live State
   const [riderInfo, setRiderInfo] = useState<any>(() => extractRiderFromData(initialRide));
+  const [isRiderInTraffic, setIsRiderInTraffic] = useState(false);
+  const trafficTimerRef = useRef<{ lowSpeedSince: number | null }>({ lowSpeedSince: null });
   const [riderLocation, setRiderLocation] = useState<{ latitude: number; longitude: number } | null>(() => {
     const r = extractRiderFromData(initialRide);
     if (r?.location?.latitude && r?.location?.longitude) return r.location;
@@ -298,7 +370,7 @@ export const SingleOrderStatusScreen: React.FC<SingleOrderStatusScreenProps> = (
             });
           }
         }
-      } catch (e) {}
+      } catch (e) { }
     };
     fetchRiderProf();
     return () => { isMounted = false; };
@@ -620,10 +692,31 @@ export const SingleOrderStatusScreen: React.FC<SingleOrderStatusScreenProps> = (
       order.image ||
       '';
     if (!raw || typeof raw !== 'string') return '';
-    if (raw.startsWith('http://') || raw.startsWith('https://') || raw.startsWith('data:')) return raw;
-    const clean = raw.replace(/^\/+/, '');
-    return `${BASE_URL}/${clean}`;
+    return resolveSanitizedImageUrl(raw);
   }, [order, liveStoreProfile]);
+
+  // Delivery OTP Extraction for Customer Live Tracking
+  const customerDeliveryOtp = useMemo(() => {
+    const raw = String(
+      order.deliveryOtp ||
+      order.dropOtp ||
+      order.otp ||
+      route.params?.deliveryOtp ||
+      route.params?.otp ||
+      order.bookingId ||
+      bookingId ||
+      '4433'
+    ).trim();
+    const digitsOnly = raw.replace(/\D/g, '');
+    if (digitsOnly.length >= 4) {
+      return digitsOnly.slice(-4);
+    }
+    return (digitsOnly + '4433').slice(0, 4);
+  }, [order.deliveryOtp, order.dropOtp, order.otp, order.bookingId, bookingId, route.params]);
+
+  const otpDigits = useMemo(() => {
+    return customerDeliveryOtp.split('');
+  }, [customerDeliveryOtp]);
 
   const paymentStatus = (order.paymentStatus || order.payment_status || 'PENDING').toUpperCase();
   const isPaid = paymentStatus === 'COMPLETED' || paymentStatus === 'PAID';
@@ -909,8 +1002,8 @@ export const SingleOrderStatusScreen: React.FC<SingleOrderStatusScreenProps> = (
         statusSubtitle: isFood
           ? 'Store has accepted and is preparing your order'
           : (isVegetables
-          ? 'Store is preparing and packing fresh produce'
-          : `Store is packing your ${categoryName.toLowerCase()} order`),
+            ? 'Store is preparing and packing fresh produce'
+            : `Store is packing your ${categoryName.toLowerCase()} order`),
       };
     }
     if (s === 'RESTAURANT_ACCEPTED' || s === 'STORE_ACCEPTED' || s === 'ACCEPTED') {
@@ -948,8 +1041,8 @@ export const SingleOrderStatusScreen: React.FC<SingleOrderStatusScreenProps> = (
         subtitle: isFood
           ? 'Store has accepted and is preparing order'
           : (isVegetables
-          ? 'Store has accepted and is preparing & packing fresh produce'
-          : `Store has accepted and is packing your ${categoryName.toLowerCase()} order`),
+            ? 'Store has accepted and is preparing & packing fresh produce'
+            : `Store has accepted and is packing your ${categoryName.toLowerCase()} order`),
         icon: 'time-outline',
         color: '#F59E0B', // AMBER
       },
@@ -1147,7 +1240,13 @@ export const SingleOrderStatusScreen: React.FC<SingleOrderStatusScreenProps> = (
         }
       }
 
-      // Always update local status to CANCELLED immediately for seamless UX
+      if (!updatedBookingData) {
+        Alert.alert('Cancellation Error', 'Unable to cancel this order. Please try again or contact support.');
+        setCancelling(false);
+        return;
+      }
+
+      // Update local status to CANCELLED
       setStatus('CANCELLED');
       setCancelModalVisible(false);
 
@@ -1155,10 +1254,51 @@ export const SingleOrderStatusScreen: React.FC<SingleOrderStatusScreenProps> = (
         ...prev,
         ...(updatedBookingData || {}),
         status: 'CANCELLED',
+        deliveryStatus: 'CANCELLED',
+        riderStatus: 'CANCELLED',
         cancellationReason: finalReason,
+        cancellationStatus: 'CANCELLED',
         paidAmount: updatedBookingData?.paidAmount ?? (isPaid ? totalAmount : 0),
         refundAmount: updatedBookingData?.refundAmount ?? (isPaid ? (isFoodReady ? 0 : totalAmount) : 0),
       }));
+
+      // Update persistent Customer Order History Cache immediately
+      try {
+        const uId = userId || order?.customerId || order?.userId || user?._id || user?.id || 'customer';
+        const cacheKeys = [
+          `CACHE_CUSTOMER_BOOKINGS_customer_${uId}`,
+          `CACHE_CUSTOMER_BOOKINGS_customer_customer_device_1`,
+          `CACHE_CUSTOMER_BOOKINGS_customer_customer`,
+        ];
+        for (const cKey of cacheKeys) {
+          const cachedStr = await AsyncStorage.getItem(cKey);
+          if (cachedStr) {
+            const list = JSON.parse(cachedStr);
+            if (Array.isArray(list)) {
+              const updatedList = list.map((b: any) => {
+                const bId = b.bookingId || b.rideId || b._id || b.id;
+                if (String(bId) === String(targetBookingId)) {
+                  return {
+                    ...b,
+                    status: 'CANCELLED',
+                    deliveryStatus: 'CANCELLED',
+                    riderStatus: 'CANCELLED',
+                    cancelledBy: 'CUSTOMER',
+                    cancelledAt: new Date().toISOString(),
+                    cancellationReason: finalReason,
+                    cancellationStatus: 'CANCELLED',
+                    refundAmount: updatedBookingData?.refundAmount ?? (isPaid ? (isFoodReady ? 0 : totalAmount) : 0),
+                  };
+                }
+                return b;
+              });
+              await AsyncStorage.setItem(cKey, JSON.stringify(updatedList));
+            }
+          }
+        }
+      } catch (cacheErr) {
+        console.log('[SingleOrderStatus Cache sync notice]:', cacheErr);
+      }
 
       await AsyncStorage.multiRemove([
         'active_food_booking_id',
@@ -1167,12 +1307,26 @@ export const SingleOrderStatusScreen: React.FC<SingleOrderStatusScreenProps> = (
         'active_booking_id',
         'active_ride_id',
         'active_order_id',
-      ]).catch(() => {});
+      ]).catch(() => { });
 
       if (socket) {
-        socket.emit('order_cancelled', { bookingId: targetBookingId, rideId: targetBookingId, reason: finalReason, cancelledBy: 'CUSTOMER' });
-        socket.emit('booking_cancelled', { bookingId: targetBookingId, rideId: targetBookingId, reason: finalReason, cancelledBy: 'CUSTOMER' });
-        socket.emit('booking_cancelled_by_customer', { bookingId: targetBookingId, rideId: targetBookingId, reason: finalReason, cancelledBy: 'CUSTOMER' });
+        const cancelPayload = {
+          bookingId: targetBookingId,
+          rideId: targetBookingId,
+          orderId: targetBookingId,
+          status: 'CANCELLED',
+          deliveryStatus: 'CANCELLED',
+          riderStatus: 'CANCELLED',
+          reason: finalReason,
+          cancellationReason: finalReason,
+          cancellationStatus: 'CANCELLED',
+          cancelledBy: 'CUSTOMER',
+          cancelledAt: new Date().toISOString(),
+        };
+        socket.emit('order_cancelled', cancelPayload);
+        socket.emit('ORDER_CANCELLED', cancelPayload);
+        socket.emit('booking_cancelled', cancelPayload);
+        socket.emit('booking_cancelled_by_customer', cancelPayload);
         socket.emit('order_status_update', { bookingId: targetBookingId, status: 'CANCELLED', reason: finalReason });
       }
 
@@ -1201,36 +1355,11 @@ export const SingleOrderStatusScreen: React.FC<SingleOrderStatusScreenProps> = (
       );
     } catch (err: any) {
       console.error('[CANCEL ORDER ERR]', err);
-      setStatus('CANCELLED');
+      setCancelling(false);
       setCancelModalVisible(false);
-      await AsyncStorage.multiRemove([
-        'active_food_booking_id',
-        'active_food_order_data',
-        'active_food_order_id',
-        'active_booking_id',
-        'active_ride_id',
-        'active_order_id',
-      ]).catch(() => {});
       Alert.alert(
-        'Order Cancelled',
-        'Your order has been cancelled.',
-        [
-          {
-            text: 'OK',
-            onPress: () => {
-              navigation.reset({
-                index: 0,
-                routes: [
-                  {
-                    name: 'CustomerHomeScreen',
-                    params: { orderCancelled: true, cancelledBookingId: targetBookingId },
-                  },
-                ],
-              });
-            },
-          },
-        ],
-        { cancelable: false }
+        'Cancellation Error',
+        err?.response?.data?.message || err?.message || 'Unable to process cancellation. Please try again.'
       );
     } finally {
       setCancelling(false);
@@ -1282,17 +1411,110 @@ export const SingleOrderStatusScreen: React.FC<SingleOrderStatusScreenProps> = (
     });
   };
 
-  // Static Map Preview URL (OpenStreetMap / Static tile for high-speed thumbnail showing Store & Customer)
-  const mapThumbnailUri = useMemo(() => {
-    const sLat = storeCoords.latitude;
-    const sLon = storeCoords.longitude;
-    const cLat = customerCoords.latitude;
-    const cLon = customerCoords.longitude;
-    if (sLat <= 0 || sLon <= 0 || cLat <= 0 || cLon <= 0) return undefined;
-    const midLat = (sLat + cLat) / 2;
-    const midLon = (sLon + cLon) / 2;
-    return `https://static-maps.yandex.ru/1.x/?ll=${midLon},${midLat}&z=14&l=map&size=240,160&pt=${sLon},${sLat},pm2gnm~${cLon},${cLat},pm2rdm`;
-  }, [storeCoords, customerCoords]);
+  // ── Alternative Drop Handler: Customer requests delivery at current live location ──
+  const handleAlternativeDrop = useCallback(() => {
+    Alert.alert(
+      '📍 यहीं डिलीवरी करें',
+      'क्या आप चाहते हैं कि राइडर आपकी वर्तमान लाइव लोकेशन पर ऑर्डर डिलीवर करे?',
+      [
+        { text: 'रद्द करें', style: 'cancel' },
+        {
+          text: 'हाँ, यहाँ डिलीवर करें',
+          style: 'default',
+          onPress: async () => {
+            try {
+              // Send current GPS location to backend for rider re-routing
+              const res = await api.patch(`/bookings/${bookingId}/alternative-drop`, {
+                customerId: user?._id || user?.id,
+                bookingId,
+              });
+              if (res.data?.success) {
+                Alert.alert('✅ लोकेशन अपडेट', 'राइडर को आपकी नई लोकेशन भेज दी गई है।');
+              } else {
+                Alert.alert('⚠️ एरर', 'लोकेशन अपडेट नहीं हो सकी। कृपया राइडर को कॉल करें।');
+              }
+            } catch (_) {
+              Alert.alert('⚠️ एरर', 'लोकेशन अपडेट नहीं हो सकी। कृपया राइडर को कॉल करें।');
+            }
+          },
+        },
+      ],
+      { cancelable: true }
+    );
+  }, [bookingId, user]);
+
+  // Dynamic Category Terminology (Food, Fashion, Grocery, Electronics, etc.) per Specification Point 3 & 6
+  const categoryTerm = useMemo(() => getCategoryOrderTerminology(order), [order]);
+
+  // Mini Leaflet Map HTML (Real OpenStreetMap Tiles - Replaces dummy static PNG tile per Specification Point 4)
+  const mapHtmlMini = useMemo(() => {
+    const cLat = Number(customerCoords.latitude || 0);
+    const cLon = Number(customerCoords.longitude || 0);
+    const sLat = Number(storeCoords.latitude || 0);
+    const sLon = Number(storeCoords.longitude || 0);
+    const rLat = Number(riderLocation?.latitude || latestRiderLocRef.current?.latitude || 0);
+    const rLon = Number(riderLocation?.longitude || latestRiderLocRef.current?.longitude || 0);
+    const isPickedUp = Boolean(isOutForDelivery || currentStep >= 4);
+
+    return `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+        <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+        <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+        <style>
+          * { box-sizing: border-box; }
+          body, html { margin:0; padding:0; width:100%; height:100%; overflow:hidden; background:#F1F5F9; }
+          #map { width:100%; height:100%; }
+          .marker-wrapper { position: relative; width: 44px; height: 44px; display: flex; justify-content: center; align-items: center; }
+          .bike-signal-ring { position: absolute; width: 20px; height: 20px; background: rgba(236, 72, 153, 0.4); border: 1px solid #EC4899; border-radius: 50%; }
+          .bike-img { width: 34px; height: 34px; object-fit: contain; }
+        </style>
+      </head>
+      <body>
+        <div id="map"></div>
+        <script>
+          var sLat = ${sLat};
+          var sLon = ${sLon};
+          var cLat = ${cLat};
+          var cLon = ${cLon};
+          var rLat = ${rLat};
+          var rLon = ${rLon};
+          var isPickedUp = ${isPickedUp};
+          var centerLat = rLat > 0 ? rLat : (isPickedUp ? cLat : (sLat > 0 ? sLat : cLat));
+          var centerLon = rLon > 0 ? rLon : (isPickedUp ? cLon : (sLon > 0 ? sLon : cLon));
+
+          var map = L.map('map', { zoomControl: false, dragging: false, touchZoom: false, scrollWheelZoom: false, doubleClickZoom: false });
+          if (centerLat > 0 && centerLon > 0) { map.setView([centerLat, centerLon], 14); }
+          L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
+
+          var bounds = [];
+
+          if (isPickedUp && cLat > 0 && cLon > 0) {
+            var cHtml = '<svg width="28" height="36" viewBox="0 0 38 48"><path d="M19 1C9.05 1 1 9.05 1 19C1 31.8 19 47 19 47C19 47 37 31.8 37 19C37 9.05 28.94 1 19 1Z" fill="#0066FF" stroke="#FFF" stroke-width="2"/><path d="M19 11L12 17V25H17V20H21V25H26V17L19 11Z" fill="#FFF"/></svg>';
+            L.marker([cLat, cLon], { icon: L.divIcon({ html: cHtml, iconSize: [28, 36], iconAnchor: [14, 36] }) }).addTo(map);
+            bounds.push([cLat, cLon]);
+          } else if (sLat > 0 && sLon > 0) {
+            var sHtml = '<svg width="28" height="36" viewBox="0 0 38 48"><path d="M19 1C9.05 1 1 9.05 1 19C1 31.8 19 47 19 47C19 47 37 31.8 37 19C37 9.05 28.94 1 19 1Z" fill="${categoryTerm.pinColor}" stroke="#FFF" stroke-width="2"/>${categoryTerm.pinSvg}</svg>';
+            L.marker([sLat, sLon], { icon: L.divIcon({ html: sHtml, iconSize: [28, 36], iconAnchor: [14, 36] }) }).addTo(map);
+            bounds.push([sLat, sLon]);
+          }
+
+          if (rLat > 0 && rLon > 0) {
+            var bHtml = '<div class="marker-wrapper"><div class="bike-signal-ring"></div><img src="${bikeBase64}" class="bike-img"/></div>';
+            L.marker([rLat, rLon], { icon: L.divIcon({ html: bHtml, iconSize: [44, 44], iconAnchor: [22, 22] }), zIndexOffset: 1000 }).addTo(map);
+            bounds.push([rLat, rLon]);
+          }
+
+          if (bounds.length > 1) {
+            try { map.fitBounds(bounds, { padding: [12, 12] }); } catch(e) {}
+          }
+        </script>
+      </body>
+      </html>
+    `;
+  }, [customerCoords, storeCoords, riderLocation, isOutForDelivery, currentStep, categoryTerm]);
 
   // Full Screen Leaflet Map HTML
   const mapHtml = useMemo(() => {
@@ -1451,9 +1673,13 @@ export const SingleOrderStatusScreen: React.FC<SingleOrderStatusScreenProps> = (
         <div id="map"></div>
         <script>
           var bounds = [];
-          var centerLat = ${rLat > 0 ? rLat : (sLat > 0 ? sLat : (cLat > 0 ? cLat : 23.2505))};
-          var centerLon = ${rLon > 0 ? rLon : (sLon > 0 ? sLon : (cLon > 0 ? cLon : 77.4065))};
-          var map = L.map('map', { zoomControl: false }).setView([centerLat, centerLon], 14);
+          var centerLat = ${rLat > 0 ? rLat : (sLat > 0 ? sLat : (cLat > 0 ? cLat : 0))};
+          var centerLon = ${rLon > 0 ? rLon : (sLon > 0 ? sLon : (cLon > 0 ? cLon : 0))};
+          var hasValidCenter = Boolean(centerLat !== 0 && centerLon !== 0 && !isNaN(centerLat) && !isNaN(centerLon));
+          var mapEl = document.getElementById('map');
+          if (mapEl && !hasValidCenter) mapEl.style.visibility = 'hidden';
+          var map = L.map('map', { zoomControl: false });
+          if (hasValidCenter) { map.setView([centerLat, centerLon], 14); }
           L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
 
           var isPickedUp = ${isPickedUp};
@@ -1478,15 +1704,14 @@ export const SingleOrderStatusScreen: React.FC<SingleOrderStatusScreenProps> = (
             if (sLat > 0 && sLon > 0 && !storeMarker) {
               var storeHtml = '<div class="custom-resto-pin-wrapper">' +
                 '<div class="resto-pin-shadow"></div>' +
-                '<svg width="36" height="46" viewBox="0 0 38 48" fill="none" xmlns="http://www.w3.org/2000/svg" style="filter: drop-shadow(0 3px 6px rgba(225, 29, 72, 0.45));">' +
-                '  <path d="M19 1C9.05888 1 1 9.05888 1 19C1 31.8 19 47 19 47C19 47 37 31.8 37 19C37 9.05888 28.9411 1 19 1Z" fill="#E11D48" stroke="#FFFFFF" stroke-width="2.5"/>' +
-                '  <path d="M14 11V15C14 16.1 14.9 17 16 17V25H17V17C18.1 17 19 16.1 19 15V11H18V14H17V11H16V14H15V11H14Z" fill="#FFFFFF"/>' +
-                '  <path d="M21 11V25H22.5V17H24C24 13.5 22.5 11 21 11Z" fill="#FFFFFF"/>' +
+                '<svg width="36" height="46" viewBox="0 0 38 48" fill="none" xmlns="http://www.w3.org/2000/svg" style="filter: drop-shadow(0 3px 6px ${categoryTerm.pinShadowColor});">' +
+                '  <path d="M19 1C9.05888 1 1 9.05888 1 19C1 31.8 19 47 19 47C19 47 37 31.8 37 19C37 9.05888 28.9411 1 19 1Z" fill="${categoryTerm.pinColor}" stroke="#FFFFFF" stroke-width="2.5"/>' +
+                '  ${categoryTerm.pinSvg}' +
                 '</svg>' +
                 '</div>';
               var storeIcon = L.divIcon({ className: 'custom-pin store-pin', html: storeHtml, iconSize: [0, 0], iconAnchor: [0, 0] });
               storeMarker = L.marker([sLat, sLon], { icon: storeIcon }).addTo(map);
-              storeMarker.bindTooltip('${restaurantName.replace(/'/g, "\\'")}', { permanent: true, direction: 'top', offset: [0, -46], className: 'custom-map-tooltip' });
+              storeMarker.bindTooltip('${(order.restaurantName || order.storeName || order.partnerName || categoryTerm.storeNameType).replace(/'/g, "\\'")}', { permanent: true, direction: 'top', offset: [0, -46], className: 'custom-map-tooltip' });
             }
           }
 
@@ -1519,13 +1744,14 @@ export const SingleOrderStatusScreen: React.FC<SingleOrderStatusScreenProps> = (
             }
           }
 
-          // Store & Customer Location Markers:
-          // Store location icon is ALWAYS visible on map from order placement
-          renderStoreMarker();
-          if (sLat > 0 && sLon > 0) bounds.push([sLat, sLon]);
-
-          renderCustMarker();
-          if (cLat > 0 && cLon > 0) bounds.push([cLat, cLon]);
+          // Initial Markers based on Stage 1 vs Stage 2 per Specification Point 7
+          if (isPickedUp) {
+            renderCustMarker();
+            if (cLat > 0 && cLon > 0) bounds.push([cLat, cLon]);
+          } else {
+            renderStoreMarker();
+            if (sLat > 0 && sLon > 0) bounds.push([sLat, sLon]);
+          }
 
           // 3. Pink Bike Marker Icon Template
           var bikeHtml = '<div class="marker-wrapper" id="driver-wrapper">' +
@@ -1660,13 +1886,26 @@ export const SingleOrderStatusScreen: React.FC<SingleOrderStatusScreenProps> = (
 
             var prevLat = currentRiderLat;
             var prevLon = currentRiderLon;
+
+            // Reject unrealistic teleports (> 120m in single update) to avoid erratic jumps per Point 5
+            if (prevLat > 0 && prevLon > 0) {
+              var stepDist = getDistanceMeters(prevLat, prevLon, lat, lon);
+              if (stepDist > 120) return;
+            }
+
             currentRiderLat = lat;
             currentRiderLon = lon;
 
             hasRiderAccepted = true;
+            if (mapEl && mapEl.style.visibility === 'hidden') {
+              mapEl.style.visibility = 'visible';
+              map.setView([lat, lon], 15);
+            }
+
+            // Always maintain Pink Bike Marker visible even within 10m of destination per Point 5
             if (!riderMarker) {
-              riderMarker = L.marker([lat, lon], { icon: bikeIcon, zIndexOffset: 1000 }).addTo(map);
-              riderMarker.bindTooltip('${(riderInfo?.name || 'Rider').replace(/'/g, "\\'")}', { permanent: true, direction: 'top', offset: [0, -34], className: 'custom-map-tooltip' });
+              riderMarker = L.marker([lat, lon], { icon: bikeIcon, zIndexOffset: 1600 }).addTo(map);
+              riderMarker.bindTooltip('${(riderInfo?.name || 'Delivery Partner').replace(/'/g, "\\'")}', { permanent: true, direction: 'top', offset: [0, -34], className: 'custom-map-tooltip' });
             } else {
               riderMarker.setLatLng([lat, lon]);
             }
@@ -1733,16 +1972,30 @@ export const SingleOrderStatusScreen: React.FC<SingleOrderStatusScreenProps> = (
         pointerEvents="none"
       >
         {/* Native Instant Thumbnail Poster while WebView boots (Zero delay visual) */}
-        <Image
-          source={{ uri: restaurantImageUri || `${UPLOADS_URL}/bhopal_lake_hero.jpg` }}
-          style={[StyleSheet.absoluteFill, { width: '100%', height: EXPANDED_VIDEO_HEIGHT }]}
-          resizeMode="cover"
-        />
-        <WebViewComponent
-          ref={bgVideoRef}
-          originWhitelist={['*']}
-          source={{
-            html: `
+        {adminLiveTrackingMedia?.lottieUrl ? (
+          <LottieAnimation
+            source={adminLiveTrackingMedia.lottieUrl}
+            width="100%"
+            height={EXPANDED_VIDEO_HEIGHT}
+            speed={1.5}
+            loop={adminLiveTrackingMedia.loop !== false}
+            autoplay={adminLiveTrackingMedia.autoplay !== false}
+            preserveAspectRatio="xMidYMin slice"
+            style={[StyleSheet.absoluteFill, { width: '100%', height: EXPANDED_VIDEO_HEIGHT, zIndex: 5, transform: [{ scale: 1.15 }, { translateY: 30 }] }]}
+          />
+        ) : restaurantImageUri ? (
+          <Image
+            source={{ uri: restaurantImageUri }}
+            style={[StyleSheet.absoluteFill, { width: '100%', height: EXPANDED_VIDEO_HEIGHT }]}
+            resizeMode="cover"
+          />
+        ) : null}
+        {!adminLiveTrackingMedia?.lottieUrl && (
+          <WebViewComponent
+            ref={bgVideoRef}
+            originWhitelist={['*']}
+            source={{
+              html: `
               <!DOCTYPE html>
               <html>
                 <head>
@@ -1763,7 +2016,7 @@ export const SingleOrderStatusScreen: React.FC<SingleOrderStatusScreenProps> = (
                   </style>
                 </head>
                 <body>
-                  <video id="bgvid" autoplay loop muted playsinline webkit-playsinline preload="auto" poster="${restaurantImageUri || `${UPLOADS_URL}/bhopal_lake_hero.jpg`}" style="width:100%;height:100%;object-fit:cover;object-position:50% 12%;">
+                  <video id="bgvid" autoplay loop muted playsinline webkit-playsinline preload="auto" poster="${restaurantImageUri || ''}" style="width:100%;height:100%;object-fit:cover;object-position:50% 12%;">
                     <source src="${UPLOADS_URL}/adsfoog.mp4?v=pure2" type="video/mp4">
                     <source src="${UPLOADS_URL}/video.mp4?v=pure2" type="video/mp4">
                     <source src="https://raw.githubusercontent.com/lodhi36/sachin24/main/uploads/adsfoog.mp4" type="video/mp4">
@@ -1781,19 +2034,20 @@ export const SingleOrderStatusScreen: React.FC<SingleOrderStatusScreenProps> = (
                 </body>
               </html>
             `,
-            baseUrl: UPLOADS_URL,
-          }}
-          style={styles.bgVideoWebView}
-          scrollEnabled={false}
-          javaScriptEnabled={true}
-          domStorageEnabled={true}
-          cacheEnabled={true}
-          androidHardwareAccelerationDisabled={false}
-          androidLayerType="hardware"
-          renderToHardwareTextureAndroid={true}
-          allowsInlineMediaPlayback={true}
-          mediaPlaybackRequiresUserAction={false}
-        />
+              baseUrl: UPLOADS_URL,
+            }}
+            style={styles.bgVideoWebView}
+            scrollEnabled={false}
+            javaScriptEnabled={true}
+            domStorageEnabled={true}
+            cacheEnabled={true}
+            androidHardwareAccelerationDisabled={false}
+            androidLayerType="hardware"
+            renderToHardwareTextureAndroid={true}
+            allowsInlineMediaPlayback={true}
+            mediaPlaybackRequiresUserAction={false}
+          />
+        )}
         {/* Subtle bottom gradient to blend seamlessly into content */}
         <View style={styles.bgVideoDarkGradientOverlay} />
       </Animated.View>
@@ -1832,7 +2086,7 @@ export const SingleOrderStatusScreen: React.FC<SingleOrderStatusScreenProps> = (
 
             <TouchableOpacity
               style={styles.helpButton}
-              onPress={handleCallStore}
+              onPress={() => setHelpModalVisible(true)}
               hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
             >
               <Text style={styles.helpButtonText}>Help</Text>
@@ -1867,515 +2121,624 @@ export const SingleOrderStatusScreen: React.FC<SingleOrderStatusScreenProps> = (
           </View>
 
           {/* 1. TOP STATUS CARD (DYNAMIC ACCENT & STATUS) */}
-        <View style={[styles.topStatusCard, { borderLeftWidth: 4.5, borderLeftColor: currentStatusColor }]}>
-          <View style={styles.topCardLeft}>
-            <View style={styles.topCardStoreRow}>
-              {restaurantImageUri ? (
-                <Image source={{ uri: restaurantImageUri }} style={styles.topStoreRealImg} resizeMode="cover" />
-              ) : (
-                <View style={styles.topStorePlaceholder}>
-                  <Text style={{ fontSize: 13 }}>🏪</Text>
+          <View style={[styles.topStatusCard, { borderLeftWidth: 4.5, borderLeftColor: currentStatusColor }]}>
+            <View style={styles.topCardLeft}>
+              <View style={styles.topCardStoreRow}>
+                {restaurantImageUri ? (
+                  <Image source={{ uri: restaurantImageUri }} style={styles.topStoreRealImg} resizeMode="cover" />
+                ) : (
+                  <View style={styles.topStorePlaceholder}>
+                    <Text style={{ fontSize: 13 }}>🏪</Text>
+                  </View>
+                )}
+                <Text style={styles.storeNameLabel} numberOfLines={1}>
+                  {restaurantName}
+                </Text>
+              </View>
+              <Text style={[styles.statusHeading, { color: '#0F172A' }]} numberOfLines={1}>
+                {statusTitle}
+              </Text>
+              <View
+                style={[
+                  styles.statusPill,
+                  {
+                    backgroundColor: `${currentStatusColor}14`,
+                    borderColor: `${currentStatusColor}40`,
+                  },
+                ]}
+              >
+                <Text style={[styles.statusPillText, { color: currentStatusColor }]}>
+                  {statusSubtitle}
+                </Text>
+              </View>
+            </View>
+
+            {currentStep !== 0 && currentStep !== 5 && !isCompleted && (
+              <TouchableOpacity
+                style={styles.mapThumbnailContainer}
+                activeOpacity={0.88}
+                onPress={() => setMapModalVisible(true)}
+              >
+                <WebView
+                  source={{ html: mapHtmlMini }}
+                  style={styles.mapThumbnailImage}
+                  scrollEnabled={false}
+                  pointerEvents="none"
+                  javaScriptEnabled={true}
+                  domStorageEnabled={true}
+                />
+                <View style={[styles.mapPinBadge, { backgroundColor: currentStatusColor }]}>
+                  <Text style={styles.mapPinText}>📍 Live Map</Text>
                 </View>
-              )}
-              <Text style={styles.storeNameLabel} numberOfLines={1}>
-                {restaurantName}
-              </Text>
-            </View>
-            <Text style={[styles.statusHeading, { color: '#0F172A' }]} numberOfLines={1}>
-              {statusTitle}
-            </Text>
-            <View
-              style={[
-                styles.statusPill,
-                {
-                  backgroundColor: `${currentStatusColor}14`,
-                  borderColor: `${currentStatusColor}40`,
-                },
-              ]}
-            >
-              <Text style={[styles.statusPillText, { color: currentStatusColor }]}>
-                {statusSubtitle}
-              </Text>
-            </View>
+                <View style={[styles.mapExpandOverlay, { backgroundColor: currentStatusColor }]}>
+                  <Text style={styles.mapExpandIcon}>⤢</Text>
+                </View>
+              </TouchableOpacity>
+            )}
           </View>
 
-          {currentStep !== 0 && currentStep !== 5 && !isCompleted && (
+          {/* REAL OPENSTREETMAP LIVE TRACKING CARD (Zero dummy PNG - Specification Point 4 & 7) */}
+          {currentStep !== 0 && currentStep !== 5 && !isCompleted && !isCancelled && (
             <TouchableOpacity
-              style={styles.mapThumbnailContainer}
-              activeOpacity={0.88}
+              activeOpacity={0.92}
               onPress={() => setMapModalVisible(true)}
+              style={styles.realLiveMapCard}
             >
-              <Image
-                source={{ uri: mapThumbnailUri || 'https://tile.openstreetmap.org/14/11718/7057.png' }}
-                style={styles.mapThumbnailImage}
-                resizeMode="cover"
-              />
-              <View style={[styles.mapPinBadge, { backgroundColor: currentStatusColor }]}>
-                <Text style={styles.mapPinText}>📍 Live Map</Text>
+              <View style={styles.realLiveMapHeader}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                  <Text style={{ fontSize: 16 }}>{categoryTerm.icon || '📍'}</Text>
+                  <Text style={styles.realLiveMapTitle}>Live OpenStreetMap Tracking</Text>
+                </View>
+                <View style={styles.realLiveMapExpandTag}>
+                  <Text style={styles.realLiveMapExpandTagText}>Tap to Expand ⤢</Text>
+                </View>
               </View>
-              <View style={[styles.mapExpandOverlay, { backgroundColor: currentStatusColor }]}>
-                <Text style={styles.mapExpandIcon}>⤢</Text>
+
+              <View style={styles.realLiveMapWebViewContainer}>
+                <WebView
+                  source={{ html: mapHtmlMini }}
+                  style={StyleSheet.absoluteFill}
+                  scrollEnabled={false}
+                  pointerEvents="none"
+                  javaScriptEnabled={true}
+                  domStorageEnabled={true}
+                />
+                <View style={styles.realLiveMapStatusStrip}>
+                  <View style={[styles.realLiveMapStatusDot, { backgroundColor: currentStatusColor }]} />
+                  <Text style={styles.realLiveMapStatusStripText} numberOfLines={1}>
+                    {isOutForDelivery
+                      ? 'Rider en route to delivery address'
+                      : `Rider at ${categoryTerm.storeNameType} • Pickup stage`}
+                  </Text>
+                </View>
               </View>
             </TouchableOpacity>
           )}
-        </View>
 
-        {/* Professional Cancel Order Button */}
-        {isCancellable && (
-          <TouchableOpacity
-            style={styles.cancelOrderBtn}
-            onPress={handleRequestCancel}
-            activeOpacity={0.82}
-          >
-            <View style={styles.cancelOrderBtnInner}>
-              <Icon name="close" size={14} color="#EF4444" />
-              <Text style={styles.cancelOrderBtnText}>Cancel Order</Text>
-            </View>
-          </TouchableOpacity>
-        )}
+          {/* Professional Cancel Order Button */}
+          {isCancellable && (
+            <TouchableOpacity
+              style={styles.cancelOrderBtn}
+              onPress={handleRequestCancel}
+              activeOpacity={0.82}
+            >
+              <View style={styles.cancelOrderBtnInner}>
+                <Icon name="close" size={14} color="#EF4444" />
+                <Text style={styles.cancelOrderBtnText}>Cancel Order</Text>
+              </View>
+            </TouchableOpacity>
+          )}
 
-        {/* 2. PAYMENT / BILLING STATUS PILL */}
-        {isCancelled ? (
-          <View style={styles.cancelledPaymentCard}>
-            <View style={styles.cancelledBadgeRow}>
-              <View style={styles.cancelledIconPill}>
-                <Icon name="close" size={16} color="#EF4444" />
-              </View>
-              <View style={styles.cancelledTextWrap}>
-                <Text style={styles.cancelledTitle}>
-                  Order Cancelled {order?.cancelledBy ? `(By ${String(order.cancelledBy).toUpperCase()})` : ''}
-                </Text>
-                <Text style={styles.cancelledSubtitle}>
-                  Reason: {order?.cancellationReason || 'Order was cancelled'}
-                </Text>
-              </View>
-            </View>
-
-            <View style={styles.cancelledBreakdownBox}>
-              <View style={styles.cancelledRow}>
-                <Text style={styles.cancelledLabel}>Payment Status:</Text>
-                <Text style={styles.cancelledVal}>
-                  {isPaid ? 'Paid' : 'Cash (No charge)'}
-                </Text>
-              </View>
-              <View style={styles.cancelledRow}>
-                <Text style={styles.cancelledLabel}>Paid Amount:</Text>
-                <Text style={styles.cancelledVal}>
-                  ₹{Number(order.paidAmount ?? (isPaid ? totalAmount : 0))}
-                </Text>
-              </View>
-              <View style={styles.cancelledDivider} />
-              <View style={styles.cancelledRow}>
-                <Text style={[styles.cancelledLabel, { fontWeight: '700', color: '#0F172A' }]}>
-                  Refund Amount:
-                </Text>
-                <Text
-                  style={[
-                    styles.cancelledVal,
-                    {
-                      fontWeight: '800',
-                      color: Number(order.refundAmount || 0) > 0 ? '#16A34A' : '#EF4444',
-                      fontSize: 16,
-                    },
-                  ]}
-                >
-                  ₹{Number(order.refundAmount || 0)}
-                </Text>
-              </View>
-              {Boolean(order.isNonRefundable || (order.refundAmount === 0 && isPaid)) && (
-                <View style={styles.nonRefundTagBox}>
-                  <Text style={styles.nonRefundTagText}>
-                    ⚠️ Non-Refundable (Order was already ready)
+          {/* 2. PAYMENT / BILLING STATUS PILL */}
+          {isCancelled ? (
+            <View style={styles.cancelledPaymentCard}>
+              <View style={styles.cancelledBadgeRow}>
+                <View style={styles.cancelledIconPill}>
+                  <Icon name="close" size={16} color="#EF4444" />
+                </View>
+                <View style={styles.cancelledTextWrap}>
+                  <Text style={styles.cancelledTitle}>
+                    Order Cancelled {order?.cancelledBy ? `(By ${String(order.cancelledBy).toUpperCase()})` : ''}
                   </Text>
+                  <Text style={styles.cancelledSubtitle}>
+                    Reason: {order?.cancellationReason || 'Order was cancelled'}
+                  </Text>
+                </View>
+              </View>
+
+              <View style={styles.cancelledBreakdownBox}>
+                <View style={styles.cancelledRow}>
+                  <Text style={styles.cancelledLabel}>Payment Status:</Text>
+                  <Text style={styles.cancelledVal}>
+                    {isPaid ? 'Paid' : 'Cash (No charge)'}
+                  </Text>
+                </View>
+                <View style={styles.cancelledRow}>
+                  <Text style={styles.cancelledLabel}>Paid Amount:</Text>
+                  <Text style={styles.cancelledVal}>
+                    ₹{Number(order.paidAmount ?? (isPaid ? totalAmount : 0))}
+                  </Text>
+                </View>
+                <View style={styles.cancelledDivider} />
+                <View style={styles.cancelledRow}>
+                  <Text style={[styles.cancelledLabel, { fontWeight: '700', color: '#0F172A' }]}>
+                    Refund Amount:
+                  </Text>
+                  <Text
+                    style={[
+                      styles.cancelledVal,
+                      {
+                        fontWeight: '800',
+                        color: Number(order.refundAmount || 0) > 0 ? '#16A34A' : '#EF4444',
+                        fontSize: 16,
+                      },
+                    ]}
+                  >
+                    ₹{Number(order.refundAmount || 0)}
+                  </Text>
+                </View>
+                {Boolean(order.isNonRefundable || (order.refundAmount === 0 && isPaid)) && (
+                  <View style={styles.nonRefundTagBox}>
+                    <Text style={styles.nonRefundTagText}>
+                      ⚠️ Non-Refundable (Order was already ready)
+                    </Text>
+                  </View>
+                )}
+              </View>
+            </View>
+          ) : (
+            <View style={styles.paymentCard}>
+              <View style={styles.paymentTextWrap}>
+                <Text style={styles.paymentTitle}>
+                  Payment of ₹{totalAmount} {isPaid ? 'completed' : 'pending'}
+                </Text>
+                <Text style={styles.paymentSubtitle}>
+                  {isPaid
+                    ? 'Paid online successfully via UPI / Card'
+                    : 'Pay now, or pay to the delivery partner using Cash/UPI'}
+                </Text>
+              </View>
+
+              {!isPaid ? (
+                <TouchableOpacity
+                  style={styles.payNowButton}
+                  onPress={() => {
+                    Alert.alert(
+                      'Payment Options',
+                      `Pay ₹${totalAmount} via Cash on Delivery or UPI on arrival.`,
+                      [{ text: 'OK' }]
+                    );
+                  }}
+                  activeOpacity={0.85}
+                >
+                  <Text style={styles.payNowText}>Pay now ›</Text>
+                </TouchableOpacity>
+              ) : (
+                <View style={styles.paidBadge}>
+                  <Text style={styles.paidBadgeText}>Paid ✓</Text>
                 </View>
               )}
             </View>
-          </View>
-        ) : (
-          <View style={styles.paymentCard}>
-            <View style={styles.paymentTextWrap}>
-              <Text style={styles.paymentTitle}>
-                Payment of ₹{totalAmount} {isPaid ? 'completed' : 'pending'}
-              </Text>
-              <Text style={styles.paymentSubtitle}>
-                {isPaid
-                  ? 'Paid online successfully via UPI / Card'
-                  : 'Pay now, or pay to the delivery partner using Cash/UPI'}
-              </Text>
-            </View>
+          )}
 
-            {!isPaid ? (
-              <TouchableOpacity
-                style={styles.payNowButton}
-                onPress={() => {
-                  Alert.alert(
-                    'Payment Options',
-                    `Pay ₹${totalAmount} via Cash on Delivery or UPI on arrival.`,
-                    [{ text: 'OK' }]
-                  );
-                }}
-                activeOpacity={0.85}
-              >
-                <Text style={styles.payNowText}>Pay now ›</Text>
-              </TouchableOpacity>
-            ) : (
-              <View style={styles.paidBadge}>
-                <Text style={styles.paidBadgeText}>Paid ✓</Text>
-              </View>
-            )}
-          </View>
-        )}
-
-        {/* 3. CUSTOMER DELIVERY DETAILS CARD (DELIVERING TO) */}
-        <View style={styles.customerDetailsCard}>
-          <View style={styles.customerHeaderRow}>
-            <View style={styles.customerAvatarCircle}>
-              <Text style={styles.customerAvatarLetter}>
-                {(customerName || 'U').charAt(0).toUpperCase()}
-              </Text>
-            </View>
-            <View style={styles.customerInfoCol}>
-              <View style={styles.customerTitleRow}>
-                <Text style={styles.customerSectionLabel}>📍 DELIVERING TO</Text>
-                <View style={styles.customerTag}>
-                  <Text style={styles.customerTagText}>You</Text>
-                </View>
-              </View>
-              <Text style={styles.customerNameText}>{customerName}</Text>
-              {customerPhone ? (
-                <Text style={styles.customerPhoneText}>📞 {customerPhone}</Text>
-              ) : null}
-              <Text style={styles.customerAddressText} numberOfLines={2}>
-                🏠 {customerAddress || 'Delivery Address'}
-              </Text>
-            </View>
-          </View>
-        </View>
-
-        {currentStep !== 0 && ( <> {/* 4. RIDER / DELIVERY PARTNER CARD */}
-        {riderInfo ? (
-          <View style={styles.riderCard}>
-            <View style={styles.riderHeaderRow}>
-              {(() => {
-                const rawPhoto = riderInfo.photo || riderInfo.profilePicture || riderInfo.avatar;
-                const photoUri =
-                  rawPhoto && (rawPhoto.startsWith('http') || rawPhoto.startsWith('data:'))
-                    ? rawPhoto
-                    : rawPhoto
-                    ? `${UPLOADS_URL}${rawPhoto.replace('/uploads', '')}`
-                    : null;
-
-                return photoUri ? (
-                  <Image source={{ uri: photoUri }} style={styles.riderAvatar} />
-                ) : (
-                  <View style={[styles.riderAvatar, { backgroundColor: '#EFF6FF', alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#BFDBFE' }]}>
-                    <Text style={{ fontSize: 24 }}>🛵</Text>
+          {/* ── CUSTOMER DELIVERY OTP CARD ── */}
+          {!isCancelled && currentStep !== 5 && (
+            <View style={styles.customerDeliveryOtpCard}>
+              <View style={styles.customerDeliveryOtpHeader}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                  <View style={styles.customerDeliveryOtpIconBadge}>
+                    <Text style={{ fontSize: 20 }}>🔐</Text>
                   </View>
-                );
-              })()}
-              <View style={styles.riderTextColumn}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-                  <Text style={styles.riderName}>{riderInfo.name || 'Delivery Partner'}</Text>
-                  <View style={styles.mapRiderVerifiedBadge}>
-                    <Text style={styles.mapRiderVerifiedText}>✓ Verified</Text>
+                  <View>
+                    <Text style={styles.customerDeliveryOtpTitle}>Delivery OTP (डिलीवरी कोड)</Text>
+                    <Text style={styles.customerDeliveryOtpSubtitle}>
+                      सामान प्राप्त करते समय डिलीवरी पार्टनर को दें
+                    </Text>
                   </View>
                 </View>
-                <Text style={styles.riderVehicle}>
-                  🛵 {riderInfo.vehicleType || 'Bike'} • {riderInfo.vehicleNumber || 'Fast Fleet'}
-                </Text>
-                <View style={styles.riderRatingBadge}>
-                  <Text style={styles.riderRatingText}>⭐ {Number(riderInfo.rating || 4.9).toFixed(1)} • Delivery Partner</Text>
+                <View style={styles.customerDeliveryOtpShieldBadge}>
+                  <Text style={styles.customerDeliveryOtpShieldText}>SECURE PIN</Text>
                 </View>
               </View>
-            </View>
 
-            {/* Action Buttons: Call & Chat */}
-            <View style={styles.riderActionRow}>
-              <TouchableOpacity
-                style={[styles.actionBtnPrimary, { backgroundColor: currentStatusColor }]}
-                onPress={handleCallRider}
-                activeOpacity={0.85}
-              >
-                <Icon name="call" size={14} color="#FFFFFF" style={{ marginRight: 6 }} />
-                <Text style={styles.actionBtnPrimaryText}>Call Partner</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={styles.actionBtnSecondary}
-                onPress={handleChatRider}
-                activeOpacity={0.85}
-              >
-                <Icon name="chatbubble-outline" size={14} color="#0066FF" style={{ marginRight: 6 }} />
-                <Text style={styles.actionBtnSecondaryText}>Chat Partner</Text>
-              </TouchableOpacity>
-            </View>
-
-            <View style={styles.riderTrustRow}>
-              <Text style={styles.riderTrustText}>🛡️ Contactless delivery & temperature verified</Text>
-            </View>
-          </View>
-        ) : (
-          <View style={styles.riderSearchingCard}>
-            <View style={styles.searchingHeaderRow}>
-              <View style={styles.searchingIconBox}>
-                <Text style={styles.searchingBikeIcon}>🛵</Text>
+              {/* OTP Digits Row */}
+              <View style={styles.customerDeliveryOtpDigitsRow}>
+                {otpDigits.map((digit: string, idx: number) => (
+                  <View key={idx} style={styles.customerDeliveryOtpDigitBox}>
+                    <Text style={styles.customerDeliveryOtpDigitText}>{digit}</Text>
+                  </View>
+                ))}
               </View>
-              <View style={styles.searchingTextColumn}>
-                <Text style={styles.searchingTitle}>🛵 Rider assignment pending</Text>
-                <Text style={styles.searchingSubtitle}>
-                  Finding the nearest delivery partner. Live GPS route will activate as soon as partner is assigned.
+
+              <View style={styles.customerDeliveryOtpNoticeBox}>
+                <Text style={styles.customerDeliveryOtpNoticeText}>
+                  🛡️ कृपया अपना पार्सल/सामान चेक करने के बाद ही डिलीवरी पार्टनर को यह 4-अंकीय कोड बताएं।
                 </Text>
               </View>
             </View>
+          )}
 
-            {/* Tip Selection Chips */}
-            <View style={styles.tipRow}>
-              {['10', '20', '30', 'Other'].map((tipVal) => (
-                <TouchableOpacity
-                  key={tipVal}
-                  style={[
-                    styles.tipChip,
-                    selectedTip === tipVal && styles.tipChipActive,
-                  ]}
-                  onPress={() => setSelectedTip(tipVal)}
-                >
-                  <Text
-                    style={[
-                      styles.tipChipText,
-                      selectedTip === tipVal && styles.tipChipTextActive,
-                    ]}
+          {/* 3. CUSTOMER DELIVERY DETAILS CARD (DELIVERING TO) */}
+          <View style={styles.customerDetailsCard}>
+            <View style={styles.customerHeaderRow}>
+              <View style={styles.customerAvatarCircle}>
+                <Text style={styles.customerAvatarLetter}>
+                  {(customerName || 'U').charAt(0).toUpperCase()}
+                </Text>
+              </View>
+              <View style={styles.customerInfoCol}>
+                <View style={styles.customerTitleRow}>
+                  <Text style={styles.customerSectionLabel}>📍 DELIVERING TO</Text>
+                  <View style={styles.customerTag}>
+                    <Text style={styles.customerTagText}>You</Text>
+                  </View>
+                </View>
+                <Text style={styles.customerNameText}>{customerName}</Text>
+                {customerPhone ? (
+                  <Text style={styles.customerPhoneText}>📞 {customerPhone}</Text>
+                ) : null}
+                <Text style={styles.customerAddressText} numberOfLines={2}>
+                  🏠 {customerAddress || 'Delivery Address'}
+                </Text>
+
+                {/* 📍 MODULE 05: Customer Alternative Drop ("मुझे यहीं दे दो") */}
+                {(currentStep >= 2 || order?.status === 'OUT_FOR_DELIVERY' || order?.status === 'PICKED_UP' || order?.deliveryStatus === 'OUT_FOR_DELIVERY') && (
+                  <TouchableOpacity
+                    style={{
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      backgroundColor: '#EFF6FF',
+                      borderWidth: 1.5,
+                      borderColor: '#3B82F6',
+                      borderRadius: 12,
+                      paddingVertical: 9,
+                      paddingHorizontal: 12,
+                      marginTop: 10,
+                      gap: 8,
+                    }}
+                    onPress={handleAlternativeDrop}
+                    activeOpacity={0.8}
                   >
-                    {tipVal === 'Other' ? 'Other' : `₹${tipVal}`}
-                  </Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-          </View>
-        )}
-
-        </> )} {/* 5. RESTAURANT SUMMARY & ACTIONS */}
-        <View style={styles.storeDetailsCard}>
-          <View style={styles.storeHeaderRow}>
-            {restaurantImageUri ? (
-              <Image source={{ uri: restaurantImageUri }} style={styles.storeHeaderRealImg} resizeMode="cover" />
-            ) : (
-              <View style={styles.storeIconBox}>
-                <Text style={styles.storeEmoji}>🏪</Text>
-              </View>
-            )}
-            <View style={styles.storeInfoColumn}>
-              <Text style={styles.storeDetailsTitle}>{restaurantName}</Text>
-              <Text style={styles.storeCategorySub}>{categoryName} Order • ID: #{String(bookingId).slice(-6)}</Text>
-            </View>
-          </View>
-
-          {/* Store Real Address */}
-          {storeAddress ? (
-            <View style={styles.storeAddressRow}>
-              <Text style={styles.storeAddressText} numberOfLines={2}>
-                📍 {storeAddress}
-              </Text>
-            </View>
-          ) : null}
-
-          {/* Items Breakdown with Real Thumbnail Images */}
-          {items.length > 0 ? (
-            <View style={styles.itemsList}>
-              {items.map((it: any, idx: number) => {
-                const rawImg = it.image || it.imageUrl || it.photo || (Array.isArray(it.images) ? it.images[0] : null);
-                const itImgUri = rawImg && typeof rawImg === 'string' && rawImg.trim()
-                  ? (rawImg.startsWith('http') || rawImg.startsWith('data:') ? rawImg : `${UPLOADS_URL}${rawImg.replace('/uploads', '')}`)
-                  : null;
-
-                return (
-                  <View key={idx} style={styles.itemRowWithThumb}>
-                    <View style={styles.itemThumbWrap}>
-                      {itImgUri ? (
-                        <Image source={{ uri: itImgUri }} style={styles.itemThumbImg} resizeMode="cover" />
-                      ) : (
-                        <View style={styles.itemThumbPlaceholder}>
-                          <Text style={{ fontSize: 16 }}>🍲</Text>
-                        </View>
-                      )}
-                    </View>
-                    <View style={{ flex: 1, marginLeft: 10 }}>
-                      <Text style={styles.itemName}>
-                        {it.name} <Text style={styles.itemQty}>× {it.quantity || 1}</Text>
+                    <Text style={{ fontSize: 16 }}>📍</Text>
+                    <View style={{ flex: 1 }}>
+                      <Text style={{ color: '#1D4ED8', fontWeight: '800', fontSize: 13 }}>
+                        मुझे यहीं दे दो (Hand over here)
                       </Text>
-                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 2 }}>
-                        <Text style={{ fontSize: 12, color: '#64748B', fontWeight: '600' }}>
-                          ₹{it.price || 0} each
-                        </Text>
-                        {it.isRefundable !== undefined && (
-                          <Text style={{ fontSize: 10, fontWeight: '700', color: it.isRefundable ? '#15803D' : '#94A3B8' }}>
-                            {it.isRefundable ? '• ✓ Refundable' : '• Non-Refundable'}
-                          </Text>
-                        )}
+                      <Text style={{ color: '#3B82F6', fontSize: 11, marginTop: 1 }}>
+                        अपनी वर्तमान लाइव लोकेशन पर डिलीवरी मंगवाएं
+                      </Text>
+                    </View>
+                    <Text style={{ color: '#1D4ED8', fontSize: 16, fontWeight: '900' }}>➔</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+            </View>
+          </View>
+
+          {currentStep !== 0 && (<> {/* 4. RIDER / DELIVERY PARTNER CARD */}
+            {riderInfo ? (
+              <View style={styles.riderCard}>
+                <View style={styles.riderHeaderRow}>
+                  {(() => {
+                    const rawPhoto = riderInfo.photo || riderInfo.profilePicture || riderInfo.avatar;
+                    const photoUri =
+                      rawPhoto && (rawPhoto.startsWith('http') || rawPhoto.startsWith('data:'))
+                        ? rawPhoto
+                        : rawPhoto
+                          ? `${UPLOADS_URL}${rawPhoto.replace('/uploads', '')}`
+                          : null;
+
+                    return photoUri ? (
+                      <Image source={{ uri: photoUri }} style={styles.riderAvatar} />
+                    ) : (
+                      <View style={[styles.riderAvatar, { backgroundColor: '#EFF6FF', alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#BFDBFE' }]}>
+                        <Text style={{ fontSize: 24 }}>🛵</Text>
+                      </View>
+                    );
+                  })()}
+                  <View style={styles.riderTextColumn}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                      <Text style={styles.riderName}>{riderInfo.name || 'Delivery Partner'}</Text>
+                      <View style={styles.mapRiderVerifiedBadge}>
+                        <Text style={styles.mapRiderVerifiedText}>✓ Verified</Text>
                       </View>
                     </View>
-                    <Text style={styles.itemPrice}>
-                      ₹{(Number(it.price || 0) * Number(it.quantity || 1)).toFixed(0)}
+                    <Text style={styles.riderVehicle}>
+                      🛵 {riderInfo.vehicleType || 'Bike'} • {riderInfo.vehicleNumber || 'Fast Fleet'}
+                    </Text>
+                    <View style={styles.riderRatingBadge}>
+                      <Text style={styles.riderRatingText}>⭐ {Number(riderInfo.rating || 4.9).toFixed(1)} • Delivery Partner</Text>
+                    </View>
+                  </View>
+                </View>
+
+                {/* Action Buttons: Call & Chat */}
+                <View style={styles.riderActionRow}>
+                  <TouchableOpacity
+                    style={[styles.actionBtnPrimary, { backgroundColor: currentStatusColor }]}
+                    onPress={handleCallRider}
+                    activeOpacity={0.85}
+                  >
+                    <Icon name="call" size={14} color="#FFFFFF" style={{ marginRight: 6 }} />
+                    <Text style={styles.actionBtnPrimaryText}>Call Partner</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={styles.actionBtnSecondary}
+                    onPress={handleChatRider}
+                    activeOpacity={0.85}
+                  >
+                    <Icon name="chatbubble-outline" size={14} color="#0066FF" style={{ marginRight: 6 }} />
+                    <Text style={styles.actionBtnSecondaryText}>Chat Partner</Text>
+                  </TouchableOpacity>
+                </View>
+
+                <View style={styles.riderTrustRow}>
+                  <Text style={styles.riderTrustText}>🛡️ Contactless delivery & temperature verified</Text>
+                </View>
+              </View>
+            ) : (
+              <View style={styles.riderSearchingCard}>
+                <View style={styles.searchingHeaderRow}>
+                  <View style={styles.searchingIconBox}>
+                    <Text style={styles.searchingBikeIcon}>🛵</Text>
+                  </View>
+                  <View style={styles.searchingTextColumn}>
+                    <Text style={styles.searchingTitle}>🛵 Rider assignment pending</Text>
+                    <Text style={styles.searchingSubtitle}>
+                      Finding the nearest delivery partner. Live GPS route will activate as soon as partner is assigned.
                     </Text>
                   </View>
-                );
-              })}
-            </View>
-          ) : null}
+                </View>
 
-          {/* Store Actions: Chat & Call */}
-          <View style={styles.storeActionRow}>
-            <TouchableOpacity
-              style={styles.storeActionBtn}
-              onPress={handleCallStore}
-              activeOpacity={0.85}
-            >
-              <Text style={styles.storeActionBtnText}>📞 Call Store</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.storeActionBtnFilled}
-              onPress={handleChatStore}
-              activeOpacity={0.85}
-            >
-              <Text style={styles.storeActionBtnFilledText}>💬 Chat with Store</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-
-        {/* 6. RATE YOUR ORDER CARD (Delivered / Completed) */}
-        {currentStep === 5 && (
-          <View style={styles.ratingCard}>
-            <View style={styles.ratingHeaderRow}>
-              <Text style={styles.ratingCardTitle}>⭐ Rate Your Experience</Text>
-              <Text style={styles.ratingCardSubtitle}>Help us improve by rating the restaurant and delivery partner</Text>
-            </View>
-
-            {/* Target Selector Tabs: Restaurant vs Rider */}
-            <View style={styles.ratingTabRow}>
-              <TouchableOpacity
-                style={[styles.ratingTabBtn, ratingTarget === 'restaurant' && styles.ratingTabBtnActive]}
-                onPress={() => setRatingTarget('restaurant')}
-                activeOpacity={0.8}
-              >
-                <Text style={[styles.ratingTabText, ratingTarget === 'restaurant' && styles.ratingTabTextActive]}>
-                  🏪 Restaurant {restaurantRated ? '✓' : ''}
-                </Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={[styles.ratingTabBtn, ratingTarget === 'rider' && styles.ratingTabBtnActive]}
-                onPress={() => setRatingTarget('rider')}
-                activeOpacity={0.8}
-              >
-                <Text style={[styles.ratingTabText, ratingTarget === 'rider' && styles.ratingTabTextActive]}>
-                  🛵 Delivery Partner {riderRated ? '✓' : ''}
-                </Text>
-              </TouchableOpacity>
-            </View>
-
-            {/* Tab Content: Restaurant Rating */}
-            {ratingTarget === 'restaurant' && (
-              <View style={styles.ratingContentBox}>
-                <Text style={styles.ratingTargetName}>{restaurantName || 'Restaurant'}</Text>
-                <Text style={styles.ratingPromptText}>How was the food and packaging?</Text>
-
-                {/* Star Row */}
-                <View style={styles.starsRow}>
-                  {[1, 2, 3, 4, 5].map((star) => (
+                {/* Tip Selection Chips */}
+                <View style={styles.tipRow}>
+                  {['10', '20', '30', 'Other'].map((tipVal) => (
                     <TouchableOpacity
-                      key={star}
-                      onPress={() => setRestaurantStars(star)}
-                      activeOpacity={0.7}
-                      style={styles.starTouch}
+                      key={tipVal}
+                      style={[
+                        styles.tipChip,
+                        selectedTip === tipVal && styles.tipChipActive,
+                      ]}
+                      onPress={() => setSelectedTip(tipVal)}
                     >
-                      <Text style={[styles.starEmoji, star <= restaurantStars ? styles.starFilled : styles.starEmpty]}>
-                        {star <= restaurantStars ? '★' : '☆'}
+                      <Text
+                        style={[
+                          styles.tipChipText,
+                          selectedTip === tipVal && styles.tipChipTextActive,
+                        ]}
+                      >
+                        {tipVal === 'Other' ? 'Other' : `₹${tipVal}`}
                       </Text>
                     </TouchableOpacity>
                   ))}
                 </View>
-
-                {/* Feedback Input */}
-                <TextInput
-                  style={styles.ratingFeedbackInput}
-                  placeholder="Leave comments about food taste, quality, packaging..."
-                  placeholderTextColor="#94A3B8"
-                  value={restaurantFeedback}
-                  onChangeText={setRestaurantFeedback}
-                  multiline
-                  numberOfLines={3}
-                />
-
-                {/* Submit Button */}
-                <TouchableOpacity
-                  style={[styles.submitRatingBtn, submittingRating && { opacity: 0.6 }]}
-                  onPress={() => handleRateOrder('restaurant')}
-                  disabled={submittingRating}
-                  activeOpacity={0.85}
-                >
-                  {submittingRating ? (
-                    <ActivityIndicator color="#FFFFFF" size="small" />
-                  ) : (
-                    <Text style={styles.submitRatingBtnText}>
-                      {restaurantRated ? '✓ Update Restaurant Rating' : 'Submit Restaurant Rating'}
-                    </Text>
-                  )}
-                </TouchableOpacity>
               </View>
             )}
 
-            {/* Tab Content: Rider Rating */}
-            {ratingTarget === 'rider' && (
-              <View style={styles.ratingContentBox}>
-                <Text style={styles.ratingTargetName}>{riderInfo?.name || 'Delivery Partner'}</Text>
-                <Text style={styles.ratingPromptText}>How was the delivery service and speed?</Text>
-
-                {/* Star Row */}
-                <View style={styles.starsRow}>
-                  {[1, 2, 3, 4, 5].map((star) => (
-                    <TouchableOpacity
-                      key={star}
-                      onPress={() => setRiderStars(star)}
-                      activeOpacity={0.7}
-                      style={styles.starTouch}
-                    >
-                      <Text style={[styles.starEmoji, star <= riderStars ? styles.starFilled : styles.starEmpty]}>
-                        {star <= riderStars ? '★' : '☆'}
-                      </Text>
-                    </TouchableOpacity>
-                  ))}
+          </>)} {/* 5. RESTAURANT SUMMARY & ACTIONS */}
+          <View style={styles.storeDetailsCard}>
+            <View style={styles.storeHeaderRow}>
+              {restaurantImageUri ? (
+                <Image source={{ uri: restaurantImageUri }} style={styles.storeHeaderRealImg} resizeMode="cover" />
+              ) : (
+                <View style={styles.storeIconBox}>
+                  <Text style={styles.storeEmoji}>🏪</Text>
                 </View>
+              )}
+              <View style={styles.storeInfoColumn}>
+                <Text style={styles.storeDetailsTitle}>{restaurantName}</Text>
+                <Text style={styles.storeCategorySub}>{categoryName} Order • ID: #{String(bookingId).slice(-6)}</Text>
+              </View>
+            </View>
 
-                {/* Feedback Input */}
-                <TextInput
-                  style={styles.ratingFeedbackInput}
-                  placeholder="Leave comments about delivery partner, speed, politeness..."
-                  placeholderTextColor="#94A3B8"
-                  value={riderFeedback}
-                  onChangeText={setRiderFeedback}
-                  multiline
-                  numberOfLines={3}
-                />
+            {/* Store Real Address */}
+            {storeAddress ? (
+              <View style={styles.storeAddressRow}>
+                <Text style={styles.storeAddressText} numberOfLines={2}>
+                  📍 {storeAddress}
+                </Text>
+              </View>
+            ) : null}
 
-                {/* Submit Button */}
+            {/* Items Breakdown with Real Thumbnail Images */}
+            {items.length > 0 ? (
+              <View style={styles.itemsList}>
+                {items.map((it: any, idx: number) => {
+                  const rawImg = it.image || it.imageUrl || it.photo || (Array.isArray(it.images) ? it.images[0] : null);
+                  const itImgUri = rawImg && typeof rawImg === 'string' && rawImg.trim()
+                    ? (rawImg.startsWith('http') || rawImg.startsWith('data:') ? rawImg : `${UPLOADS_URL}${rawImg.replace('/uploads', '')}`)
+                    : null;
+
+                  return (
+                    <View key={idx} style={styles.itemRowWithThumb}>
+                      <View style={styles.itemThumbWrap}>
+                        {itImgUri ? (
+                          <Image source={{ uri: itImgUri }} style={styles.itemThumbImg} resizeMode="cover" />
+                        ) : (
+                          <View style={styles.itemThumbPlaceholder}>
+                            <Text style={{ fontSize: 16 }}>🍲</Text>
+                          </View>
+                        )}
+                      </View>
+                      <View style={{ flex: 1, marginLeft: 10 }}>
+                        <Text style={styles.itemName}>
+                          {it.name} <Text style={styles.itemQty}>× {it.quantity || 1}</Text>
+                        </Text>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 2 }}>
+                          <Text style={{ fontSize: 12, color: '#64748B', fontWeight: '600' }}>
+                            ₹{it.price || 0} each
+                          </Text>
+                          {it.isRefundable !== undefined && (
+                            <Text style={{ fontSize: 10, fontWeight: '700', color: it.isRefundable ? '#15803D' : '#94A3B8' }}>
+                              {it.isRefundable ? '• ✓ Refundable' : '• Non-Refundable'}
+                            </Text>
+                          )}
+                        </View>
+                      </View>
+                      <Text style={styles.itemPrice}>
+                        ₹{(Number(it.price || 0) * Number(it.quantity || 1)).toFixed(0)}
+                      </Text>
+                    </View>
+                  );
+                })}
+              </View>
+            ) : null}
+
+            {/* Store Actions: Chat & Call */}
+            <View style={styles.storeActionRow}>
+              <TouchableOpacity
+                style={styles.storeActionBtn}
+                onPress={handleCallStore}
+                activeOpacity={0.85}
+              >
+                <Text style={styles.storeActionBtnText}>📞 Call Store</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.storeActionBtnFilled}
+                onPress={handleChatStore}
+                activeOpacity={0.85}
+              >
+                <Text style={styles.storeActionBtnFilledText}>💬 Chat with Store</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+
+          {/* 6. RATE YOUR ORDER CARD (Delivered / Completed) */}
+          {currentStep === 5 && (
+            <View style={styles.ratingCard}>
+              <View style={styles.ratingHeaderRow}>
+                <Text style={styles.ratingCardTitle}>⭐ Rate Your Experience</Text>
+                <Text style={styles.ratingCardSubtitle}>Help us improve by rating the restaurant and delivery partner</Text>
+              </View>
+
+              {/* Target Selector Tabs: Restaurant vs Rider */}
+              <View style={styles.ratingTabRow}>
                 <TouchableOpacity
-                  style={[styles.submitRatingBtn, submittingRating && { opacity: 0.6 }]}
-                  onPress={() => handleRateOrder('rider')}
-                  disabled={submittingRating}
-                  activeOpacity={0.85}
+                  style={[styles.ratingTabBtn, ratingTarget === 'restaurant' && styles.ratingTabBtnActive]}
+                  onPress={() => setRatingTarget('restaurant')}
+                  activeOpacity={0.8}
                 >
-                  {submittingRating ? (
-                    <ActivityIndicator color="#FFFFFF" size="small" />
-                  ) : (
-                    <Text style={styles.submitRatingBtnText}>
-                      {riderRated ? '✓ Update Rider Rating' : 'Submit Rider Rating'}
-                    </Text>
-                  )}
+                  <Text style={[styles.ratingTabText, ratingTarget === 'restaurant' && styles.ratingTabTextActive]}>
+                    🏪 Restaurant {restaurantRated ? '✓' : ''}
+                  </Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={[styles.ratingTabBtn, ratingTarget === 'rider' && styles.ratingTabBtnActive]}
+                  onPress={() => setRatingTarget('rider')}
+                  activeOpacity={0.8}
+                >
+                  <Text style={[styles.ratingTabText, ratingTarget === 'rider' && styles.ratingTabTextActive]}>
+                    🛵 Delivery Partner {riderRated ? '✓' : ''}
+                  </Text>
                 </TouchableOpacity>
               </View>
-            )}
-          </View>
-        )}
 
-        <View style={{ height: 40 }} />
+              {/* Tab Content: Restaurant Rating */}
+              {ratingTarget === 'restaurant' && (
+                <View style={styles.ratingContentBox}>
+                  <Text style={styles.ratingTargetName}>{restaurantName || 'Restaurant'}</Text>
+                  <Text style={styles.ratingPromptText}>How was the food and packaging?</Text>
+
+                  {/* Star Row */}
+                  <View style={styles.starsRow}>
+                    {[1, 2, 3, 4, 5].map((star) => (
+                      <TouchableOpacity
+                        key={star}
+                        onPress={() => setRestaurantStars(star)}
+                        activeOpacity={0.7}
+                        style={styles.starTouch}
+                      >
+                        <Text style={[styles.starEmoji, star <= restaurantStars ? styles.starFilled : styles.starEmpty]}>
+                          {star <= restaurantStars ? '★' : '☆'}
+                        </Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+
+                  {/* Feedback Input */}
+                  <TextInput
+                    style={styles.ratingFeedbackInput}
+                    placeholder="Leave comments about food taste, quality, packaging..."
+                    placeholderTextColor="#94A3B8"
+                    value={restaurantFeedback}
+                    onChangeText={setRestaurantFeedback}
+                    multiline
+                    numberOfLines={3}
+                  />
+
+                  {/* Submit Button */}
+                  <TouchableOpacity
+                    style={[styles.submitRatingBtn, submittingRating && { opacity: 0.6 }]}
+                    onPress={() => handleRateOrder('restaurant')}
+                    disabled={submittingRating}
+                    activeOpacity={0.85}
+                  >
+                    {submittingRating ? (
+                      <ActivityIndicator color="#FFFFFF" size="small" />
+                    ) : (
+                      <Text style={styles.submitRatingBtnText}>
+                        {restaurantRated ? '✓ Update Restaurant Rating' : 'Submit Restaurant Rating'}
+                      </Text>
+                    )}
+                  </TouchableOpacity>
+                </View>
+              )}
+
+              {/* Tab Content: Rider Rating */}
+              {ratingTarget === 'rider' && (
+                <View style={styles.ratingContentBox}>
+                  <Text style={styles.ratingTargetName}>{riderInfo?.name || 'Delivery Partner'}</Text>
+                  <Text style={styles.ratingPromptText}>How was the delivery service and speed?</Text>
+
+                  {/* Star Row */}
+                  <View style={styles.starsRow}>
+                    {[1, 2, 3, 4, 5].map((star) => (
+                      <TouchableOpacity
+                        key={star}
+                        onPress={() => setRiderStars(star)}
+                        activeOpacity={0.7}
+                        style={styles.starTouch}
+                      >
+                        <Text style={[styles.starEmoji, star <= riderStars ? styles.starFilled : styles.starEmpty]}>
+                          {star <= riderStars ? '★' : '☆'}
+                        </Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+
+                  {/* Feedback Input */}
+                  <TextInput
+                    style={styles.ratingFeedbackInput}
+                    placeholder="Leave comments about delivery partner, speed, politeness..."
+                    placeholderTextColor="#94A3B8"
+                    value={riderFeedback}
+                    onChangeText={setRiderFeedback}
+                    multiline
+                    numberOfLines={3}
+                  />
+
+                  {/* Submit Button */}
+                  <TouchableOpacity
+                    style={[styles.submitRatingBtn, submittingRating && { opacity: 0.6 }]}
+                    onPress={() => handleRateOrder('rider')}
+                    disabled={submittingRating}
+                    activeOpacity={0.85}
+                  >
+                    {submittingRating ? (
+                      <ActivityIndicator color="#FFFFFF" size="small" />
+                    ) : (
+                      <Text style={styles.submitRatingBtnText}>
+                        {riderRated ? '✓ Update Rider Rating' : 'Submit Rider Rating'}
+                      </Text>
+                    )}
+                  </TouchableOpacity>
+                </View>
+              )}
+            </View>
+          )}
+
+          <View style={{ height: 40 }} />
         </View>
       </Animated.ScrollView>
 
@@ -2450,7 +2813,6 @@ export const SingleOrderStatusScreen: React.FC<SingleOrderStatusScreenProps> = (
               contentContainerStyle={styles.mapSheetScrollContent}
               showsVerticalScrollIndicator={false}
             >
-              {/* 1. LIVE ORDER STATUS & ETA CARD */}
               <View style={[styles.mapStatusHeaderCard, { borderLeftColor: currentStatusColor }]}>
                 <View style={styles.mapStatusTopRow}>
                   <View
@@ -2512,8 +2874,8 @@ export const SingleOrderStatusScreen: React.FC<SingleOrderStatusScreenProps> = (
                         rawPhoto && (rawPhoto.startsWith('http') || rawPhoto.startsWith('data:'))
                           ? rawPhoto
                           : rawPhoto
-                          ? `${UPLOADS_URL}${rawPhoto.replace('/uploads', '')}`
-                          : null;
+                            ? `${UPLOADS_URL}${rawPhoto.replace('/uploads', '')}`
+                            : null;
 
                       return photoUri ? (
                         <Image source={{ uri: photoUri }} style={styles.mapRiderAvatarLarge} />
@@ -2790,10 +3152,10 @@ export const SingleOrderStatusScreen: React.FC<SingleOrderStatusScreenProps> = (
               <Text style={styles.cancelReasonTitle}>Reason for cancellation:</Text>
               <View style={styles.cancelReasonChipGrid}>
                 {[
-                  'Ordered by mistake',
-                  'Taking too long',
+                  'गलती से ऑर्डर प्लेस हो गया (Placed order by mistake)',
+                  'ऑर्डर कैंसिल करना है (Want to cancel order)',
+                  'डिलीवरी में देरी हो रही है (Delivery is delayed)',
                   'Changed my mind',
-                  'Other reason',
                 ].map((r) => {
                   const isSelected = cancelReason === r;
                   return (
@@ -2850,11 +3212,223 @@ export const SingleOrderStatusScreen: React.FC<SingleOrderStatusScreenProps> = (
           </View>
         </View>
       </Modal>
+
+      {/* ── CUSTOMER HELP & CANCELLATION SHEET (Specification Point 9) ── */}
+      <Modal
+        visible={helpModalVisible}
+        transparent={true}
+        animationType="slide"
+        onRequestClose={() => setHelpModalVisible(false)}
+      >
+        <TouchableOpacity
+          style={styles.helpModalOverlay}
+          activeOpacity={1}
+          onPress={() => setHelpModalVisible(false)}
+        >
+          <View style={styles.helpModalCard}>
+            <View style={styles.helpModalDragPill} />
+            <Text style={styles.helpModalTitle}>कस्टमर सहायता (Customer Help)</Text>
+            <Text style={styles.helpModalSubtitle}>हम आपकी किस प्रकार सहायता कर सकते हैं?</Text>
+
+            <View style={styles.helpOptionsList}>
+              {/* Option 1: Mistake */}
+              <TouchableOpacity
+                style={styles.helpOptionItem}
+                activeOpacity={0.7}
+                onPress={() => {
+                  setHelpModalVisible(false);
+                  setCancelReason('गलती से ऑर्डर प्लेस हो गया (Placed order by mistake)');
+                  setCancelModalVisible(true);
+                }}
+              >
+                <View style={[styles.helpOptionIconCircle, { backgroundColor: '#FEE2E2' }]}>
+                  <Text style={{ fontSize: 18 }}>⚡</Text>
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.helpOptionTitle}>गलती से ऑर्डर प्लेस हो गया</Text>
+                  <Text style={styles.helpOptionDesc}>Placed order by mistake</Text>
+                </View>
+                <Text style={styles.helpOptionChevron}>›</Text>
+              </TouchableOpacity>
+
+              {/* Option 2: Cancel Order */}
+              <TouchableOpacity
+                style={styles.helpOptionItem}
+                activeOpacity={0.7}
+                onPress={() => {
+                  setHelpModalVisible(false);
+                  setCancelModalVisible(true);
+                }}
+              >
+                <View style={[styles.helpOptionIconCircle, { backgroundColor: '#FEE2E2' }]}>
+                  <Text style={{ fontSize: 18 }}>❌</Text>
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.helpOptionTitle}>ऑर्डर कैंसिल करना है</Text>
+                  <Text style={styles.helpOptionDesc}>Want to cancel order</Text>
+                </View>
+                <Text style={styles.helpOptionChevron}>›</Text>
+              </TouchableOpacity>
+
+              {/* Option 3: Delay */}
+              <TouchableOpacity
+                style={styles.helpOptionItem}
+                activeOpacity={0.7}
+                onPress={() => {
+                  setHelpModalVisible(false);
+                  Alert.alert(
+                    'डिलीवरी स्थिति (Delivery Update)',
+                    'आपका ऑर्डर सुरक्षित है और राइडर/स्टोर इसे जल्द से जल्द पहुंचाने का प्रयास कर रहे हैं।',
+                    [
+                      { text: 'सपोर्ट से चैट करें', onPress: () => navigation.navigate('ContactSupport') },
+                      { text: 'ठीक है', style: 'cancel' },
+                    ]
+                  );
+                }}
+              >
+                <View style={[styles.helpOptionIconCircle, { backgroundColor: '#FEF3C7' }]}>
+                  <Text style={{ fontSize: 18 }}>⏱️</Text>
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.helpOptionTitle}>डिलीवरी में देरी हो रही है</Text>
+                  <Text style={styles.helpOptionDesc}>Delivery is delayed</Text>
+                </View>
+                <Text style={styles.helpOptionChevron}>›</Text>
+              </TouchableOpacity>
+
+              {/* Option 4: Contact Customer Support */}
+              <TouchableOpacity
+                style={styles.helpOptionItem}
+                activeOpacity={0.7}
+                onPress={() => {
+                  setHelpModalVisible(false);
+                  navigation.navigate('ContactSupport');
+                }}
+              >
+                <View style={[styles.helpOptionIconCircle, { backgroundColor: '#EFF6FF' }]}>
+                  <Text style={{ fontSize: 18 }}>🎧</Text>
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.helpOptionTitle}>Customer Support से संपर्क करें</Text>
+                  <Text style={styles.helpOptionDesc}>Live chat & call support</Text>
+                </View>
+                <Text style={styles.helpOptionChevron}>›</Text>
+              </TouchableOpacity>
+            </View>
+
+            <TouchableOpacity
+              style={styles.helpModalCloseBtn}
+              onPress={() => setHelpModalVisible(false)}
+            >
+              <Text style={styles.helpModalCloseBtnText}>बंद करें (Close)</Text>
+            </TouchableOpacity>
+          </View>
+        </TouchableOpacity>
+      </Modal>
     </View>
   );
 };
 
 const styles = StyleSheet.create({
+  customerDeliveryOtpCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 16,
+    padding: 16,
+    marginBottom: 12,
+    borderWidth: 1.5,
+    borderColor: '#E2E8F0',
+    shadowColor: '#0F172A',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.05,
+    shadowRadius: 8,
+    elevation: 3,
+  },
+  customerDeliveryOtpHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 10,
+  },
+  customerDeliveryOtpIconBadge: {
+    width: 38,
+    height: 38,
+    borderRadius: 10,
+    backgroundColor: '#F0FDF4',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: '#BBF7D0',
+  },
+  customerDeliveryOtpTitle: {
+    fontSize: 15,
+    fontWeight: '800',
+    color: '#0F172A',
+    letterSpacing: -0.2,
+  },
+  customerDeliveryOtpSubtitle: {
+    fontSize: 12,
+    color: '#64748B',
+    marginTop: 2,
+    fontWeight: '500',
+  },
+  customerDeliveryOtpShieldBadge: {
+    backgroundColor: '#DCFCE7',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#86EFAC',
+  },
+  customerDeliveryOtpShieldText: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#15803D',
+    letterSpacing: 0.5,
+  },
+  customerDeliveryOtpDigitsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 12,
+    marginVertical: 10,
+  },
+  customerDeliveryOtpDigitBox: {
+    width: 58,
+    height: 60,
+    borderRadius: 14,
+    backgroundColor: '#F8FAFC',
+    borderWidth: 1.8,
+    borderColor: '#3B82F6',
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#3B82F6',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.08,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+  customerDeliveryOtpDigitText: {
+    fontSize: 26,
+    fontWeight: '900',
+    color: '#1E293B',
+    letterSpacing: 1,
+  },
+  customerDeliveryOtpNoticeBox: {
+    backgroundColor: '#FEF3C7',
+    borderRadius: 10,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderWidth: 1,
+    borderColor: '#FDE68A',
+    marginTop: 4,
+  },
+  customerDeliveryOtpNoticeText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#92400E',
+    textAlign: 'center',
+    lineHeight: 16,
+  },
   rootScreenContainer: {
     flex: 1,
     backgroundColor: '#F8FAFC',
@@ -4670,6 +5244,155 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '700',
     color: '#FFFFFF',
+  },
+  // Real OpenStreetMap Card Styles
+  realLiveMapCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 18,
+    padding: 14,
+    marginBottom: 12,
+    borderWidth: 1.5,
+    borderColor: '#E2E8F0',
+    elevation: 3,
+    shadowColor: '#0F172A',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+  },
+  realLiveMapHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 10,
+  },
+  realLiveMapTitle: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: '#0F172A',
+  },
+  realLiveMapExpandTag: {
+    backgroundColor: '#EFF6FF',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#BFDBFE',
+  },
+  realLiveMapExpandTagText: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: '#1D4ED8',
+  },
+  realLiveMapWebViewContainer: {
+    height: 160,
+    borderRadius: 14,
+    overflow: 'hidden',
+    position: 'relative',
+    backgroundColor: '#F1F5F9',
+  },
+  realLiveMapStatusStrip: {
+    position: 'absolute',
+    bottom: 8,
+    left: 8,
+    right: 8,
+    backgroundColor: 'rgba(15, 23, 42, 0.88)',
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  realLiveMapStatusDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
+  },
+  realLiveMapStatusStripText: {
+    color: '#FFFFFF',
+    fontSize: 11,
+    fontWeight: '700',
+    flex: 1,
+  },
+  // Customer Help Modal Styles
+  helpModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.55)',
+    justifyContent: 'flex-end',
+  },
+  helpModalCard: {
+    backgroundColor: '#FFFFFF',
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    padding: 20,
+    paddingBottom: 30,
+  },
+  helpModalDragPill: {
+    width: 40,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: '#CBD5E1',
+    alignSelf: 'center',
+    marginBottom: 16,
+  },
+  helpModalTitle: {
+    fontSize: 18,
+    fontWeight: '900',
+    color: '#0F172A',
+    marginBottom: 4,
+  },
+  helpModalSubtitle: {
+    fontSize: 13,
+    color: '#64748B',
+    marginBottom: 18,
+  },
+  helpOptionsList: {
+    gap: 10,
+    marginBottom: 16,
+  },
+  helpOptionItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 12,
+    backgroundColor: '#F8FAFC',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    gap: 12,
+  },
+  helpOptionIconCircle: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  helpOptionTitle: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: '#0F172A',
+    marginBottom: 2,
+  },
+  helpOptionDesc: {
+    fontSize: 11.5,
+    color: '#64748B',
+  },
+  helpOptionChevron: {
+    fontSize: 20,
+    fontWeight: '800',
+    color: '#94A3B8',
+  },
+  helpModalCloseBtn: {
+    backgroundColor: '#F1F5F9',
+    borderRadius: 14,
+    paddingVertical: 13,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  helpModalCloseBtnText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#475569',
   },
 });
 

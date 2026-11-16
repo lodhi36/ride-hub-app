@@ -1,4 +1,4 @@
-import React, { useState, useContext, useEffect } from 'react';
+import React, { useState, useContext, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -13,15 +13,19 @@ import {
   KeyboardAvoidingView,
   Platform,
   Dimensions,
+  Image,
   ImageBackground,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { AuthContext } from '../context/AuthContext';
 import { ThemeContext } from '../context/ThemeContext';
+import { useSocket } from '../context/SocketContext';
 import api from '../services/api';
 import Icon from '../components/PngIcon';
 import { fetchCurrentGpsPosition, reverseGeocodeCoords } from '../services/LocationAddressService';
 import HindiTermsModal from '../components/HindiTermsModal';
+import { LottieAnimation } from '../components/LottieAnimation';
+import { resolveUploadUrl } from '../config/apiConfig';
 
 const { width, height } = Dimensions.get('window');
 
@@ -30,6 +34,12 @@ const CITY_HERO_BG = 'https://images.unsplash.com/photo-1519501025264-65ba15a823
 export default function CustomerRegistrationScreen({ route, navigation }: any) {
   const { login } = useContext(AuthContext);
   const { theme } = useContext(ThemeContext);
+
+  let socket: any = null;
+  try {
+    const sockCtx = useSocket();
+    socket = sockCtx?.socket;
+  } catch (_) {}
 
   const initialMode = route?.params?.initialMode;
   const [isLogin, setIsLogin] = useState(initialMode !== 'signup');
@@ -63,6 +73,108 @@ export default function CustomerRegistrationScreen({ route, navigation }: any) {
 
   // General Loading State
   const [loading, setLoading] = useState(false);
+
+  // Dynamic Media & Animations from Admin Panel (CUSTOMER_SIGNUP)
+  const [signupMedia, setSignupMedia] = useState<any>(null);
+
+  // Dynamic Categories from Backend & Continuous Auto-Slide
+  const [categoriesList, setCategoriesList] = useState<any[]>([]);
+  const catScrollRef = useRef<ScrollView>(null);
+  const scrollOffsetRef = useRef<number>(0);
+
+  const DEFAULT_FALLBACK_CATS = [
+    { id: 'food', name: 'Food', icon: '🍔', bg: '#FFEDD5' },
+    { id: 'grocery', name: 'Grocery', icon: '🧺', bg: '#DCFCE7' },
+    { id: 'fashion', name: 'Fashion', icon: '👕', bg: '#EDE9FE' },
+    { id: 'beauty', name: 'Beauty', icon: '💄', bg: '#FCE7F3' },
+    { id: 'kirana', name: 'Kirana', icon: '🏪', bg: '#FEF3C7' },
+    { id: 'fast_delivery', name: 'Fast Delivery', icon: '🛵', bg: '#E0F2FE' },
+  ];
+
+  // Fetch CUSTOMER_SIGNUP media from Admin + Live Socket Listener
+  useEffect(() => {
+    let mounted = true;
+    const fetchMedia = () => {
+      api.get('/screen-media/CUSTOMER_SIGNUP')
+        .then((res) => {
+          if (!mounted) return;
+          if (res.data?.success && res.data?.screen) {
+            setSignupMedia(res.data.screen);
+          }
+        })
+        .catch(() => {});
+    };
+    fetchMedia();
+
+    if (socket) {
+      const handleMediaUpdate = (data: any) => {
+        if (!mounted || !data) return;
+        const sid = String(data.screenId || '').toUpperCase();
+        if (sid === 'CUSTOMER_SIGNUP' || sid === 'CUSTOMER_LOGIN') {
+          setSignupMedia(data);
+        }
+      };
+      socket.on('screen_media_updated', handleMediaUpdate);
+      socket.on('screen_media_customer_signup', handleMediaUpdate);
+      return () => {
+        mounted = false;
+        socket.off('screen_media_updated', handleMediaUpdate);
+        socket.off('screen_media_customer_signup', handleMediaUpdate);
+      };
+    }
+    return () => { mounted = false; };
+  }, [socket]);
+
+  // Fetch real categories from Backend /api/categories
+  useEffect(() => {
+    let mounted = true;
+    api.get('/categories')
+      .then((res) => {
+        if (!mounted) return;
+        const raw = res.data?.categories || (Array.isArray(res.data) ? res.data : []);
+        if (raw && raw.length > 0) {
+          // Strict: ONLY categories with genuine uploaded images (No dummy categories)
+          const formatted = raw
+            .filter((c: any) => c.isActive !== false && c.image && typeof c.image === 'string' && c.image.trim() !== '')
+            .map((c: any) => ({
+              id: c._id || c.id,
+              name: c.name ? c.name.charAt(0).toUpperCase() + c.name.slice(1) : 'Item',
+              image: c.image ? resolveUploadUrl(c.image) : null,
+              icon:
+                c.name?.toLowerCase().includes('food') ? '🍔' :
+                c.name?.toLowerCase().includes('groc') ? '🧺' :
+                c.name?.toLowerCase().includes('fash') ? '👕' :
+                c.name?.toLowerCase().includes('veg') ? '🥦' :
+                c.name?.toLowerCase().includes('beaut') ? '💄' :
+                c.name?.toLowerCase().includes('kiran') ? '🏪' : '🛍️',
+              bg: c.bgColor || '#F1F5F9',
+            }));
+          setCategoriesList(formatted);
+        }
+      })
+      .catch(() => {});
+    return () => { mounted = false; };
+  }, []);
+
+  // Smooth Auto-Slide Categories Carousel
+  useEffect(() => {
+    const list = categoriesList.length > 0 ? categoriesList : DEFAULT_FALLBACK_CATS;
+    if (list.length <= 1) return;
+
+    const interval = setInterval(() => {
+      if (!catScrollRef.current) return;
+      const cardStep = 82;
+      const maxScroll = list.length * cardStep - (width - 40);
+      let nextOffset = scrollOffsetRef.current + cardStep;
+      if (nextOffset > Math.max(0, maxScroll + 30)) {
+        nextOffset = 0;
+      }
+      scrollOffsetRef.current = nextOffset;
+      catScrollRef.current.scrollTo({ x: nextOffset, animated: true });
+    }, 2200);
+
+    return () => clearInterval(interval);
+  }, [categoriesList]);
 
   useEffect(() => {
     if (route?.params?.initialMode === 'signup') {
@@ -384,38 +496,60 @@ export default function CustomerRegistrationScreen({ route, navigation }: any) {
           showsVerticalScrollIndicator={false}
           keyboardShouldPersistTaps="handled"
         >
-          {/* Top Hero City Skyline with 3D Ride Hub Logo */}
-          <ImageBackground
-            source={{ uri: CITY_HERO_BG }}
-            style={styles.heroBackground}
-            resizeMode="cover"
-          >
-            <View style={styles.heroOverlay}>
-              <View style={styles.brandHeroContainer}>
+          {/* Top Hero Header with Logo, Bhopal Pill & Admin Animation Card */}
+          <View style={styles.topHeaderContainer}>
+            <View style={styles.topBarRow}>
+              <View style={styles.topLogoWrap}>
                 <View style={styles.logoIconRow}>
                   <View style={styles.citySilhouetteBox}>
-                    <View style={[styles.buildingBar, { height: 16 }]} />
-                    <View style={[styles.buildingBar, { height: 26 }]} />
-                    <View style={[styles.buildingBar, { height: 34 }]} />
-                    <View style={[styles.buildingBar, { height: 22 }]} />
                     <View style={[styles.buildingBar, { height: 14 }]} />
+                    <View style={[styles.buildingBar, { height: 22 }]} />
+                    <View style={[styles.buildingBar, { height: 30 }]} />
+                    <View style={[styles.buildingBar, { height: 20 }]} />
+                    <View style={[styles.buildingBar, { height: 12 }]} />
                   </View>
                   <View style={styles.speedArrowBadge}>
                     <Text style={styles.speedArrowText}>➔</Text>
                   </View>
-                  <View style={styles.pinDotBadge}>
-                    <Text style={styles.pinDotText}>📍</Text>
-                  </View>
                 </View>
-
-                <View style={styles.logoTextWrap}>
-                  <Text style={styles.rideHubLogoText}>
-                    Ride<Text style={styles.hubLogoText}>Hub</Text>
-                  </Text>
-                </View>
+                <Text style={styles.rideHubLogoText}>
+                  Ride<Text style={styles.hubLogoText}>Hub</Text>
+                </Text>
+              </View>
+              <View style={styles.bhopalPill}>
+                <Text style={styles.bhopalPillText}>📍 Bhopal</Text>
               </View>
             </View>
-          </ImageBackground>
+
+            {/* Dynamic Screen Media (Admin Configured Lottie / Image or Sleek Placeholder) */}
+            {signupMedia && signupMedia.isActive && (signupMedia.lottieUrl || signupMedia.imageUrl || signupMedia.mediaUrl) ? (
+              <View style={styles.animationLiveContainer}>
+                {signupMedia.lottieUrl ? (
+                  <LottieAnimation
+                    source={{ uri: resolveUploadUrl(signupMedia.lottieUrl) }}
+                    height={130}
+                    speed={signupMedia.lottieConfig?.speed || 1.0}
+                    loop={signupMedia.lottieConfig?.loop !== false}
+                    autoplay={true}
+                  />
+                ) : (
+                  <Image
+                    source={{ uri: resolveUploadUrl(signupMedia.imageUrl || signupMedia.mediaUrl) }}
+                    style={styles.animationLiveImage}
+                    resizeMode="cover"
+                  />
+                )}
+              </View>
+            ) : (
+              <View style={styles.animationDashedCard}>
+                <View style={styles.clapperIconWrap}>
+                  <Text style={{ fontSize: 26 }}>🎬</Text>
+                </View>
+                <Text style={styles.animationDashedTitle}>Add Your Animation Here</Text>
+                <Text style={styles.animationDashedSub}>(Lottie / Video / 3D Animation)</Text>
+              </View>
+            )}
+          </View>
 
           {/* Main Card */}
           <View style={styles.bottomSection}>
@@ -425,6 +559,29 @@ export default function CustomerRegistrationScreen({ route, navigation }: any) {
             <Text style={styles.subHeadline}>
               Food, Grocery, Fashion, Pharmacy & Fast Delivery
             </Text>
+
+            {/* Horizontal Multi-Vendor Category Strip - Dynamic & Auto-Sliding (Real Images Only) */}
+            {categoriesList.length > 0 && (
+              <View style={styles.categoriesOuterWrap}>
+                <ScrollView
+                  ref={catScrollRef}
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={styles.customerCatsRow}
+                >
+                  {categoriesList.map((c) => (
+                    <View key={String(c.id)} style={[styles.customerCatCard, { backgroundColor: c.bg || '#F8FAFC' }]}>
+                      {c.image ? (
+                        <Image source={{ uri: c.image }} style={styles.customerCatImg} resizeMode="contain" />
+                      ) : (
+                        <Text style={styles.customerCatIcon}>{c.icon || '🛍️'}</Text>
+                      )}
+                      <Text style={styles.customerCatName} numberOfLines={1}>{c.name}</Text>
+                    </View>
+                  ))}
+                </ScrollView>
+              </View>
+            )}
 
             {/* Auth Mode Toggle Tabs (Login vs Sign Up) */}
             <View style={styles.tabToggleRow}>
@@ -831,6 +988,86 @@ const styles = StyleSheet.create({
     flexGrow: 1,
     backgroundColor: '#F8FAFC',
   },
+  topHeaderContainer: {
+    paddingTop: Platform.OS === 'ios' ? 12 : 24,
+    paddingHorizontal: 16,
+    paddingBottom: 20,
+    backgroundColor: '#0066FF',
+  },
+  topBarRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 12,
+  },
+  topLogoWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  bhopalPill: {
+    backgroundColor: '#1E293B',
+    paddingHorizontal: 12,
+    paddingVertical: 5,
+    borderRadius: 20,
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  bhopalPillText: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  animationDashedCard: {
+    borderWidth: 2,
+    borderColor: 'rgba(255,255,255,0.7)',
+    borderStyle: 'dashed',
+    borderRadius: 20,
+    backgroundColor: 'rgba(255,255,255,0.18)',
+    paddingVertical: 18,
+    paddingHorizontal: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 4,
+  },
+  animationLiveContainer: {
+    borderRadius: 20,
+    overflow: 'hidden',
+    backgroundColor: 'rgba(255,255,255,0.2)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 4,
+    minHeight: 120,
+  },
+  animationLiveImage: {
+    width: '100%',
+    height: 130,
+    borderRadius: 18,
+  },
+  clapperIconWrap: {
+    width: 50,
+    height: 50,
+    borderRadius: 14,
+    backgroundColor: '#FFFFFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 6,
+    shadowColor: '#000',
+    shadowOpacity: 0.15,
+    shadowRadius: 6,
+    elevation: 3,
+  },
+  animationDashedTitle: {
+    color: '#0F172A',
+    fontSize: 15,
+    fontWeight: '800',
+    marginTop: 2,
+  },
+  animationDashedSub: {
+    color: '#1E293B',
+    fontSize: 11,
+    fontWeight: '600',
+    marginTop: 2,
+  },
   heroBackground: {
     width: '100%',
     height: 160,
@@ -1189,5 +1426,41 @@ const styles = StyleSheet.create({
     fontSize: 11,
     color: '#94A3B8',
     marginHorizontal: 6,
+  },
+  categoriesOuterWrap: {
+    marginTop: 4,
+    marginBottom: 6,
+    paddingVertical: 2,
+  },
+  customerCatsRow: {
+    paddingHorizontal: 2,
+    alignItems: 'center',
+  },
+  customerCatCard: {
+    width: 68,
+    height: 74,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 4,
+    marginRight: 6,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+  },
+  customerCatImg: {
+    width: 40,
+    height: 40,
+    borderRadius: 8,
+    marginBottom: 4,
+  },
+  customerCatIcon: {
+    fontSize: 26,
+    marginBottom: 4,
+  },
+  customerCatName: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#1E293B',
+    textAlign: 'center',
   },
 });

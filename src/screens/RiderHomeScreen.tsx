@@ -49,6 +49,7 @@ import BillPrintModal from '../components/BillPrintModal';
 import RidersTrackingModal from '../components/RidersTrackingModal';
 import { getCategoryLabel, getCategoryTotalLabel, getCategoryStoreLabel } from '../utils/categoryHelper';
 import SoundService from '../services/SoundService';
+import { OrderHistorySkeletonLoader } from '../components/OrderHistorySkeletonLoader';
 
 // Category Resolution
 export type SellerCategoryType =
@@ -412,25 +413,41 @@ const RiderHomeScreen = ({ navigation, route }: any) => {
   const [partnerProfile, setPartnerProfile] = useState<any>(null);
   const [showStoreHelpModal, setShowStoreHelpModal] = useState(false);
 
-  // Restore cached supplierUser from AsyncStorage immediately so category banners show instantly
+  // Restore cached supplierUser ONLY if it matches the currently logged-in supplier ID (zero cross-account bleed)
   useEffect(() => {
+    let mounted = true;
+    const currentUserId = String(user?._id || user?.id || '');
+    const currentRole = String(user?.role || '').toLowerCase();
+    // Reset stale supplier UI immediately if identity changed
+    setPartnerProfile(null);
+    setRestoDisplayName('Restaurant Partner');
+
     const restoreCachedProfile = async () => {
       try {
+        if (currentRole && !['supplier', 'seller_partner', 'restaurant'].includes(currentRole)) {
+          return;
+        }
         const cached = await AsyncStorage.getItem('supplierUser');
-        if (cached) {
+        if (cached && mounted) {
           const parsed = JSON.parse(cached);
-          setPartnerProfile((prev: any) => prev || parsed);
-          const sName = parsed.restaurantName || parsed.name || parsed.businessName;
-          if (sName) {
-            setRestoDisplayName(sName);
+          const cachedId = String(parsed?._id || parsed?.id || '');
+          const cachedRole = String(parsed?.role || '').toLowerCase();
+          const isSupplierRole = ['supplier', 'seller_partner', 'restaurant'].includes(cachedRole);
+          if (isSupplierRole && (!currentUserId || cachedId === currentUserId)) {
+            setPartnerProfile(parsed);
+            const sName = parsed.restaurantName || parsed.businessName || parsed.storeName || parsed.name;
+            if (sName) {
+              setRestoDisplayName(sName);
+            }
           }
         }
       } catch (e) {}
     };
     restoreCachedProfile();
-  }, []);
+    return () => { mounted = false; };
+  }, [user?._id, user?.id, user?.role]);
 
-  // Fetch real partner profile from backend on mount
+  // Fetch real partner profile from backend whenever logged-in user changes
   useEffect(() => {
     let isMounted = true;
     const loadPartnerProfile = async () => {
@@ -438,11 +455,17 @@ const RiderHomeScreen = ({ navigation, route }: any) => {
         const res = await api.get('/auth/partner-profile');
         if (res.data?.success && res.data.partner) {
           if (isMounted) {
-            setPartnerProfile(res.data.partner);
-            if (res.data.partner.name || res.data.partner.restaurantName) {
-              setRestoDisplayName(res.data.partner.name || res.data.partner.restaurantName);
+            const partnerObj = res.data.partner;
+            const pRole = String(partnerObj.role || '').toLowerCase();
+            if (!['supplier', 'seller_partner', 'restaurant'].includes(pRole)) {
+              return;
             }
-            const targetId = (user?._id || user?.id)?.toString();
+            setPartnerProfile(partnerObj);
+            const pName = partnerObj.restaurantName || partnerObj.businessName || partnerObj.storeName || partnerObj.name;
+            if (pName) {
+              setRestoDisplayName(pName);
+            }
+            const targetId = (partnerObj._id || partnerObj.id || user?._id || user?.id)?.toString();
             let savedStatus = null;
             if (targetId) {
               savedStatus = await AsyncStorage.getItem(`restaurant_status_${targetId}`).catch(() => null);
@@ -451,8 +474,8 @@ const RiderHomeScreen = ({ navigation, route }: any) => {
               const parsed = JSON.parse(savedStatus);
               setIsOnline(parsed);
               switchAnim.setValue(parsed ? 1 : 0);
-            } else if (res.data.partner.restaurant_status !== undefined || res.data.partner.isOnline !== undefined) {
-              const serverOnline = res.data.partner.restaurant_status === 'online' || res.data.partner.isOnline === true;
+            } else if (partnerObj.restaurant_status !== undefined || partnerObj.isOnline !== undefined) {
+              const serverOnline = partnerObj.restaurant_status === 'online' || partnerObj.isOnline === true;
               setIsOnline(serverOnline);
               switchAnim.setValue(serverOnline ? 1 : 0);
             }
@@ -464,7 +487,7 @@ const RiderHomeScreen = ({ navigation, route }: any) => {
     };
     loadPartnerProfile();
     return () => { isMounted = false; };
-  }, []);
+  }, [user?._id, user?.id]);
 
   // Instant local disk restore of online/offline status on initial render
   useEffect(() => {
@@ -605,6 +628,7 @@ const RiderHomeScreen = ({ navigation, route }: any) => {
   const [acceptingOrderId, setAcceptingOrderId] = useState<string | null>(null);
   const inFlightAcceptIdsRef = useRef<Set<string>>(new Set());
   const acceptedOrderIdsRef = useRef<Set<string>>(new Set());
+  const dismissedOrderIdsRef = useRef<Set<string>>(new Set());
   const shownAcceptPopupsRef = useRef<Set<string>>(new Set());
 
   // 🛡️ Helper: Guarantees "Order Accepted!" popup is shown exactly once per Order ID
@@ -748,10 +772,31 @@ const RiderHomeScreen = ({ navigation, route }: any) => {
 
   useEffect(() => {
     if (!socket) return;
-    const handleName = (data: any) => {
-      const newName = (data?.name || data?.restaurantName || '').trim();
+    const handleName = async (data: any) => {
+      // Strictly ignore events from Customers, Riders, or OTHER Suppliers!
+      const evRole = String(data?.role || data?.user?.role || '').toLowerCase();
+      if (evRole && !['supplier', 'seller_partner', 'restaurant'].includes(evRole)) {
+        return;
+      }
+      const eventTargetId = String(
+        data?.restaurantId || data?.supplierId || data?.userId || data?.id || data?.user?._id || ''
+      );
+      if (!eventTargetId) return;
+
+      const myResolvedId = String(await resolveTargetSupplierId());
+      const myUserId = String(user?._id || user?.id || '');
+      const myPartnerId = String(user?.partnerId || partnerProfile?.partnerId || '');
+      const isMyStore =
+        (myResolvedId && eventTargetId === myResolvedId) ||
+        (myUserId && eventTargetId === myUserId) ||
+        (myPartnerId && eventTargetId === myPartnerId);
+      if (!isMyStore) {
+        return;
+      }
+
+      const newName = (data?.restaurantName || data?.name || '').trim();
       if (newName) {
-        console.log('📢 [RIDER HOME] Real-time name updated:', newName);
+        console.log('📢 [RIDER HOME] Real-time OWN store name updated:', newName);
         setRestoDisplayName(newName);
       }
     };
@@ -763,7 +808,7 @@ const RiderHomeScreen = ({ navigation, route }: any) => {
       socket.off('restaurant_name_updated', handleName);
       socket.off('RESTAURANT_UPDATED', handleName);
     };
-  }, [socket]);
+  }, [socket, resolveTargetSupplierId, user?._id, user?.id, user?.partnerId, partnerProfile?.partnerId]);
 
   // Load Permanent Saved Store Location from Database & Cache with silent background GPS sync
   const loadSavedStoreLocation = useCallback(async () => {
@@ -957,35 +1002,25 @@ const RiderHomeScreen = ({ navigation, route }: any) => {
     }
   };
 
-  // Background auto-detection of device GPS for store location accuracy on same-device testing
-  useEffect(() => {
-    let isMounted = true;
-    const autoSyncDeviceGps = async () => {
-      try {
-        const permStore = await getPermanentStoreLocation();
-        const hasValidCoords = permStore && permStore.latitude && permStore.latitude !== 0 && permStore.latitude !== 23.3444355;
-        if (!hasValidCoords) {
-          const res = await fetchCurrentGpsPositionDetailed(false);
-          if (res?.success && res?.fix && res.fix.latitude && res.fix.longitude) {
-            const geo = await reverseGeocodeCoords(res.fix.latitude, res.fix.longitude);
-            const fullAddr = geo?.fullAddress || geo?.area || 'Bhopal';
-            if (isMounted) {
-              await handleSaveStoreLocationFromMap(
-                { latitude: res.fix.latitude, longitude: res.fix.longitude },
-                fullAddr,
-                false
-              );
-            }
-          }
-        }
-      } catch (e) {}
-    };
-    autoSyncDeviceGps();
-    return () => { isMounted = false; };
-  }, []);
+  // MANDATORY REQUIREMENT 1: Zero Background GPS Overwriting
+  // Supplier store location is permanent and must NEVER be overwritten by background GPS after registration.
 
   // Open Interactive Map & Geolocation Picker Modal
   const handleUpdateShopLocation = () => {
+    const isLocked = Boolean(
+      partnerProfile?.locationLocked ||
+      user?.locationLocked ||
+      partnerProfile?.permanentStoreLocation?.isConfirmed ||
+      user?.permanentStoreLocation?.isConfirmed
+    );
+    if (isLocked) {
+      Alert.alert(
+        'दुकान लोकेशन लॉक है 🔒',
+        'आपकी दुकान की स्थायी लोकेशन लॉक हो चुकी है।\n\nसुरक्षा और ऑर्डर सटीकता के लिए इसे ऐप से सीधे नहीं बदला जा सकता। बदलाव केवल मेन एडमिन पैनल से एडमिन सत्यापन के बाद ही संभव है।',
+        [{ text: 'समझ गया (OK)' }]
+      );
+      return;
+    }
     setMapLocationModalVisible(true);
   };
 
@@ -1081,9 +1116,10 @@ const RiderHomeScreen = ({ navigation, route }: any) => {
 
   // Fetch Restaurant Orders from Backend
   const isFetchingOrdersRef = useRef(false);
+  const lastSupplierOrdersFetchTimeRef = useRef<number>(0);
 
   // Fetch Restaurant Orders from Backend
-  const fetchOrders = useCallback(async () => {
+  const fetchOrders = useCallback(async (isUserInitiated: any = false) => {
     if (isFetchingOrdersRef.current) return;
     try {
       isFetchingOrdersRef.current = true;
@@ -1094,8 +1130,24 @@ const RiderHomeScreen = ({ navigation, route }: any) => {
       const authHeaders: any = { 'X-Role': 'supplier' };
       if (suppToken) authHeaders.Authorization = `Bearer ${suppToken}`;
 
-      setLoadingOrders(true);
-      let res = await api.get(`/bookings/my-bookings?userId=${suppId}&role=provider`, {
+      if (isUserInitiated === true || orders.length === 0) {
+        setLoadingOrders(true);
+      }
+
+      const targetRestoName = (restoDisplayName && restoDisplayName !== 'Restaurant Partner')
+        ? restoDisplayName
+        : (partnerProfile?.restaurantName || partnerProfile?.businessName || partnerProfile?.name || '');
+      const suppPhone = user?.phone || partnerProfile?.phone;
+
+      let queryUrl = `/bookings/my-bookings?userId=${encodeURIComponent(suppId)}&role=provider`;
+      if (targetRestoName) {
+        queryUrl += `&restaurantName=${encodeURIComponent(targetRestoName)}`;
+      }
+      if (suppPhone) {
+        queryUrl += `&phone=${encodeURIComponent(suppPhone)}`;
+      }
+
+      let res = await api.get(queryUrl, {
         headers: authHeaders,
       });
 
@@ -1127,12 +1179,20 @@ const RiderHomeScreen = ({ navigation, route }: any) => {
         });
 
         setOrders(uniqueList);
+        lastSupplierOrdersFetchTimeRef.current = Date.now();
+        AsyncStorage.setItem(`CACHE_SUPPLIER_ORDERS_${suppId}`, JSON.stringify(uniqueList)).catch(() => {});
 
         // If there is an active pending incoming food order created at least 20 seconds ago, show alert modal to supplier
         const pendingOrder = uniqueList.find((b: any) => {
           const id = getOrderId(b);
-          // 🛡️ Skip any order already accepted or currently in-flight
-          if (id && (acceptedOrderIdsRef.current.has(id) || inFlightAcceptIdsRef.current.has(id))) {
+          if (!id) return false;
+          // 🛡️ Skip any order already accepted, in-flight, or previously dismissed by supplier
+          if (acceptedOrderIdsRef.current.has(id) || inFlightAcceptIdsRef.current.has(id) || dismissedOrderIdsRef.current.has(id)) {
+            return false;
+          }
+          // Strict store isolation: only alert if this order strictly belongs to this store
+          const oRestoId = String(b.restaurantId || b.supplierId || b.providerId || '');
+          if (oRestoId && oRestoId !== suppId && oRestoId !== String(user?._id || user?.id)) {
             return false;
           }
           const st = (b.status || '').toUpperCase();
@@ -1145,8 +1205,8 @@ const RiderHomeScreen = ({ navigation, route }: any) => {
           if (!isPending) return false;
           const createdMs = new Date(b.createdAt).getTime();
           const ageMs = Date.now() - createdMs;
-          // Requirement: Customer books -> wait 20 seconds before request reaches supplier
-          return !isNaN(createdMs) && ageMs >= 20000 && ageMs < 600000;
+          // Only alert for active fresh pending orders (between 20s and 3 minutes old)
+          return !isNaN(createdMs) && ageMs >= 20000 && ageMs < 180000;
         });
 
         if (pendingOrder) {
@@ -1188,13 +1248,33 @@ const RiderHomeScreen = ({ navigation, route }: any) => {
       isFetchingOrdersRef.current = false;
       setLoadingOrders(false);
     }
-  }, [user?._id, user?.id, resolveTargetSupplierId, restoDisplayName, socket]);
+  }, [user?._id, user?.id, user?.phone, resolveTargetSupplierId, restoDisplayName, partnerProfile, socket, orders.length]);
+
+  // ⚡ Instant Cache Hydration: Load cached orders in 0ms so supplier sees orders instantly
+  useEffect(() => {
+    let isMounted = true;
+    const hydrateCachedSupplierOrders = async () => {
+      try {
+        const suppId = await resolveTargetSupplierId();
+        if (!suppId) return;
+        const cached = await AsyncStorage.getItem(`CACHE_SUPPLIER_ORDERS_${suppId}`);
+        if (cached && isMounted) {
+          const parsed = JSON.parse(cached);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            setOrders(parsed);
+          }
+        }
+      } catch (e) {}
+    };
+    hydrateCachedSupplierOrders();
+    return () => { isMounted = false; };
+  }, [resolveTargetSupplierId]);
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
     try {
       await Promise.all([
-        fetchOrders(),
+        fetchOrders(true),
         fetchWalletBalance(),
         fetchReachedRidersCount(),
       ]);
@@ -1213,8 +1293,9 @@ const RiderHomeScreen = ({ navigation, route }: any) => {
           const cachedSupp = await AsyncStorage.getItem('supplierUser');
           if (cachedSupp && isMounted) {
             const parsed = JSON.parse(cachedSupp);
-            if (parsed.name || parsed.restaurantName) {
-              setRestoDisplayName(parsed.name || parsed.restaurantName);
+            const sName = parsed.restaurantName || parsed.businessName || parsed.storeName || (parsed.role === 'supplier' ? parsed.name : null);
+            if (sName) {
+              setRestoDisplayName(sName);
             }
           }
 
@@ -1226,8 +1307,9 @@ const RiderHomeScreen = ({ navigation, route }: any) => {
 
             if (isMounted) {
               setIsOnline(isDbOnline);
-              if (dbUser.name || dbUser.restaurantName) {
-                setRestoDisplayName(dbUser.name || dbUser.restaurantName);
+              const sName = dbUser.restaurantName || dbUser.businessName || dbUser.storeName || (dbUser.role === 'supplier' ? dbUser.name : null);
+              if (sName) {
+                setRestoDisplayName(sName);
               }
               const dbAddr = dbUser.fullAddress || dbUser.address || dbUser.location;
               if (dbAddr) {
@@ -1262,7 +1344,10 @@ const RiderHomeScreen = ({ navigation, route }: any) => {
       };
 
       syncAuthoritativeStatus();
-      fetchOrders();
+      const now = Date.now();
+      if (now - lastSupplierOrdersFetchTimeRef.current > 20000) {
+        fetchOrders(false);
+      }
       loadSavedStoreLocation();
 
       const onBackPress = () => {
@@ -1284,7 +1369,7 @@ const RiderHomeScreen = ({ navigation, route }: any) => {
   // 5-second continuous background polling on screen to guarantee 100% order pickup
   useEffect(() => {
     const interval = setInterval(() => {
-      fetchOrders();
+      fetchOrders(false);
       fetchReachedRidersCount();
     }, 5000);
     return () => clearInterval(interval);
@@ -1347,20 +1432,21 @@ const RiderHomeScreen = ({ navigation, route }: any) => {
         return;
       }
 
-      // Verify that this order belongs to THIS logged-in supplier (or is general dispatch)!
-      if (reqRestoId && (myId || uId)) {
+      // Verify that this order strictly belongs to THIS logged-in supplier
+      if (reqRestoId && reqRestoId !== 'null' && reqRestoId !== 'undefined') {
         const isMatch =
-          !reqRestoId ||
-          reqRestoId === 'null' ||
-          reqRestoId === 'undefined' ||
           (myId && reqRestoId === myId) ||
           (uId && reqRestoId === uId) ||
           (myPartnerId && reqRestoId === myPartnerId) ||
           (partnerProfile?.businessId && reqRestoId === partnerProfile?.businessId?.toString()) ||
           (user?.businessId && reqRestoId === (user as any)?.businessId?.toString());
         if (!isMatch) {
-          console.log(`ℹ️ [RESTAURANT HOME] Non-matching target restaurantId (${reqRestoId}) vs (myId=${myId}, uId=${uId}). Still alerting if supplier is online.`);
+          console.log(`🛑 [RESTAURANT HOME] Ignoring incoming order #${bId}: target restaurantId (${reqRestoId}) does not match this supplier (${myId || uId}).`);
+          return;
         }
+      } else {
+        console.log(`🛑 [RESTAURANT HOME] Ignoring incoming order #${bId} with missing restaurantId.`);
+        return;
       }
 
       console.log('✅ [RESTAURANT HOME] Instantly showing incoming order modal for supplier:', bId);
@@ -1411,6 +1497,10 @@ const RiderHomeScreen = ({ navigation, route }: any) => {
 
       if (st === 'COMPLETED' || st === 'DELIVERED' || st === 'SERVICE_COMPLETED') {
         fetchWalletBalance();
+      }
+      if (st === 'CANCELLED' || st.includes('CANCEL')) {
+        onOrderCancelledOrTimedOut(data);
+        return;
       }
       fetchReachedRidersCount();
       setOrders((prev) =>
@@ -1484,13 +1574,18 @@ const RiderHomeScreen = ({ navigation, route }: any) => {
     };
 
     const onOrderCancelledOrTimedOut = (data: any) => {
-      const bId = data?.bookingId || data?.rideId;
+      const bId = String(data?.bookingId || data?.rideId || data?.orderId || data?._id || '');
       if (!bId) return;
       console.log('📢 [RESTAURANT HOME] Order cancelled or declined:', data);
 
+      const isMatch = (o: any) => {
+        const id = String(o?.bookingId || o?.rideId || o?.orderId || o?._id || '');
+        return id === bId || id.endsWith(bId) || bId.endsWith(id);
+      };
+
       // Stop incoming order alert if this order was ringing
       setIncomingOrder((curr: any) => {
-        if (curr && (curr.bookingId || curr.rideId) === bId) {
+        if (curr && isMatch(curr)) {
           SoundService.stopIncomingOrderAlert();
           return null;
         }
@@ -1507,12 +1602,13 @@ const RiderHomeScreen = ({ navigation, route }: any) => {
       } catch (e) {}
 
       fetchReachedRidersCount();
+      // 0ms INSTANT STATE UPDATE: Mark CANCELLED so it immediately vanishes from active tabs without reload!
       setOrders((prev) =>
         prev.map((o) => {
-          if ((o.bookingId || o.rideId) === bId) {
+          if (isMatch(o)) {
             return {
               ...o,
-              status: data.status || 'CANCELLED',
+              status: 'CANCELLED',
               riderStatus: 'CANCELLED',
               deliveryStatus: 'CANCELLED',
               cancellationReason: data.reason || data.cancellationReason || 'Cancelled by customer',
@@ -1549,6 +1645,26 @@ const RiderHomeScreen = ({ navigation, route }: any) => {
       fetchReachedRidersCount();
     };
 
+    const onFoodPickedUp = (data: any) => {
+      const bId = data?.bookingId || data?.rideId;
+      if (!bId) return;
+      console.log('🛵 [SUPPLIER HOME] Order picked up by rider:', data);
+      setOrders((prev) =>
+        prev.map((o) => {
+          if ((o.bookingId || o.rideId) === bId) {
+            return {
+              ...o,
+              status: 'OUT_FOR_DELIVERY',
+              riderStatus: 'OUT_FOR_DELIVERY',
+              deliveryStatus: 'OUT_FOR_DELIVERY',
+            };
+          }
+          return o;
+        })
+      );
+      fetchOrders();
+    };
+
     socket.on('new_food_order', onIncomingOrder);
     socket.on('new_ride_request', onIncomingOrder);
     socket.on('ride_request', onIncomingOrder);
@@ -1560,12 +1676,23 @@ const RiderHomeScreen = ({ navigation, route }: any) => {
     socket.on('new_order', onIncomingOrder);
     socket.on('booking_status_updated', onStatusUpdate);
     socket.on('order_status_updated', onStatusUpdate);
+    socket.on('food_picked_up', onFoodPickedUp);
     socket.on('rider_reached_restaurant', onRiderReachedRestaurant);
     socket.on('rider_arrived_removed', onRiderArrivedRemoved);
     socket.on('order_timed_out', onOrderCancelledOrTimedOut);
     socket.on('service_cancelled', onOrderCancelledOrTimedOut);
     socket.on('ride_cancelled', onOrderCancelledOrTimedOut);
     socket.on('order_cancelled', onOrderCancelledOrTimedOut);
+    socket.on('ORDER_CANCELLED', onOrderCancelledOrTimedOut);
+    socket.on('DELIVERY_REQUEST_CANCELLED', onOrderCancelledOrTimedOut);
+    socket.on('FOOD_ORDER_UPDATED', (data: any) => {
+      const st = (data?.status || '').toUpperCase();
+      if (st === 'CANCELLED' || st.includes('CANCEL')) {
+        onOrderCancelledOrTimedOut(data);
+      } else {
+        onStatusUpdate(data);
+      }
+    });
     socket.on('RESTAURANT_DECLINED', onOrderCancelledOrTimedOut);
     socket.on('booking_cancelled', onOrderCancelledOrTimedOut);
     socket.on('booking_cancelled_by_customer', onOrderCancelledOrTimedOut);
@@ -1583,8 +1710,19 @@ const RiderHomeScreen = ({ navigation, route }: any) => {
       socket.off('new_order', onIncomingOrder);
       socket.off('booking_status_updated', onStatusUpdate);
       socket.off('order_status_updated', onStatusUpdate);
+      socket.off('food_picked_up', onFoodPickedUp);
       socket.off('rider_reached_restaurant', onRiderReachedRestaurant);
       socket.off('rider_arrived_removed', onRiderArrivedRemoved);
+      socket.off('order_timed_out', onOrderCancelledOrTimedOut);
+      socket.off('service_cancelled', onOrderCancelledOrTimedOut);
+      socket.off('ride_cancelled', onOrderCancelledOrTimedOut);
+      socket.off('order_cancelled', onOrderCancelledOrTimedOut);
+      socket.off('ORDER_CANCELLED', onOrderCancelledOrTimedOut);
+      socket.off('DELIVERY_REQUEST_CANCELLED', onOrderCancelledOrTimedOut);
+      socket.off('FOOD_ORDER_UPDATED');
+      socket.off('RESTAURANT_DECLINED', onOrderCancelledOrTimedOut);
+      socket.off('booking_cancelled', onOrderCancelledOrTimedOut);
+      socket.off('booking_cancelled_by_customer', onOrderCancelledOrTimedOut);
       socket.off('order_timed_out', onOrderCancelledOrTimedOut);
       socket.off('service_cancelled', onOrderCancelledOrTimedOut);
       socket.off('ride_cancelled', onOrderCancelledOrTimedOut);
@@ -1707,11 +1845,74 @@ const RiderHomeScreen = ({ navigation, route }: any) => {
     }
   };
 
+  const handleHandoverToRider = async (order: any) => {
+    const bId = order?.bookingId || order?.rideId || order?._id;
+    if (!bId) return;
+    const cleanId = bId.toString();
+    const riderDisplayName = order.providerName || order.riderName || 'डिलीवरी पार्टनर';
+
+    Alert.alert(
+      '📦 ऑर्डर हैंडओवर (Supplier Pickup)',
+      `क्या आपने ${riderDisplayName} को ऑर्डर #${cleanId.slice(-6)} सौंप दिया है?`,
+      [
+        { text: 'रद्द करें', style: 'cancel' },
+        {
+          text: 'हाँ, राइडर को सौंप दिया',
+          onPress: async () => {
+            try {
+              const targetSuppId = await resolveTargetSupplierId();
+              await api.put('/bookings/supplier-handover', {
+                bookingId: cleanId,
+                restaurantId: targetSuppId,
+                providerId: order.providerId,
+              });
+
+              if (socket) {
+                socket.emit('food_picked_up', {
+                  rideId: cleanId,
+                  bookingId: cleanId,
+                  customerId: order.customerId,
+                  restaurantId: targetSuppId,
+                  riderId: order.providerId,
+                });
+                socket.emit('order_status_updated', {
+                  rideId: cleanId,
+                  bookingId: cleanId,
+                  status: 'OUT_FOR_DELIVERY',
+                  riderStatus: 'OUT_FOR_DELIVERY',
+                });
+              }
+
+              setOrders((prev) =>
+                prev.map((o) =>
+                  (o.bookingId || o.rideId || o._id)?.toString() === cleanId
+                    ? { ...o, status: 'OUT_FOR_DELIVERY', riderStatus: 'OUT_FOR_DELIVERY', deliveryStatus: 'OUT_FOR_DELIVERY' }
+                    : o
+                )
+              );
+              setActiveTab('Out for delivery');
+              fetchOrders();
+
+              Alert.alert(
+                'ऑर्डर हैंडओवर सफल! 🛵',
+                `ऑर्डर #${cleanId.slice(-6)} ${riderDisplayName} को सौंप दिया गया है। आर्डर अब 'Out for delivery' में है।`
+              );
+            } catch (e: any) {
+              Alert.alert('Error', e.message || 'Could not update handover status.');
+            }
+          },
+        },
+      ]
+    );
+  };
+
   const handleRejectOrder = async (order: any) => {
     const bId = order?.bookingId || order?.rideId;
     if (!bId) return;
     try {
+      dismissedOrderIdsRef.current.add(String(bId));
       try { Vibration.cancel(); } catch (e) {}
+      try { SoundService.stopIncomingOrderAlert(); } catch (e) {}
       const targetSuppId = await resolveTargetSupplierId();
       await api.put('/bookings/restaurant-decline', {
         bookingId: bId,
@@ -1993,7 +2194,9 @@ const RiderHomeScreen = ({ navigation, route }: any) => {
     outputRange: ['#475569', '#22C55E'],
   });
 
-  const restaurantName = (restoDisplayName && restoDisplayName !== 'Restaurant Partner') ? restoDisplayName : (partnerProfile?.restaurantName || partnerProfile?.name || 'Restaurant Partner');
+  const restaurantName = (restoDisplayName && restoDisplayName !== 'Restaurant Partner')
+    ? restoDisplayName
+    : (partnerProfile?.restaurantName || partnerProfile?.businessName || partnerProfile?.storeName || (partnerProfile?.role === 'supplier' ? partnerProfile?.name : null) || (catType === 'restaurant' ? 'Restaurant Partner' : 'Store Partner'));
 
   const handleLogout = () => {
     Alert.alert('Logout', 'Are you sure you want to log out?', [
@@ -2002,6 +2205,14 @@ const RiderHomeScreen = ({ navigation, route }: any) => {
         text: 'Log Out',
         style: 'destructive',
         onPress: async () => {
+          try {
+            const FastStorage = require('../services/FastStorage').default;
+            if (FastStorage?.clearUserSession) await FastStorage.clearUserSession();
+          } catch (_) {}
+          try {
+            const { clearSupplierLocationCache } = require('../services/LocationAddressService');
+            if (clearSupplierLocationCache) await clearSupplierLocationCache();
+          } catch (_) {}
           if (logout) {
             await logout('SUPPLIER');
           } else {
@@ -2042,7 +2253,7 @@ const RiderHomeScreen = ({ navigation, route }: any) => {
                 <Icon name="storefront" size={18} color="#0066FF" />
               </View>
               <Text style={styles.restoTitleText} numberOfLines={1}>
-                {restaurantName || 'Toy Store'}
+                {restaurantName || (catType === 'restaurant' ? 'Restaurant Partner' : 'Store Partner')}
               </Text>
             </View>
             <TouchableOpacity
@@ -2169,7 +2380,7 @@ const RiderHomeScreen = ({ navigation, route }: any) => {
             </View>
             <TouchableOpacity
               style={{ backgroundColor: '#0066FF', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 8, flexDirection: 'row', alignItems: 'center', gap: 4 }}
-              onPress={() => fetchOrders()}
+              onPress={() => fetchOrders(true)}
             >
               <Icon name="refresh" size={13} color="#FFFFFF" />
               <Text style={{ color: '#FFFFFF', fontWeight: '800', fontSize: 12 }}>Refresh</Text>
@@ -2249,20 +2460,15 @@ const RiderHomeScreen = ({ navigation, route }: any) => {
                 const isCancelled = (order.status || '').includes('CANCEL') || order.status === 'RESTAURANT_DECLINED';
 
                 return (
-                  <View key={bId} style={styles.orderCard}>
-                    {/* Header */}
-                    <View style={styles.orderCardHeader}>
-                      <View>
-                        <Text style={styles.orderCardId}>Order #{bId.slice(-6)}</Text>
-                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 2 }}>
-                          <Icon name="calendar-outline" size={12} color="#64748B" />
-                          <Text style={styles.orderCardTime}>
-                            {formatOrderDateTime(order.createdAt || order.scheduledDate)}
-                          </Text>
-                        </View>
+                  <View key={bId} style={[styles.orderCard, { padding: 12, marginBottom: 10, borderRadius: 12 }]}>
+                    {/* Compact Header: Order ID + Time + Status Badge in 1 Row */}
+                    <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8, paddingBottom: 6, borderBottomWidth: 1, borderBottomColor: '#F1F5F9' }}>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                        <Text style={{ fontSize: 14, fontWeight: '800', color: '#0F172A' }}>#{bId.slice(-6).toUpperCase()}</Text>
+                        <Text style={{ fontSize: 11, color: '#64748B' }}>• {formatOrderDateTime(order.createdAt || order.scheduledDate)}</Text>
                       </View>
                       <View style={[
-                        styles.orderStatusBadge,
+                        { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6, borderWidth: 1 },
                         isPlaced && { backgroundColor: '#FEF3C7', borderColor: '#F59E0B' },
                         isPreparing && { backgroundColor: '#DBEAFE', borderColor: '#0066FF' },
                         isReady && { backgroundColor: '#D1FAE5', borderColor: '#10B981' },
@@ -2271,7 +2477,7 @@ const RiderHomeScreen = ({ navigation, route }: any) => {
                         isCancelled && { backgroundColor: '#FEE2E2', borderColor: '#EF4444' },
                       ]}>
                         <Text style={[
-                          styles.orderStatusText,
+                          { fontSize: 11, fontWeight: '800' },
                           isPlaced && { color: '#B45309' },
                           isPreparing && { color: '#1D4ED8' },
                           isReady && { color: '#047857' },
@@ -2279,243 +2485,147 @@ const RiderHomeScreen = ({ navigation, route }: any) => {
                           isCompleted && { color: '#15803D' },
                           isCancelled && { color: '#B91C1C' },
                         ]}>
-                          {isPlaced ? '🔔 NEW ORDER' : isPreparing ? '🍳 PREPARING ORDER' : isReady ? '🍲 ORDER READY' : isOutForDelivery ? '🛵 OUT FOR DELIVERY' : isCompleted ? '✅ COMPLETED' : isCancelled ? '❌ CANCELLED' : order.status}
+                          {isPlaced ? '🔔 NEW' : isPreparing ? '🍳 PREPARING' : isReady ? '🍲 READY' : isOutForDelivery ? '🛵 OUT' : isCompleted ? '✅ DONE' : isCancelled ? '❌ CANCELLED' : order.status}
                         </Text>
                       </View>
                     </View>
 
-                    {/* Customer & Address Details */}
-                    <View style={styles.orderCustomerRow}>
-                      <View style={styles.customerAvatar}>
-                        <Icon name="person" size={18} color="#0066FF" />
-                      </View>
-                      <View style={{ flex: 1 }}>
-                        <Text style={{ fontSize: 11, fontWeight: '700', color: '#64748B', textTransform: 'uppercase', marginBottom: 2 }}>
-                          Customer Details
-                        </Text>
-                        <Text style={styles.orderCustomerName}>
-                          {order.customerName || 'Customer'}
-                        </Text>
-                        <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: 4, marginTop: 2 }}>
-                          <Icon name="location-sharp" size={13} color="#64748B" style={{ marginTop: 2 }} />
-                          <Text style={styles.orderDeliveryAddr} numberOfLines={2}>
-                            {order.destinationAddress || order.serviceAddress || order.customerAddress || 'Delivery Address'}
+                    {/* Customer & Address Row (Inline & Compact) */}
+                    <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+                      <View style={{ flex: 1, marginRight: 8 }}>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                          <Icon name="person" size={13} color="#0066FF" />
+                          <Text style={{ fontSize: 13, fontWeight: '800', color: '#1E293B' }} numberOfLines={1}>
+                            {order.customerName || 'Customer'}
                           </Text>
                         </View>
+                        <Text style={{ fontSize: 11.5, color: '#64748B', marginTop: 1 }} numberOfLines={1}>
+                          📍 {order.destinationAddress || order.serviceAddress || order.customerAddress || 'Delivery Address'}
+                        </Text>
                       </View>
-                      {order.customerPhone ? (
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                        {order.customerPhone ? (
+                          <TouchableOpacity
+                            style={{ width: 30, height: 30, borderRadius: 15, backgroundColor: '#DCFCE7', alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#86EFAC' }}
+                            onPress={() => Linking.openURL(`tel:${order.customerPhone}`)}
+                            activeOpacity={0.7}
+                          >
+                            <Icon name="call" size={14} color="#16A34A" />
+                          </TouchableOpacity>
+                        ) : null}
                         <TouchableOpacity
-                          style={styles.customerCallBtn}
-                          onPress={() => Linking.openURL(`tel:${order.customerPhone}`)}
+                          style={{ flexDirection: 'row', alignItems: 'center', gap: 3, backgroundColor: '#EFF6FF', borderWidth: 1, borderColor: '#BFDBFE', paddingHorizontal: 8, paddingVertical: 5, borderRadius: 6 }}
+                          onPress={() => {
+                            setSelectedOrderToPrint(order);
+                            setBillModalVisible(true);
+                          }}
                           activeOpacity={0.7}
                         >
-                          <Icon name="call" size={16} color="#16A34A" />
+                          <Icon name="print" size={13} color="#0066FF" />
+                          <Text style={{ fontSize: 11, fontWeight: '800', color: '#0066FF' }}>Bill</Text>
                         </TouchableOpacity>
-                      ) : null}
+                      </View>
                     </View>
 
-                    {/* Rider Reached Restaurant Card */}
+                    {/* Rider Reached Alert (Compact Banner) */}
                     {(order.riderStatus === 'REACHED_RESTAURANT' || order.deliveryStatus === 'RIDER_AT_RESTAURANT') && (
                       <View style={{
                         backgroundColor: '#EFF6FF',
                         borderColor: '#3B82F6',
-                        borderWidth: 1.5,
-                        borderRadius: 10,
-                        padding: 10,
-                        marginHorizontal: 12,
-                        marginBottom: 10,
+                        borderWidth: 1,
+                        borderRadius: 8,
+                        paddingVertical: 5,
+                        paddingHorizontal: 8,
+                        marginBottom: 8,
                         flexDirection: 'row',
                         alignItems: 'center',
                         justifyContent: 'space-between',
                       }}>
-                        <View style={{ flex: 1, marginRight: 8 }}>
-                          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 2 }}>
-                            <Icon name="bicycle" size={15} color="#1D4ED8" />
-                            <Text style={{ fontSize: 12, fontWeight: '900', color: '#1D4ED8' }}>
-                              RIDER REACHED RESTAURANT
-                            </Text>
-                          </View>
-                          <Text style={{ fontSize: 14, fontWeight: '700', color: '#1E293B' }}>
-                            {order.providerName || 'Assigned Delivery Partner'}
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, flex: 1 }}>
+                          <Icon name="bicycle" size={14} color="#1D4ED8" />
+                          <Text style={{ fontSize: 11.5, fontWeight: '800', color: '#1D4ED8' }} numberOfLines={1}>
+                            Rider Arrived: {order.providerName || 'Partner'}
                           </Text>
-                          {order.providerPhone ? (
-                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 2 }}>
-                              <Icon name="call-outline" size={12} color="#64748B" />
-                              <Text style={{ fontSize: 12, color: '#64748B' }}>
-                                {order.providerPhone}
-                              </Text>
-                            </View>
-                          ) : null}
                         </View>
-                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                        {order.providerPhone ? (
                           <TouchableOpacity
-                            style={{
-                              backgroundColor: '#0066FF',
-                              paddingHorizontal: 10,
-                              paddingVertical: 8,
-                              borderRadius: 8,
-                              flexDirection: 'row',
-                              alignItems: 'center',
-                              gap: 4,
-                            }}
-                            onPress={() => setShowRidersModal(true)}
-                            activeOpacity={0.8}
+                            onPress={() => Linking.openURL(`tel:${order.providerPhone}`)}
+                            style={{ backgroundColor: '#2563EB', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6 }}
                           >
-                            <Icon name="navigate-circle" size={14} color="#FFFFFF" />
-                            <Text style={{ color: '#FFFFFF', fontSize: 12, fontWeight: 'bold' }}>Track</Text>
+                            <Text style={{ color: '#FFFFFF', fontSize: 10.5, fontWeight: '800' }}>📞 Call</Text>
                           </TouchableOpacity>
-                          {order.providerPhone ? (
-                            <TouchableOpacity
-                              style={{
-                                backgroundColor: '#2563EB',
-                                width: 36,
-                                height: 36,
-                                borderRadius: 18,
-                                alignItems: 'center',
-                                justifyContent: 'center',
-                                elevation: 2,
-                              }}
-                              onPress={() => Linking.openURL(`tel:${order.providerPhone}`)}
-                              activeOpacity={0.8}
-                            >
-                              <Icon name="call" size={16} color="#FFFFFF" />
-                            </TouchableOpacity>
-                          ) : null}
-                        </View>
+                        ) : null}
                       </View>
                     )}
 
-                    {/* Food Items List */}
-                    <View style={styles.orderItemsBox}>
-                      {items.length > 0 ? (
-                        items.map((item: any, idx: number) => (
-                          <View key={item.id || idx} style={styles.orderItemRow}>
-                            <Text style={styles.orderItemText}>
-                              • {item.name} <Text style={{ fontWeight: 'bold' }}>x {item.quantity}</Text>
-                            </Text>
-                            <Text style={styles.orderItemPriceText}>
-                              ₹{Math.round((Number(item.price) || 0) * (Number(item.quantity) || 1))}
-                            </Text>
-                          </View>
-                        ))
-                      ) : (
-                        <Text style={styles.orderItemText}>• {getCategoryLabel(order)} Delivery Items</Text>
-                      )}
+                    {/* Compact Items & Total Row */}
+                    <View style={{
+                      backgroundColor: '#F8FAFC',
+                      borderRadius: 8,
+                      padding: 8,
+                      marginBottom: 8,
+                      borderWidth: 1,
+                      borderColor: '#E2E8F0',
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                    }}>
+                      <View style={{ flex: 1, marginRight: 8 }}>
+                        <Text style={{ fontSize: 12, fontWeight: '600', color: '#334155' }} numberOfLines={1}>
+                          📦 {items.length > 0 ? items.map((it: any) => `${it.quantity || 1}x ${it.name}`).join(', ') : `${getCategoryLabel(order)} items`}
+                        </Text>
+                      </View>
+                      <View style={{ alignItems: 'flex-end' }}>
+                        <Text style={{ fontSize: 13, fontWeight: '900', color: '#16A34A' }}>
+                          ₹{foodTotal}
+                        </Text>
+                      </View>
                     </View>
 
-                    {/* Total & Payment */}
-                    <View style={styles.orderBillRow}>
-                      <Text style={styles.orderPaymentMode}>
-                        Payment: {order.paymentMethod === 'cash' ? '💵 Cash on Delivery' : '💳 Online Paid'}
-                      </Text>
-                      <Text style={styles.orderTotalAmount}>{getCategoryTotalLabel(order)}: ₹{foodTotal}</Text>
-                    </View>
-
-                    {/* Customer Instructions / Message to Store */}
+                    {/* Customer Instruction / Note (if any - compact) */}
                     {Boolean(order.specialInstructions || order.customerNotes || order.deliveryNotes) && (
-                      <View style={{
-                        backgroundColor: '#FEF3C7',
-                        borderWidth: 1,
-                        borderColor: '#FDE68A',
-                        borderRadius: 8,
-                        padding: 10,
-                        marginBottom: 10,
-                        flexDirection: 'row',
-                        alignItems: 'flex-start',
-                      }}>
-                        <Icon name="document-text" size={16} color="#92400E" style={{ marginRight: 6 }} />
-                        <View style={{ flex: 1 }}>
-                          <Text style={{ fontSize: 11, fontWeight: '800', color: '#92400E' }}>Customer Note / Instructions:</Text>
-                          <Text style={{ fontSize: 12.5, fontWeight: '600', color: '#78350F', marginTop: 2 }}>
-                            {order.specialInstructions || order.customerNotes || order.deliveryNotes}
-                          </Text>
-                        </View>
+                      <View style={{ backgroundColor: '#FEF3C7', borderRadius: 6, paddingVertical: 4, paddingHorizontal: 8, marginBottom: 8, flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                        <Text style={{ fontSize: 11 }}>📝</Text>
+                        <Text style={{ fontSize: 11, fontWeight: '600', color: '#78350F', flex: 1 }} numberOfLines={1}>
+                          {order.specialInstructions || order.customerNotes || order.deliveryNotes}
+                        </Text>
                       </View>
                     )}
 
-                    {/* Quick Bill Print Bar for Restaurant / Store Partner */}
-                    <TouchableOpacity
-                      style={{
-                        flexDirection: 'row',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        gap: 6,
-                        backgroundColor: '#EFF6FF',
-                        borderWidth: 1,
-                        borderColor: '#BFDBFE',
-                        borderRadius: 8,
-                        paddingVertical: 7,
-                        marginBottom: 10,
-                      }}
-                      onPress={() => {
-                        setSelectedOrderToPrint(order);
-                        setBillModalVisible(true);
-                      }}
-                      activeOpacity={0.7}
-                    >
-                      <Icon name="print" size={15} color="#0066FF" />
-                      <Text style={{ fontSize: 12, fontWeight: '800', color: '#0066FF' }}>
-                        Print Bill
-                      </Text>
-                    </TouchableOpacity>
-
-                    {/* Live Server-Based Preparation Countdown Timer */}
-                    {/* Live Server-Based Preparation Countdown Timer with Overtime / Order is Late */}
+                    {/* Compact Preparation Countdown & Rider Search Status */}
                     {isPreparing && (() => {
                       const remainingSec = getRemainingPrepSeconds(order);
                       const isOverdue = remainingSec < 0;
                       const displaySec = isOverdue ? Math.abs(remainingSec) : remainingSec;
                       const formattedTime = (isOverdue ? '+' : '') + formatCountdown(displaySec);
+                      const overdueMins = isOverdue ? Math.floor(displaySec / 60) : 0;
+                      const isCriticalLate = isOverdue && overdueMins >= 15;
+                      const isWarningLate = isOverdue && overdueMins >= 10 && overdueMins < 15;
 
                       return (
                         <View style={{
-                          backgroundColor: isOverdue ? '#FEF2F2' : '#EFF6FF',
-                          borderWidth: 1.5,
-                          borderColor: isOverdue ? '#F87171' : '#BFDBFE',
-                          borderRadius: 12,
-                          padding: 12,
-                          marginBottom: 10,
+                          backgroundColor: isCriticalLate ? '#FEF2F2' : isWarningLate ? '#FFFBEB' : isOverdue ? '#FEF2F2' : '#EFF6FF',
+                          borderWidth: 1,
+                          borderColor: isCriticalLate ? '#DC2626' : isWarningLate ? '#F59E0B' : isOverdue ? '#F87171' : '#BFDBFE',
+                          borderRadius: 8,
+                          paddingVertical: 5,
+                          paddingHorizontal: 8,
+                          marginBottom: 8,
+                          flexDirection: 'row',
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
                         }}>
-                          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-                            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                              <Icon name={isOverdue ? "alert-circle" : "timer-outline"} size={18} color={isOverdue ? "#DC2626" : "#1D4ED8"} style={{ marginRight: 6 }} />
-                              <Text style={{ fontSize: 13, fontWeight: '800', color: isOverdue ? '#DC2626' : '#1D4ED8' }}>
-                                {isOverdue ? 'Order is Late:' : 'Preparation Countdown:'}
-                              </Text>
-                            </View>
-                            <View style={{ backgroundColor: isOverdue ? '#EF4444' : '#0066FF', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 8 }}>
-                              <Text style={{ color: '#FFFFFF', fontWeight: '900', fontSize: 16, letterSpacing: 1 }}>
-                                {formattedTime}
-                              </Text>
-                            </View>
+                          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                            <Icon name={isOverdue ? "warning" : "timer-outline"} size={13} color={isOverdue ? "#DC2626" : "#1D4ED8"} />
+                            <Text style={{ fontSize: 11.5, fontWeight: '800', color: isOverdue ? '#DC2626' : '#1D4ED8' }}>
+                              ⏱️ {formattedTime} {isCriticalLate ? '(15m+ Late)' : isWarningLate ? '(10m+ Late)' : isOverdue ? '(Late)' : ''}
+                            </Text>
                           </View>
-
-                          {isOverdue && (
-                            <View style={{ marginTop: 6, backgroundColor: '#FEE2E2', paddingVertical: 4, paddingHorizontal: 8, borderRadius: 6, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4 }}>
-                              <Icon name="warning" size={13} color="#B91C1C" />
-                              <Text style={{ color: '#B91C1C', fontWeight: '700', fontSize: 11, textAlign: 'center' }}>
-                                Preparation time exceeded. Please hand over to rider ASAP!
-                              </Text>
-                            </View>
-                          )}
-
-                          {/* Rider Search / Assigned Status */}
-                          <View style={{ marginTop: 8, paddingTop: 8, borderTopWidth: 1, borderTopColor: isOverdue ? '#FECACA' : '#BFDBFE', flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                            {order.riderName || order.riderId ? (
-                              <>
-                                <Icon name="bicycle" size={15} color="#16A34A" />
-                                <Text style={{ color: '#16A34A', fontWeight: '800', fontSize: 12 }}>
-                                  Rider Assigned: {order.riderName || 'Assigned'}
-                                </Text>
-                              </>
-                            ) : (
-                              <>
-                                <Icon name="search" size={13} color={isOverdue ? '#DC2626' : '#0066FF'} />
-                                <Text style={{ color: isOverdue ? '#DC2626' : '#0066FF', fontWeight: '700', fontSize: 12 }}>
-                                  Nearest Rider Search Active...
-                                </Text>
-                              </>
-                            )}
+                          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                            <Icon name="bicycle" size={12} color={order.riderName ? "#16A34A" : "#64748B"} />
+                            <Text style={{ fontSize: 11, fontWeight: '700', color: order.riderName ? '#16A34A' : '#64748B' }}>
+                              {order.riderName ? order.riderName : 'Searching Rider...'}
+                            </Text>
                           </View>
                         </View>
                       );
@@ -2587,6 +2697,18 @@ const RiderHomeScreen = ({ navigation, route }: any) => {
                           >
                             <Text style={[styles.actionBtnText, { color: '#FFFFFF' }]}>{terminology.readyBtnText}</Text>
                           </TouchableOpacity>
+                          {(order.riderStatus === 'REACHED_RESTAURANT' || order.deliveryStatus === 'RIDER_AT_RESTAURANT') && (
+                            <TouchableOpacity
+                              style={[styles.actionBtn, { backgroundColor: '#16A34A', borderColor: '#15803D', flex: 2 }]}
+                              onPress={() => handleHandoverToRider(order)}
+                              activeOpacity={0.8}
+                            >
+                              <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4 }}>
+                                <Text style={{ fontSize: 13 }}>🤝</Text>
+                                <Text style={[styles.actionBtnText, { color: '#FFFFFF', fontWeight: '900' }]}>Handover</Text>
+                              </View>
+                            </TouchableOpacity>
+                          )}
                         </View>
                       )}
 
@@ -2602,11 +2724,26 @@ const RiderHomeScreen = ({ navigation, route }: any) => {
                               <Text style={[styles.actionBtnText, { color: '#EF4444' }]}>Cancel</Text>
                             </View>
                           </TouchableOpacity>
-                          <View style={{ backgroundColor: '#ECFDF5', borderColor: '#10B981', borderWidth: 1, paddingVertical: 10, paddingHorizontal: 12, borderRadius: 8, flex: 2, alignItems: 'center' }}>
-                            <Text style={{ color: '#047857', fontWeight: '800', fontSize: 13 }}>
-                              {catType === 'restaurant' ? '🍲 Food Ready' : '📦 Order Ready'} • Waiting for Pickup
-                            </Text>
-                          </View>
+                          {/* Dedicated Supplier Handover / Pick Order Action */}
+                          <TouchableOpacity
+                            style={[
+                              styles.actionBtn,
+                              {
+                                backgroundColor: (order.riderStatus === 'REACHED_RESTAURANT' || order.deliveryStatus === 'RIDER_AT_RESTAURANT') ? '#16A34A' : '#0066FF',
+                                borderColor: (order.riderStatus === 'REACHED_RESTAURANT' || order.deliveryStatus === 'RIDER_AT_RESTAURANT') ? '#15803D' : '#1D4ED8',
+                                flex: 2.2,
+                              },
+                            ]}
+                            onPress={() => handleHandoverToRider(order)}
+                            activeOpacity={0.8}
+                          >
+                            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6 }}>
+                              <Text style={{ fontSize: 16 }}>🤝</Text>
+                              <Text style={[styles.actionBtnText, { color: '#FFFFFF', fontWeight: '900' }]}>
+                                Handover to Rider
+                              </Text>
+                            </View>
+                          </TouchableOpacity>
                         </View>
                       )}
 
@@ -2708,6 +2845,8 @@ const RiderHomeScreen = ({ navigation, route }: any) => {
                   </View>
                 );
               })
+            ) : loadingOrders && filteredOrders.length === 0 ? (
+              <OrderHistorySkeletonLoader isDark={isDark} message="Syncing live store orders..." />
             ) : (
               <View style={styles.emptyOrdersWrap}>
                 <View style={styles.emptyBoxIconCircle}>
@@ -2778,7 +2917,7 @@ const RiderHomeScreen = ({ navigation, route }: any) => {
           onPress={() => {
             setActiveBottomNav('Order History');
             setActiveTab('Order History');
-            fetchOrders();
+            fetchOrders(orders.length === 0);
           }}
         >
           <Icon

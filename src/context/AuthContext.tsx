@@ -63,43 +63,97 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   useEffect(() => {
     const loadUser = async () => {
       try {
-        const token = (await AsyncStorage.getItem('userToken')) || (await AsyncStorage.getItem('customerToken')) || (await AsyncStorage.getItem('supplierToken')) || (await AsyncStorage.getItem('deliveryToken'));
-        if (token) {
-          // Instantly restore cached session so user is never logged out on restart/reload
-          const activeRole = await AsyncStorage.getItem('activeRole');
-          const cachedDeliv = await AsyncStorage.getItem('deliveryUser');
-          const cachedCust = await AsyncStorage.getItem('customerUser');
-          const cachedSupp = await AsyncStorage.getItem('supplierUser');
+        const activeRoleRaw = await AsyncStorage.getItem('activeRole');
+        const activeRole = (activeRoleRaw || '').toUpperCase();
+        const delivTok = await AsyncStorage.getItem('deliveryToken');
+        const suppTok = await AsyncStorage.getItem('supplierToken');
+        const custTok = await AsyncStorage.getItem('customerToken');
+        const globalTok = await AsyncStorage.getItem('userToken');
 
-          if (activeRole === 'DELIVERY' && cachedDeliv) {
+        const cachedDeliv = await AsyncStorage.getItem('deliveryUser');
+        const cachedSupp = await AsyncStorage.getItem('supplierUser');
+        const cachedCust = await AsyncStorage.getItem('customerUser');
+
+        let resolvedToken: string | null = null;
+
+        if ((activeRole === 'DELIVERY' || activeRole === 'RIDER') && (delivTok || cachedDeliv)) {
+          resolvedToken = delivTok || globalTok;
+          if (resolvedToken) {
+            await AsyncStorage.setItem('userToken', resolvedToken);
+            if (!delivTok) await AsyncStorage.setItem('deliveryToken', resolvedToken);
+          }
+          await AsyncStorage.setItem('activeRole', 'DELIVERY');
+          if (cachedDeliv) {
             try { setUser(JSON.parse(cachedDeliv)); } catch (e) {}
-          } else if (activeRole === 'SUPPLIER' && cachedSupp) {
+          }
+        } else if (activeRole === 'SUPPLIER' && (suppTok || cachedSupp)) {
+          resolvedToken = suppTok || globalTok;
+          if (resolvedToken) {
+            await AsyncStorage.setItem('userToken', resolvedToken);
+            if (!suppTok) await AsyncStorage.setItem('supplierToken', resolvedToken);
+          }
+          if (cachedSupp) {
             try { setUser(JSON.parse(cachedSupp)); } catch (e) {}
-          } else if (activeRole === 'CUSTOMER' && cachedCust) {
+          }
+        } else if (activeRole === 'CUSTOMER' && (custTok || cachedCust)) {
+          resolvedToken = custTok || globalTok;
+          if (resolvedToken) {
+            await AsyncStorage.setItem('userToken', resolvedToken);
+            if (!custTok) await AsyncStorage.setItem('customerToken', resolvedToken);
+          }
+          if (cachedCust) {
             try {
               const u = JSON.parse(cachedCust);
               setUser(u);
               CartService.setUserId(u._id || u.id);
             } catch (e) {}
           }
+        } else {
+          // Fallback priority when activeRole wasn't set
+          if (delivTok && cachedDeliv) {
+            resolvedToken = delivTok;
+            await AsyncStorage.setItem('activeRole', 'DELIVERY');
+            await AsyncStorage.setItem('userToken', delivTok);
+            try { setUser(JSON.parse(cachedDeliv)); } catch (e) {}
+          } else if (custTok && cachedCust) {
+            resolvedToken = custTok;
+            await AsyncStorage.setItem('activeRole', 'CUSTOMER');
+            await AsyncStorage.setItem('userToken', custTok);
+            try {
+              const u = JSON.parse(cachedCust);
+              setUser(u);
+              CartService.setUserId(u._id || u.id);
+            } catch (e) {}
+          } else if (suppTok && cachedSupp) {
+            resolvedToken = suppTok;
+            await AsyncStorage.setItem('activeRole', 'SUPPLIER');
+            await AsyncStorage.setItem('userToken', suppTok);
+            try { setUser(JSON.parse(cachedSupp)); } catch (e) {}
+          } else {
+            resolvedToken = globalTok;
+          }
+        }
 
-          // Background revalidation with /auth/me
-          try {
-            const res = await api.get('/auth/me');
-            if (res.data.success && res.data.user) {
+        clearApiCachedAuth();
+
+        if (resolvedToken) {
+          // Non-blocking background revalidation with /auth/me (preserving cached offline/lifetime session)
+          api.get('/auth/me').then(async (res) => {
+            if (res.data?.success && res.data?.user) {
               const uRole = (res.data.user.role || '').toLowerCase();
-              const currentActive = await AsyncStorage.getItem('activeRole');
-              const roleMatches = (currentActive === 'SUPPLIER' && ['supplier', 'seller_partner'].includes(uRole)) ||
-                                  (currentActive === 'DELIVERY' && ['rider', 'delivery_partner', 'provider'].includes(uRole)) ||
-                                  (currentActive === 'CUSTOMER' && uRole === 'customer');
+              const currentActive = ((await AsyncStorage.getItem('activeRole')) || '').toUpperCase();
+              const roleMatches =
+                (currentActive === 'SUPPLIER' && ['supplier', 'seller_partner'].includes(uRole)) ||
+                (currentActive === 'DELIVERY' && ['rider', 'delivery', 'delivery_partner', 'provider'].includes(uRole)) ||
+                (currentActive === 'CUSTOMER' && uRole === 'customer');
               if (roleMatches) {
                 setUser(res.data.user);
               }
               if (uRole === 'supplier' || uRole === 'seller_partner') {
                 await AsyncStorage.setItem('supplierUser', JSON.stringify(res.data.user));
-              } else if (uRole === 'rider' || uRole === 'delivery_partner') {
+              } else if (['rider', 'delivery', 'delivery_partner', 'provider'].includes(uRole)) {
                 await AsyncStorage.setItem('deliveryUser', JSON.stringify(res.data.user));
-              } else {
+              } else if (uRole === 'customer') {
                 await AsyncStorage.setItem('customerUser', JSON.stringify(res.data.user));
                 CartService.setUserId(res.data.user._id || res.data.user.id);
               }
@@ -108,10 +162,10 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
                 await AsyncStorage.setItem('appTheme', res.data.user.theme);
               }
             }
-          } catch (apiErr: any) {
-            // NEVER logout on network errors, timeouts, or temporary offline state!
-            console.log('[AuthContext] Background token revalidation note:', apiErr.message || 'Offline/Cached');
-          }
+          }).catch((apiErr: any) => {
+            // NEVER logout on network errors, timeouts, or 401/offline states
+            console.log('[AuthContext] Background token revalidation preserved:', apiErr?.message || 'Cached');
+          });
         }
       } catch (error) {
         console.log('Failed to load user session', error);
@@ -123,24 +177,72 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   }, []);
 
   const login = async (token: string, refreshToken: string, userData: User) => {
+    clearApiCachedAuth();
+    // Clear global & stale caches so Customer/Supplier/Rider state never leaks across sessions
+    try {
+      const FastStorage = require('../services/FastStorage').default;
+      if (FastStorage?.clearUserSession) FastStorage.clearUserSession().catch(() => {});
+    } catch (_) {}
+    try {
+      const { clearAllLocationMemoryCaches } = require('../services/LocationAddressService');
+      if (clearAllLocationMemoryCaches) clearAllLocationMemoryCaches();
+    } catch (_) {}
+    await AsyncStorage.removeItem('userData').catch(() => {});
+
     const role = (userData.role || '').toLowerCase();
+    const newId = String((userData as any)?._id || (userData as any)?.id || '');
     if (role === 'supplier' || role === 'seller_partner') {
+      try {
+        const oldSuppRaw = await AsyncStorage.getItem('supplierUser');
+        const oldSuppId = oldSuppRaw ? String(JSON.parse(oldSuppRaw)?._id || JSON.parse(oldSuppRaw)?.id || '') : '';
+        if (oldSuppId && newId && oldSuppId !== newId) {
+          const { clearSupplierLocationCache } = require('../services/LocationAddressService');
+          await clearSupplierLocationCache();
+        }
+      } catch (_) {}
       await AsyncStorage.setItem('supplierToken', token);
+      if (refreshToken) await AsyncStorage.setItem('supplierRefreshToken', refreshToken);
       await AsyncStorage.setItem('supplierUser', JSON.stringify(userData));
+      await AsyncStorage.setItem('registeredSupplierId', newId);
       await AsyncStorage.setItem('activeRole', 'SUPPLIER');
-    } else if (role === 'rider' || role === 'delivery_partner' || role === 'provider') {
+      CartService.setUserId(null);
+    } else if (['rider', 'delivery', 'delivery_partner', 'provider'].includes(role)) {
+      try {
+        const oldDelivRaw = await AsyncStorage.getItem('deliveryUser');
+        const oldDelivId = oldDelivRaw ? String(JSON.parse(oldDelivRaw)?._id || JSON.parse(oldDelivRaw)?.id || '') : '';
+        if (oldDelivId && newId && oldDelivId !== newId) {
+          const { clearRiderLocationCache } = require('../services/LocationAddressService');
+          await clearRiderLocationCache();
+        }
+      } catch (_) {}
       await AsyncStorage.setItem('deliveryToken', token);
+      if (refreshToken) await AsyncStorage.setItem('deliveryRefreshToken', refreshToken);
       await AsyncStorage.setItem('deliveryUser', JSON.stringify(userData));
       await AsyncStorage.setItem('activeRole', 'DELIVERY');
+      CartService.setUserId(null);
     } else {
+      try {
+        const oldCustRaw = await AsyncStorage.getItem('customerUser');
+        const oldCustId = oldCustRaw ? String(JSON.parse(oldCustRaw)?._id || JSON.parse(oldCustRaw)?.id || '') : '';
+        if (oldCustId && newId && oldCustId !== newId) {
+          const { clearCustomerAddressCache } = require('../services/LocationAddressService');
+          await clearCustomerAddressCache();
+        }
+      } catch (_) {}
       await AsyncStorage.setItem('customerToken', token);
+      if (refreshToken) await AsyncStorage.setItem('customerRefreshToken', refreshToken);
       await AsyncStorage.setItem('customerUser', JSON.stringify(userData));
+      await AsyncStorage.setItem('registeredCustomerId', newId);
+      await AsyncStorage.setItem('registeredCustomerName', String((userData as any)?.name || 'Customer'));
       await AsyncStorage.setItem('activeRole', 'CUSTOMER');
       CartService.setUserId(userData._id || (userData as any).id);
     }
 
     await AsyncStorage.setItem('userToken', token);
-    await AsyncStorage.setItem('refreshToken', refreshToken);
+    if (refreshToken) {
+      await AsyncStorage.setItem('refreshToken', refreshToken);
+    }
+    clearApiCachedAuth();
     setUser(userData);
     try {
       rideStore.clearRide();
@@ -232,9 +334,15 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
           await AsyncStorage.removeItem('userToken');
         }
       } else if (targetRole === 'DELIVERY') {
+        try {
+          const { clearRiderLocationCache } = require('../services/LocationAddressService');
+          await clearRiderLocationCache();
+        } catch (_) {}
         await AsyncStorage.multiRemove([
           'deliveryToken',
+          'deliveryRefreshToken',
           'deliveryUser',
+          'delivery_is_online',
         ]);
         if (activeRole === 'DELIVERY') {
           await AsyncStorage.removeItem('activeRole');
@@ -289,13 +397,21 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
 
   const updateUser = (userData: Partial<User>) => {
     setUser(prev => {
-      const updated = prev ? { ...prev, ...userData } : null;
+      const incomingId = String((userData as any)?._id || (userData as any)?.id || '');
+      const prevId = String((prev as any)?._id || (prev as any)?.id || '');
+      const incomingRole = String((userData as any)?.role || '').toLowerCase();
+      const prevRole = String((prev as any)?.role || '').toLowerCase();
+      // NEVER merge fields from a different user ID or a different role!
+      const isDifferentUser = Boolean(prev && incomingId && prevId && incomingId !== prevId);
+      const isDifferentRole = Boolean(prev && incomingRole && prevRole && incomingRole !== prevRole);
+      const updated = (prev && !isDifferentUser && !isDifferentRole)
+        ? { ...prev, ...userData }
+        : (userData && (userData._id || userData.id) ? (userData as User) : null);
       if (updated) {
-        AsyncStorage.setItem('userData', JSON.stringify(updated)).catch(() => {});
         const role = ((updated as any).role || '').toLowerCase();
         if (role === 'supplier' || role === 'seller_partner') {
           AsyncStorage.setItem('supplierUser', JSON.stringify(updated)).catch(() => {});
-        } else if (role === 'rider' || role === 'delivery_partner' || role === 'provider') {
+        } else if (['rider', 'delivery', 'delivery_partner', 'provider'].includes(role)) {
           AsyncStorage.setItem('deliveryUser', JSON.stringify(updated)).catch(() => {});
         } else {
           AsyncStorage.setItem('customerUser', JSON.stringify(updated)).catch(() => {});
@@ -307,9 +423,10 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
 
   const switchTestRole = async (role: 'CUSTOMER' | 'RESTAURANT' | 'DELIVERY', targetUser: User, token: string) => {
     try {
+      clearApiCachedAuth();
+      await AsyncStorage.removeItem('userData').catch(() => {});
       await AsyncStorage.setItem('activeRole', role);
       await AsyncStorage.setItem('userToken', token);
-      await AsyncStorage.setItem('userData', JSON.stringify(targetUser));
 
       if (role === 'CUSTOMER') {
         await AsyncStorage.setItem('customerToken', token);
@@ -323,6 +440,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
         await AsyncStorage.setItem('deliveryUser', JSON.stringify(targetUser));
       }
 
+      clearApiCachedAuth();
       setUser(targetUser);
       console.log(`✅ [AuthContext] Switched test role to: ${role} (${targetUser.name || targetUser.phoneNumber})`);
     } catch (e: any) {

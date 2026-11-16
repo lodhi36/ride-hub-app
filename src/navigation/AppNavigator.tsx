@@ -57,7 +57,6 @@ import PaymentConfirmScreen from '../screens/PaymentConfirmScreen';
 import OrderSuccessScreen from '../screens/OrderSuccessScreen';
 import LiveTrackingScreen from '../screens/LiveTrackingScreen';
 import SellerPendingApprovalScreen from '../screens/SellerPendingApprovalScreen';
-import RiderZoneSelectionScreen from '../screens/RiderZoneSelectionScreen';
 
 // Custom Flow Screens
 import CategoriesScreen from '../screens/CategoriesScreen';
@@ -129,8 +128,6 @@ const AppNavigator = () => {
         <Stack.Screen name="OffersScreen" component={OffersScreen} />
         <Stack.Screen name="RiderHomeScreen" component={RiderHomeScreen} />
         <Stack.Screen name="DeliveryRiderHomeScreen" component={DeliveryRiderHomeScreen} />
-        <Stack.Screen name="RiderZoneSelection" component={RiderZoneSelectionScreen} />
-        <Stack.Screen name="RiderZoneSelectionScreen" component={RiderZoneSelectionScreen} />
         <Stack.Screen name="SellerPendingApprovalScreen" component={SellerPendingApprovalScreen} options={{ headerShown: false }} />
         <Stack.Screen name="ServiceBooking" component={ServiceBookingScreen} />
         <Stack.Screen name="SingleOrderStatus" component={SingleOrderStatusScreen} />
@@ -155,6 +152,9 @@ const AppNavigator = () => {
         <Stack.Screen name="NotificationSettings" component={NotificationSettingsScreen} />
         <Stack.Screen name="SecuritySettings" component={SecuritySettingsScreen} />
         <Stack.Screen name="Earnings" component={EarningsScreen} />
+        <Stack.Screen name="EarningsScreen" component={EarningsScreen} />
+        <Stack.Screen name="LiveTrackingScreen" component={LiveTrackingScreen} />
+        <Stack.Screen name="ChatList" component={require('../screens/ChatListScreen').default} />
         <Stack.Screen name="RestaurantMenu" component={require('../screens/RestaurantMenuScreen').default} />
         <Stack.Screen name="Menu" component={require('../screens/RestaurantMenuScreen').default} />
         <Stack.Screen name="RestaurantProfileScreen" component={require('../screens/RestaurantProfileScreen').default} />
@@ -183,6 +183,8 @@ const AppNavigator = () => {
         <Stack.Screen name="LiveBroadcast" component={LiveBroadcastScreen} options={{ presentation: 'fullScreenModal' }} />
         <Stack.Screen name="LiveViewer" component={LiveViewerScreen} options={{ presentation: 'fullScreenModal' }} />
         <Stack.Screen name="MyEarnings" component={require('../screens/MyEarningsScreen').default} options={{ headerShown: false }} />
+        <Stack.Screen name="OutOfStockScreen" component={require('../screens/OutOfStockScreen').default} options={{ headerShown: false }} />
+        <Stack.Screen name="RestaurantClosedScreen" component={require('../screens/RestaurantClosedScreen').default} options={{ headerShown: false }} />
         <Stack.Screen name="SecureMediaViewer" component={require('../screens/SecureMediaViewerScreen').default} options={{ presentation: 'fullScreenModal', headerShown: false }} />
       </Stack.Navigator>
     </NavigationContainer>

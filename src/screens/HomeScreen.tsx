@@ -55,11 +55,11 @@ const HomeScreen = ({ navigation }: any) => {
           }
         );
         if (granted === PermissionsAndroid.RESULTS.GRANTED) {
-          setUserLocationStr('Bhopal, Madhya Pradesh, India'); // Mock detected location
+          setUserLocationStr('Current Location');
           setSelectedLocationTab('India');
         }
       } else {
-        setUserLocationStr('Bhopal, Madhya Pradesh, India');
+        setUserLocationStr('Current Location');
         setSelectedLocationTab('India');
       }
     } catch (err) {
@@ -72,9 +72,8 @@ const HomeScreen = ({ navigation }: any) => {
   }, []);
 
   // We'll use mock distances for demo purposes
-  const getMockDistance = (id: string) => {
-    const hash = id.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0);
-    return (hash % 15) + 1; // 1 to 15 miles
+  const getMockDistance = (_id: string) => {
+    return null;
   };
 
   const fetchProfiles = async (isRefresh = false) => {

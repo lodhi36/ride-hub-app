@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useEffect, useState, useRef, ReactNode } from 'react';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
   io,
   Socket,
@@ -381,7 +382,10 @@ const playNotificationSoundAndVibrate = () => {
 
 // ─── Socket Provider ─────────────────────────────────────────────────────────
 export const SocketProvider = ({ children }: { children: ReactNode }) => {
-  const { user } = useAuth();
+  const { user, isLoading: authLoading } = useAuth();
+  const userRef = useRef(user);
+  userRef.current = user;
+
   const [socket, setSocket] = useState<Socket | null>(null);
   const [onlineUsers, setOnlineUsers] = useState<string[]>([]);
   const [isConnected, setIsConnected] = useState(false);
@@ -402,10 +406,12 @@ export const SocketProvider = ({ children }: { children: ReactNode }) => {
   const [globalCallerUser, setGlobalCallerUser] = useState<any>(null);
 
   useEffect(() => {
+    if (authLoading) return;
+
     const candidateUrls = Array.from(new Set(
       USE_CLOUD
         ? [CLOUD_URL, SOCKET_URL]
-        : [SOCKET_URL, 'http://127.0.0.1:5000', 'http://10.166.80.3:5000', `http://${CENTRAL_IP}:5000`, CLOUD_URL]
+        : [SOCKET_URL, `http://${CENTRAL_IP}:5000`, 'http://127.0.0.1:5000', 'http://10.0.2.2:5000', CLOUD_URL]
     )).filter(Boolean);
 
     let urlIdx = 0;
@@ -418,22 +424,50 @@ export const SocketProvider = ({ children }: { children: ReactNode }) => {
       reconnectionAttempts: Infinity,
       reconnectionDelay: 1000,
       timeout: 10000,
+      auth: async (cb) => {
+        try {
+          const activeRole = ((await AsyncStorage.getItem('activeRole')) || '').toUpperCase();
+          let tok = await AsyncStorage.getItem('userToken');
+          if (activeRole === 'DELIVERY' || activeRole === 'RIDER') {
+            tok = (await AsyncStorage.getItem('deliveryToken')) || tok;
+          } else if (activeRole === 'SUPPLIER') {
+            tok = (await AsyncStorage.getItem('supplierToken')) || tok;
+          } else if (activeRole === 'CUSTOMER') {
+            tok = (await AsyncStorage.getItem('customerToken')) || tok;
+          }
+          const curUser = userRef.current;
+          cb({
+            token: tok || '',
+            userId: (curUser?._id || curUser?.id)?.toString() || '',
+            role: (curUser?.role || activeRole || '').toLowerCase(),
+          });
+        } catch (_) {
+          cb({});
+        }
+      },
     });
 
-    newSocket.on('connect', () => {
+    newSocket.on('connect', async () => {
       console.log('[Socket] Connected successfully to:', currentTargetUrl, 'Socket ID:', newSocket.id);
       setIsConnected(true);
-      const uIdStr = (user?._id || user?.id)?.toString() || '';
+      const curUser = userRef.current;
+      const uIdStr = (curUser?._id || curUser?.id)?.toString() || '';
       if (uIdStr) {
         newSocket.emit('register_user', uIdStr);
-        const role = (user?.role || '').toLowerCase();
-        if (role === 'supplier' || role === 'seller_partner') {
-          // Auto-online removed
-        } else if (role === 'rider' || role === 'delivery_partner' || role === 'provider') {
-          // Auto-online removed
-          newSocket.emit('rider_online', { riderId: uIdStr, isOnline: true, isAvailable: true });
+        const role = (curUser?.role || '').toLowerCase();
+        if (['rider', 'delivery', 'delivery_partner', 'provider'].includes(role)) {
+          // Restore rider's actual persisted Online/Offline state rather than forcing one
+          try {
+            const savedSpecific = await AsyncStorage.getItem(`rider_status_${uIdStr}`);
+            const savedGlobal = await AsyncStorage.getItem('delivery_is_online');
+            const wasOnline = savedSpecific !== null
+              ? JSON.parse(savedSpecific) === true
+              : (savedGlobal !== null ? JSON.parse(savedGlobal) === true : Boolean(curUser?.isOnline));
+            if (wasOnline) {
+              newSocket.emit('rider_online', { riderId: uIdStr, name: curUser?.name || 'Rider', isOnline: true, isAvailable: true });
+            }
+          } catch (_) {}
         }
-        // Customers are strictly private and never broadcasted to public online lists
       }
     });
 
@@ -466,25 +500,27 @@ export const SocketProvider = ({ children }: { children: ReactNode }) => {
     });
 
     const refreshNotifCountFn = () => {
+      if (!userRef.current?._id && !(userRef.current as any)?.id) return;
       api.get('/notifications/unread-count')
         .then(res => {
           if (res.data.success) {
             setUnreadNotifCount(res.data.unreadCount || 0);
           }
         })
-        .catch(err => console.log('Error fetching unread notif count:', err));
+        .catch(() => {});
     };
 
-    // ── Fetch Initial Counts ──
-    api.get('/chats/unread-count')
-      .then(res => {
-        if (res.data.success) {
-          setUnreadMsgCount(res.data.unreadCount || 0);
-        }
-      })
-      .catch(err => console.log('Error fetching unread count:', err));
-
-    refreshNotifCountFn();
+    // ── Fetch Initial Counts ONLY when authenticated ──
+    if (userRef.current?._id || (userRef.current as any)?.id) {
+      api.get('/chats/unread-count')
+        .then(res => {
+          if (res.data.success) {
+            setUnreadMsgCount(res.data.unreadCount || 0);
+          }
+        })
+        .catch(() => {});
+      refreshNotifCountFn();
+    }
 
     newSocket.on('messages_marked_seen', () => {
       // Refresh the unread count from the server to be accurate
@@ -635,7 +671,7 @@ export const SocketProvider = ({ children }: { children: ReactNode }) => {
       newSocket.off('call_incoming', handleGlobalIncomingCall);
       newSocket.disconnect();
     };
-  }, [user?._id]);
+  }, [authLoading]);
 
   const handleToastPress = async (notif: NotificationData) => {
     if (!navigationRef.isReady()) return;
@@ -665,33 +701,77 @@ export const SocketProvider = ({ children }: { children: ReactNode }) => {
     }
   };
 
-  // Re-register user and join role room whenever active user changes (e.g. role switch)
+  // Re-authenticate & switch socket rooms cleanly whenever active user identity/role changes (never leak old rooms!)
+  const prevSocketIdentityRef = useRef<string>('');
   useEffect(() => {
-    let previousUserId: string | null = null;
-    if (socket && isConnected) {
-      if (user?._id) {
-        const uIdStr = user._id.toString();
-        previousUserId = uIdStr;
+    const uIdStr = (user?._id || (user as any)?.id)?.toString() || '';
+    const userRole = (user?.role || '').toLowerCase();
+    const nextIdentity = uIdStr ? `${uIdStr}:${userRole}` : '';
+    const prevIdentity = prevSocketIdentityRef.current;
+
+    if (!socket) return;
+
+    const handleIdentitySync = async () => {
+      try {
+        if (prevIdentity && prevIdentity !== nextIdentity) {
+          const prevUserId = prevIdentity.split(':')[0];
+          if (prevUserId) {
+            socket.emit('unregister_user', prevUserId);
+          }
+          prevSocketIdentityRef.current = nextIdentity;
+
+          // Update handshake token to match newly active account & reconnect clean so io.use re-verifies identity
+          const activeRoleRaw = await AsyncStorage.getItem('activeRole');
+          let tok = '';
+          if (activeRoleRaw === 'SUPPLIER') tok = (await AsyncStorage.getItem('supplierToken')) || '';
+          else if (activeRoleRaw === 'DELIVERY') tok = (await AsyncStorage.getItem('deliveryToken')) || '';
+          else if (activeRoleRaw === 'CUSTOMER') tok = (await AsyncStorage.getItem('customerToken')) || '';
+          if (!tok) tok = (await AsyncStorage.getItem('userToken')) || '';
+
+          (socket as any).auth = {
+            token: tok || undefined,
+            userId: uIdStr || undefined,
+            role: userRole || undefined,
+          };
+          if (socket.connected) {
+            socket.disconnect();
+            socket.connect();
+          }
+          return;
+        }
+
+        if (nextIdentity) {
+          prevSocketIdentityRef.current = nextIdentity;
+        }
+
+        if (!isConnected || !uIdStr) return;
+
         socket.emit('register_user', uIdStr);
-        const userRole = (user.role || '').toLowerCase();
         if (userRole === 'supplier' || userRole === 'seller_partner') {
-          socket.emit('join_restaurant_room', { supplierId: uIdStr, restaurantId: uIdStr, partnerId: user.partnerId });
+          socket.emit('join_restaurant_room', { supplierId: uIdStr, restaurantId: uIdStr, partnerId: user?.partnerId });
           socket.emit('join_supplier_room', { supplierId: uIdStr });
           socket.emit('join_room', `supplier:${uIdStr}`);
           socket.emit('join_room', `supplier_${uIdStr}`);
           socket.emit('join_room', `restaurant_${uIdStr}`);
-        } else if (userRole === 'rider' || userRole === 'delivery_partner' || userRole === 'provider') {
-          socket.emit('rider_online', { riderId: uIdStr, name: user.name || 'Rider' });
+        } else if (['rider', 'delivery', 'delivery_partner', 'provider'].includes(userRole)) {
+          Promise.all([
+            AsyncStorage.getItem(`rider_status_${uIdStr}`),
+            AsyncStorage.getItem('delivery_is_online'),
+          ]).then(([spec, glob]) => {
+            const isOnlineSaved = spec !== null
+              ? JSON.parse(spec) === true
+              : (glob !== null ? JSON.parse(glob) === true : Boolean(user?.isOnline));
+              if (isOnlineSaved) {
+                socket.emit('rider_online', { riderId: uIdStr, name: user?.name || 'Rider', isOnline: true, isAvailable: true });
+              }
+            }).catch(() => {});
         }
-        console.log(`📡 [SocketContext] Re-registered active user on socket: ${uIdStr} (${userRole || 'customer'})`);
-      }
-    }
-    return () => {
-      if (socket && isConnected && previousUserId) {
-        socket.emit('unregister_user', previousUserId);
-      }
+        console.log(`📡 [SocketContext] Synced active user on socket: ${uIdStr} (${userRole || 'customer'})`);
+      } catch (_) {}
     };
-  }, [user?._id, user?.role, socket, isConnected]);
+
+    handleIdentitySync();
+  }, [user?._id, (user as any)?.id, user?.role, socket, isConnected]);
 
   return (
     <SocketContext.Provider value={{

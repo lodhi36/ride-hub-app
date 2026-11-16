@@ -11,9 +11,11 @@ import {
   Alert,
   Linking,
   Animated,
+  BackHandler,
   Easing,
   SafeAreaView,
   StatusBar,
+  Platform,
 } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -238,8 +240,19 @@ export const RiderHelpModal: React.FC<RiderHelpModalProps> = ({
   const { isDark } = useTheme();
   const { socket } = useSocket();
 
+  // ── Auto-read rider language from AsyncStorage ──
+  const [riderLang, setRiderLang] = useState<string>(language || 'hi');
+
+  useEffect(() => {
+    AsyncStorage.getItem('rider_app_language').then((val) => {
+      if (val) setRiderLang(val);
+    }).catch(() => {});
+  }, [visible]);
+
   const [currentView, setCurrentView] = useState<
     | 'main'
+    | 'live_order_help'
+    | 'id_card_bill'
     | 'help_center_categories'
     | 'orders'
     | 'order_detail'
@@ -250,6 +263,10 @@ export const RiderHelpModal: React.FC<RiderHelpModalProps> = ({
     | 'agent_accepted'
     | 'tickets_list'
     | 'denial_reasons'
+    | 'cannot_deliver_reasons'
+    | 'pickup_otp_screen'
+    | 'restaurant_closed_screen'
+    | 'restaurant_not_found_screen'
     | 'denial_confirm'
     | 'denial_success'
   >('main');
@@ -279,7 +296,131 @@ export const RiderHelpModal: React.FC<RiderHelpModalProps> = ({
   const riderId = riderUser?._id || riderUser?.id || '';
 
   // Helper translation function
-  const t = (k: string) => getRiderTranslation(language, k);
+  const t = (k: string) => getRiderTranslation((riderLang as any) || language || 'hi', k);
+
+  const prevVisibleRef = useRef<boolean>(false);
+
+  useEffect(() => {
+    // Only reset on initial modal open transition (false -> true), never on prop changes / re-renders
+    if (visible && !prevVisibleRef.current) {
+      setCurrentView('main');
+      setSelectedOrder(activeOrder || null);
+      setSelectedCategory(null);
+      setSelectedSubIssue(null);
+      setSelectedIssue(null);
+      setSelectedDenialReason(null);
+      setRemarks('');
+      setAssignedAgentName('');
+    }
+    prevVisibleRef.current = visible;
+  }, [visible]);
+
+  // ── Hardware back button: navigate within modal, never exit app ──
+  useEffect(() => {
+    if (!visible) return;
+    const handleBack = () => {
+      if (currentView === 'main') {
+        onClose();
+        return true;
+      }
+      if (
+        currentView === 'cannot_deliver_reasons' ||
+        currentView === 'pickup_otp_screen' ||
+        currentView === 'restaurant_closed_screen' ||
+        currentView === 'restaurant_not_found_screen'
+      ) {
+        setCurrentView('live_order_help');
+        return true;
+      }
+      if (currentView === 'live_order_help' || currentView === 'id_card_bill') {
+        setCurrentView('main');
+        return true;
+      }
+      if (currentView === 'help_center_categories' || currentView === 'orders') {
+        setCurrentView('main');
+        return true;
+      }
+      if (currentView === 'order_detail') {
+        setCurrentView('live_order_help');
+        return true;
+      }
+      if (currentView === 'category_form') {
+        setCurrentView('help_center_categories');
+        return true;
+      }
+      if (currentView === 'issue_form') {
+        setCurrentView('order_detail');
+        return true;
+      }
+      if (currentView === 'waiting_agent' || currentView === 'agent_accepted') {
+        setCurrentView('main');
+        return true;
+      }
+      if (currentView === 'tickets_list') {
+        setCurrentView('main');
+        return true;
+      }
+      if (currentView === 'denial_reasons') {
+        setCurrentView('live_order_help');
+        return true;
+      }
+      if (currentView === 'denial_confirm') {
+        setCurrentView('denial_reasons');
+        return true;
+      }
+      if (currentView === 'denial_success') {
+        onClose();
+        return true;
+      }
+      setCurrentView('main');
+      return true;
+    };
+    const sub = BackHandler.addEventListener('hardwareBackPress', handleBack);
+    return () => sub.remove();
+  }, [visible, currentView, onClose]);
+
+  
+  // Helper: Real-time Haversine Distance in meters/kilometers
+  const calculateRealDistance = (lat1?: number, lon1?: number, lat2?: number, lon2?: number) => {
+    if (!lat1 || !lon1 || !lat2 || !lon2) return null;
+    const R = 6371e3; // metres
+    const φ1 = (lat1 * Math.PI) / 180;
+    const φ2 = (lat2 * Math.PI) / 180;
+    const Δφ = ((lat2 - lat1) * Math.PI) / 180;
+    const Δλ = ((lon2 - lon1) * Math.PI) / 180;
+
+    const a =
+      Math.sin(Δφ / 2) * Math.sin(Δφ / 2) +
+      Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ / 2) * Math.sin(Δλ / 2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    return Math.round(R * c); // returns meters
+  };
+
+  const handleReportRainClick = () => {
+    Alert.alert(
+      'बारिश की सूचना 🌧️',
+      'क्या आपके क्षेत्र में बारिश हो रही है? बारिश रिपोर्ट करने से रेन सर्ज इंसेंटिव सक्रिय हो जाएगा।',
+      [
+        { text: 'रद्द करें', style: 'cancel' },
+        {
+          text: 'हाँ, बारिश हो रही है',
+          onPress: () => {
+            if (socket && socket.connected) {
+              socket.emit('rider_report_rain', {
+                riderId: riderUser?._id || riderUser?.id || riderId,
+                timestamp: new Date(),
+              });
+            }
+            if (onReportRain) {
+              onReportRain();
+            }
+            Alert.alert('सफलता', 'बारिश की रिपोर्ट दर्ज कर ली गई है! रेन सर्ज इंसेंटिव सक्रिय है।');
+            onClose();
+          },
+        },
+      ]
+    );
+  };
 
   // Animations for Support Connecting Waiting Screen
   const pulseAnim = useRef(new Animated.Value(1)).current;
@@ -500,19 +641,7 @@ export const RiderHelpModal: React.FC<RiderHelpModalProps> = ({
     };
   }, [socket, visible, activeWaitingTicket]);
 
-  // Reset view on visibility change
-  useEffect(() => {
-    if (visible) {
-      setCurrentView('main');
-      setSelectedOrder(activeOrder || null);
-      setSelectedCategory(null);
-      setSelectedSubIssue(null);
-      setSelectedIssue(null);
-      setSelectedDenialReason(null);
-      setRemarks('');
-      setAssignedAgentName('');
-    }
-  }, [visible, activeOrder]);
+  // Duplicate reset removed to prevent auto-back when activeOrder updates
 
   const handleCategoryClick = (cat: typeof HELP_CENTER_CATEGORIES[0]) => {
     setSelectedCategory(cat);
@@ -751,215 +880,1118 @@ export const RiderHelpModal: React.FC<RiderHelpModalProps> = ({
           <View style={[styles.innerContainer, { backgroundColor: isDark ? '#0B0F19' : '#FFFFFF' }]}>
             
             {/* ══════════════════════════════════════════════════════════════════════════
-                VIEW 1: MAIN SHEET (Image 1 - "हम आपकी किस तरह से सहायता कर सकते हैं?")
+                VIEW 1: अधिक विकल्प (Exact Match to media_1793935696261_9996b2b6.jpg)
                ══════════════════════════════════════════════════════════════════════════ */}
             {currentView === 'main' && (
-              <>
-                {renderHeader(t('helpTitle'))}
-
-                <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 24 }}>
-                  {/* Active Order Card if currently delivering */}
-                  {activeOrder && (
-                    <View style={[styles.activeOrderBanner, isDark && { backgroundColor: '#0F172A', borderColor: '#334155' }]}>
-                      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-                        <Text style={styles.activeOrderTag}>🚨 {t('activeOrder')}</Text>
-                        <Text style={styles.activeOrderId}>#{String(activeOrder.bookingId || activeOrder._id).slice(-6)}</Text>
-                      </View>
-                      <Text style={[styles.activeOrderStore, isDark && { color: '#F8FAFC' }]}>
-                        {activeOrder.restaurantName || activeOrder.storeName || 'Partner Store'}
-                      </Text>
-
-                      <View style={{ flexDirection: 'row', gap: 10, marginTop: 10 }}>
-                        <TouchableOpacity
-                          style={styles.activeOrderHelpBtn}
-                          onPress={() => {
-                            setSelectedOrder(activeOrder);
-                            setCurrentView('order_detail');
-                          }}
-                          activeOpacity={0.8}
-                        >
-                          <Text style={styles.activeOrderHelpText}>{t('liveHelp')}</Text>
-                        </TouchableOpacity>
-
-                        <TouchableOpacity
-                          style={styles.activeOrderDenyBtn}
-                          onPress={() => {
-                            setSelectedOrder(activeOrder);
-                            setCurrentView('denial_reasons');
-                          }}
-                          activeOpacity={0.8}
-                        >
-                          <Text style={styles.activeOrderDenyText}>{t('denyOrder')}</Text>
-                        </TouchableOpacity>
-                      </View>
-                    </View>
-                  )}
-
-                  {/* 🤖 CHAT WITH AI RIDER ASSISTANT */}
-                  <TouchableOpacity
-                    style={[styles.menuRow, { backgroundColor: isDark ? 'rgba(0,102,255,0.14)' : '#EFF6FF', borderColor: '#3B82F6', borderWidth: 1 }]}
-                    onPress={() => setShowAiModal(true)}
-                    activeOpacity={0.7}
-                  >
-                    <View style={[styles.iconWrap, { backgroundColor: '#3B82F6' }]}>
-                      <Text style={{ fontSize: 20 }}>🤖</Text>
-                    </View>
-                    <View style={styles.menuTextCol}>
-                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                        <Text style={[styles.menuTitle, { color: isDark ? '#FFFFFF' : '#1E40AF', fontWeight: '800' }]}>
-                          Chat with Rider AI Assistant
-                        </Text>
-                        <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: '#22C55E' }} />
-                      </View>
-                      <Text style={[styles.menuSub, { color: isDark ? '#93C5FD' : '#3B82F6' }]}>
-                        Delivery, route issue, kamai & customer help 24/7
-                      </Text>
-                    </View>
-                    <Text style={[styles.chevron, { color: '#3B82F6', fontWeight: '800' }]}>➔</Text>
+              <View style={{ flex: 1, backgroundColor: '#18191E' }}>
+                {/* Header: अधिक विकल्प ✕ */}
+                <View style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  paddingHorizontal: 20,
+                  paddingTop: Platform.OS === 'android' ? (StatusBar.currentHeight || 28) + 12 : 20,
+                  paddingBottom: 16,
+                  borderBottomWidth: 1,
+                  borderBottomColor: '#28292E',
+                }}>
+                  <Text style={{ fontSize: 20, fontWeight: '800', color: '#FFFFFF', letterSpacing: 0.2 }}>
+                    अधिक विकल्प
+                  </Text>
+                  <TouchableOpacity onPress={onClose} hitSlop={{ top: 14, bottom: 14, left: 14, right: 14 }}>
+                    <Text style={{ fontSize: 22, fontWeight: '700', color: '#94A3B8' }}>✕</Text>
                   </TouchableOpacity>
+                </View>
 
-                  <View style={[styles.divider, isDark && { backgroundColor: '#334155' }]} />
-
-                  {/* 1. सहायता केंद्र (Help Center -> Opens Image 2 View) */}
+                <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingVertical: 6 }}>
+                  {/* Option 1: लाइव ऑर्डर मदद */}
                   <TouchableOpacity
-                    style={styles.menuRow}
-                    onPress={() => setCurrentView('help_center_categories')}
-                    activeOpacity={0.7}
-                  >
-                    <View style={[styles.iconWrap, { backgroundColor: '#EFF6FF' }]}>
-                      <Text style={styles.iconEmoji}>❓</Text>
-                    </View>
-                    <View style={styles.menuTextCol}>
-                      <Text style={[styles.menuTitle, { color: isDark ? '#F1F5F9' : '#0F172A' }]}>
-                        {t('helpCenter')}
-                      </Text>
-                      <Text style={[styles.menuSub, isDark && { color: '#94A3B8' }]}>
-                        {t('helpCenterSub')}
-                      </Text>
-                    </View>
-                    <Text style={styles.chevron}>›</Text>
-                  </TouchableOpacity>
-
-                  <View style={[styles.divider, isDark && { backgroundColor: '#334155' }]} />
-
-                  {/* 2. समर्थन टिकट (Support Tickets) */}
-                  <TouchableOpacity
-                    style={styles.menuRow}
-                    onPress={() => {
-                      loadMyTickets();
-                      setCurrentView('tickets_list');
+                    style={{
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      paddingVertical: 18,
+                      paddingHorizontal: 20,
                     }}
+                    onPress={() => setCurrentView('live_order_help')}
                     activeOpacity={0.7}
                   >
-                    <View style={[styles.iconWrap, { backgroundColor: '#F0FDF4' }]}>
-                      <Text style={styles.iconEmoji}>🎫</Text>
+                    <View style={{
+                      width: 48,
+                      height: 48,
+                      borderRadius: 24,
+                      backgroundColor: '#282A31',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      marginRight: 16,
+                    }}>
+                      <Text style={{ fontSize: 22 }}>🎧</Text>
                     </View>
-                    <View style={styles.menuTextCol}>
-                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                        <Text style={[styles.menuTitle, { color: isDark ? '#F1F5F9' : '#0F172A' }]}>
-                          {t('supportTickets')}
-                        </Text>
-                        {myTickets.length > 0 && (
-                          <View style={styles.badgePill}>
-                            <Text style={styles.badgePillText}>{myTickets.length}</Text>
-                          </View>
-                        )}
-                      </View>
-                      <Text style={[styles.menuSub, isDark && { color: '#94A3B8' }]}>
-                        {myTickets.length > 0
-                          ? `Check status of ${myTickets.length} active/resolved tickets`
-                          : t('supportTicketsSub')}
+                    <View style={{ flex: 1 }}>
+                      <Text style={{ fontSize: 16, fontWeight: '700', color: '#FFFFFF' }}>
+                        लाइव ऑर्डर मदद
+                      </Text>
+                      <Text style={{ fontSize: 13, color: '#9CA3AF', marginTop: 4 }}>
+                        चल रही यात्रा के लिए मुद्दे
                       </Text>
                     </View>
-                    <Text style={styles.chevron}>›</Text>
+                    <Text style={{ fontSize: 24, color: '#6B7280', fontWeight: 'bold' }}>›</Text>
                   </TouchableOpacity>
 
-                  <View style={[styles.divider, isDark && { backgroundColor: '#334155' }]} />
+                  <View style={{ height: 1, backgroundColor: '#28292E', marginHorizontal: 20 }} />
 
-                  {/* 3. आई.डी कार्ड दिखाएं (Show ID Card) */}
+                  {/* Option 2: आईडी कार्ड और बिल दिखाएं */}
                   <TouchableOpacity
-                    style={styles.menuRow}
-                    onPress={() => {
-                      onClose();
-                      if (onShowIdCard) onShowIdCard();
+                    style={{
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      paddingVertical: 18,
+                      paddingHorizontal: 20,
                     }}
+                    onPress={() => setCurrentView('id_card_bill')}
                     activeOpacity={0.7}
                   >
-                    <View style={[styles.iconWrap, { backgroundColor: '#FAF5FF' }]}>
-                      <Text style={styles.iconEmoji}>🪪</Text>
+                    <View style={{
+                      width: 48,
+                      height: 48,
+                      borderRadius: 24,
+                      backgroundColor: '#282A31',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      marginRight: 16,
+                    }}>
+                      <Text style={{ fontSize: 22 }}>🪪</Text>
                     </View>
-                    <View style={styles.menuTextCol}>
-                      <Text style={[styles.menuTitle, { color: isDark ? '#F1F5F9' : '#0F172A' }]}>
-                        {t('showIdCard')}
+                    <View style={{ flex: 1 }}>
+                      <Text style={{ fontSize: 16, fontWeight: '700', color: '#FFFFFF' }}>
+                        आईडी कार्ड और बिल दिखाएं
                       </Text>
-                      <Text style={[styles.menuSub, isDark && { color: '#94A3B8' }]}>
-                        {t('showIdCardSub')}
+                      <Text style={{ fontSize: 13, color: '#9CA3AF', marginTop: 4 }}>
+                        बिल केवल ऑर्डर के दौरान उपलब्ध होगा
                       </Text>
                     </View>
-                    <Text style={styles.chevron}>›</Text>
+                    <Text style={{ fontSize: 24, color: '#6B7280', fontWeight: 'bold' }}>›</Text>
                   </TouchableOpacity>
 
-                  <View style={[styles.divider, isDark && { backgroundColor: '#334155' }]} />
+                  <View style={{ height: 1, backgroundColor: '#28292E', marginHorizontal: 20 }} />
 
-                  {/* 4. भाषा बदलें (Change Language) */}
+                  {/* Option 3: बारिश की सूचना दें */}
                   <TouchableOpacity
-                    style={styles.menuRow}
-                    onPress={() => {
-                      if (onSelectLanguage) {
-                        onSelectLanguage();
-                      }
+                    style={{
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      paddingVertical: 18,
+                      paddingHorizontal: 20,
                     }}
+                    onPress={handleReportRainClick}
                     activeOpacity={0.7}
                   >
-                    <View style={[styles.iconWrap, { backgroundColor: '#FEF3C7' }]}>
-                      <Text style={styles.iconEmoji}>🌐</Text>
+                    <View style={{
+                      width: 48,
+                      height: 48,
+                      borderRadius: 24,
+                      backgroundColor: '#282A31',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      marginRight: 16,
+                    }}>
+                      <Text style={{ fontSize: 22 }}>🌧️</Text>
                     </View>
-                    <View style={styles.menuTextCol}>
-                      <Text style={[styles.menuTitle, { color: isDark ? '#F1F5F9' : '#0F172A' }]}>
-                        {t('changeLang')}
+                    <View style={{ flex: 1 }}>
+                      <Text style={{ fontSize: 16, fontWeight: '700', color: '#FFFFFF' }}>
+                        बारिश की सूचना दें
                       </Text>
-                      <Text style={[styles.menuSub, isDark && { color: '#94A3B8' }]}>
-                        {t('changeLangSub')}
+                      <Text style={{ fontSize: 13, color: '#9CA3AF', marginTop: 4 }}>
+                        यदि आपके क्षेत्र में बारिश हो रही है
                       </Text>
                     </View>
-                    <Text style={styles.chevron}>›</Text>
+                    <Text style={{ fontSize: 24, color: '#6B7280', fontWeight: 'bold' }}>›</Text>
                   </TouchableOpacity>
 
-                  <View style={[styles.divider, isDark && { backgroundColor: '#334155' }]} />
-
-                  {/* 5. बारिश रिपोर्ट करें (Report Rain) */}
-                  <TouchableOpacity
-                    style={styles.menuRow}
-                    onPress={() => {
-                      if (!isOnline) {
-                        Alert.alert('🌧️ Report Rain', t('rainOfflineAlert'));
-                        return;
-                      }
-                      if (onReportRain) {
-                        onReportRain();
-                      } else {
-                        Alert.alert('🌧️ Report Rain', t('rainReportedSuccess'));
-                      }
-                    }}
-                    activeOpacity={0.7}
-                  >
-                    <View style={[styles.iconWrap, { backgroundColor: '#E0F2FE' }]}>
-                      <Text style={styles.iconEmoji}>🌧️</Text>
-                    </View>
-                    <View style={styles.menuTextCol}>
-                      <Text style={[styles.menuTitle, { color: isDark ? '#F1F5F9' : '#0F172A' }]}>
-                        {t('reportRain')}
-                      </Text>
-                      <Text style={[styles.menuSub, { color: isOnline ? '#0284C7' : '#94A3B8' }]}>
-                        {t('reportRainSub')}
-                      </Text>
-                    </View>
-                    <Text style={styles.chevron}>›</Text>
-                  </TouchableOpacity>
+                  <View style={{ height: 1, backgroundColor: '#28292E', marginHorizontal: 20 }} />
                 </ScrollView>
-              </>
+              </View>
             )}
 
+            {/* ══════════════════════════════════════════════════════════════════════════
+                VIEW 2: LIVE ORDER HELP (4 Primary Reasons Specified by User)
+               ══════════════════════════════════════════════════════════════════════════ */}
+            {currentView === 'live_order_help' && (
+              <View style={{ flex: 1, backgroundColor: isDark ? '#000000' : '#FFFFFF' }}>
+                {/* Header: ← Live Order : 880551xxxx */}
+                <View style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  paddingHorizontal: 16,
+                  paddingTop: Platform.OS === 'android' ? (StatusBar.currentHeight || 28) + 12 : 16,
+                  paddingBottom: 14,
+                  borderBottomWidth: 1,
+                  borderBottomColor: isDark ? '#1F2430' : '#E2E8F0',
+                  backgroundColor: isDark ? '#000000' : '#FFFFFF',
+                }}>
+                  <TouchableOpacity
+                    onPress={() => setCurrentView('main')}
+                    style={{ paddingRight: 14, paddingVertical: 4 }}
+                    hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+                  >
+                    <Text style={{ fontSize: 22, color: isDark ? '#FFFFFF' : '#0F172A', fontWeight: 'bold' }}>←</Text>
+                  </TouchableOpacity>
+                  <Text style={{
+                    fontSize: 17,
+                    fontWeight: '800',
+                    color: isDark ? '#FFFFFF' : '#0F172A',
+                    letterSpacing: 0.3,
+                    flex: 1,
+                  }}>
+                    {t('liveOrder') || 'Live Order'} : {
+                      activeOrder?.customerPhone
+                        ? String(activeOrder.customerPhone).slice(0, 6) + 'xxxx'
+                        : activeOrder?.bookingId
+                        ? String(activeOrder.bookingId).slice(0, 6) + 'xxxx'
+                        : activeOrder?._id
+                        ? String(activeOrder._id).slice(0, 6) + 'xxxx'
+                        : '880551xxxx'
+                    }
+                  </Text>
+                </View>
+
+                <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingVertical: 4 }}>
+                  {/* 1. डिलीवर नहीं कर सकते (Cannot Deliver) */}
+                  <TouchableOpacity
+                    style={{
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      paddingVertical: 18,
+                      paddingHorizontal: 20,
+                    }}
+                    onPress={() => setCurrentView('cannot_deliver_reasons')}
+                    activeOpacity={0.7}
+                  >
+                    <Text style={{
+                      fontSize: 16,
+                      fontWeight: '700',
+                      color: isDark ? '#FFFFFF' : '#0F172A',
+                      flex: 1,
+                    }}>
+                      {t('cannotDeliver') || 'डिलीवर नहीं कर सकते'}
+                    </Text>
+                    <Text style={{
+                      fontSize: 20,
+                      fontWeight: 'bold',
+                      color: isDark ? '#9CA3AF' : '#64748B',
+                    }}>›</Text>
+                  </TouchableOpacity>
+
+                  <View style={{ height: 1, backgroundColor: isDark ? '#1F2430' : '#E2E8F0', marginHorizontal: 20 }} />
+
+                  {/* 2. पिकअप ओटीपी समस्या (Pickup OTP Problem) */}
+                  <TouchableOpacity
+                    style={{
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      paddingVertical: 18,
+                      paddingHorizontal: 20,
+                    }}
+                    onPress={() => setCurrentView('pickup_otp_screen')}
+                    activeOpacity={0.7}
+                  >
+                    <Text style={{
+                      fontSize: 16,
+                      fontWeight: '700',
+                      color: isDark ? '#FFFFFF' : '#0F172A',
+                      flex: 1,
+                    }}>
+                      {t('pickupOtpProblem') || 'पिकअप ओटीपी समस्या'}
+                    </Text>
+                    <Text style={{
+                      fontSize: 20,
+                      fontWeight: 'bold',
+                      color: isDark ? '#9CA3AF' : '#64748B',
+                    }}>›</Text>
+                  </TouchableOpacity>
+
+                  <View style={{ height: 1, backgroundColor: isDark ? '#1F2430' : '#E2E8F0', marginHorizontal: 20 }} />
+
+                  {/* 3. रेस्टोरेंट बंद है (Restaurant Closed) */}
+                  <TouchableOpacity
+                    style={{
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      paddingVertical: 18,
+                      paddingHorizontal: 20,
+                    }}
+                    onPress={() => setCurrentView('restaurant_closed_screen')}
+                    activeOpacity={0.7}
+                  >
+                    <Text style={{
+                      fontSize: 16,
+                      fontWeight: '700',
+                      color: isDark ? '#FFFFFF' : '#0F172A',
+                      flex: 1,
+                    }}>
+                      {t('restaurantClosed') || 'रेस्टोरेंट बंद है'}
+                    </Text>
+                    <Text style={{
+                      fontSize: 20,
+                      fontWeight: 'bold',
+                      color: isDark ? '#9CA3AF' : '#64748B',
+                    }}>›</Text>
+                  </TouchableOpacity>
+
+                  <View style={{ height: 1, backgroundColor: isDark ? '#1F2430' : '#E2E8F0', marginHorizontal: 20 }} />
+
+                  {/* 4. रेस्टोरेंट नहीं मिल रहा है (Cannot Find Restaurant) */}
+                  <TouchableOpacity
+                    style={{
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      paddingVertical: 18,
+                      paddingHorizontal: 20,
+                    }}
+                    onPress={() => setCurrentView('restaurant_not_found_screen')}
+                    activeOpacity={0.7}
+                  >
+                    <Text style={{
+                      fontSize: 16,
+                      fontWeight: '700',
+                      color: isDark ? '#FFFFFF' : '#0F172A',
+                      flex: 1,
+                    }}>
+                      {t('restaurantNotFound') || 'रेस्टोरेंट नहीं मिल रहा है'}
+                    </Text>
+                    <Text style={{
+                      fontSize: 20,
+                      fontWeight: 'bold',
+                      color: isDark ? '#9CA3AF' : '#64748B',
+                    }}>›</Text>
+                  </TouchableOpacity>
+
+                  <View style={{ height: 1, backgroundColor: isDark ? '#1F2430' : '#E2E8F0', marginHorizontal: 20 }} />
+
+                  {/* Support & AI Buttons */}
+                  <View style={{ paddingHorizontal: 16, paddingTop: 24, flexDirection: 'row', gap: 10 }}>
+                    <TouchableOpacity
+                      style={{
+                        flex: 1,
+                        backgroundColor: isDark ? 'rgba(59,130,246,0.15)' : '#EFF6FF',
+                        borderWidth: 1.5,
+                        borderColor: '#3B82F6',
+                        borderRadius: 12,
+                        paddingVertical: 12,
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        flexDirection: 'row',
+                      }}
+                      onPress={() => setShowAiModal(true)}
+                      activeOpacity={0.8}
+                    >
+                      <Text style={{ fontSize: 18, marginRight: 6 }}>🤖</Text>
+                      <Text style={{ color: '#2563EB', fontSize: 13, fontWeight: '800' }}>AI Assistant</Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      style={{
+                        flex: 1,
+                        backgroundColor: isDark ? 'rgba(34,197,94,0.12)' : '#F0FDF4',
+                        borderWidth: 1.5,
+                        borderColor: '#22C55E',
+                        borderRadius: 12,
+                        paddingVertical: 12,
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        flexDirection: 'row',
+                      }}
+                      onPress={() => {
+                        if (activeOrder) {
+                          setSelectedOrder(activeOrder);
+                          handleSubmitOrderTicket();
+                        } else {
+                          handleSubmitCategoryTicket();
+                        }
+                      }}
+                      activeOpacity={0.8}
+                    >
+                      <Text style={{ fontSize: 18, marginRight: 6 }}>🎧</Text>
+                      <Text style={{ color: '#16A34A', fontSize: 13, fontWeight: '800' }}>Live Support</Text>
+                    </TouchableOpacity>
+                  </View>
+                </ScrollView>
+              </View>
+            )}
+
+            {/* ══════════════════════════════════════════════════════════════════════════
+                VIEW 2B: CANNOT DELIVER REASONS SUB-SCREEN (Personal emergency, bike, accident, etc.)
+               ══════════════════════════════════════════════════════════════════════════ */}
+            {currentView === 'cannot_deliver_reasons' && (
+              <View style={{ flex: 1, backgroundColor: isDark ? '#000000' : '#FFFFFF' }}>
+                <View style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  paddingHorizontal: 16,
+                  paddingTop: Platform.OS === 'android' ? (StatusBar.currentHeight || 28) + 12 : 16,
+                  paddingBottom: 14,
+                  borderBottomWidth: 1,
+                  borderBottomColor: isDark ? '#1F2430' : '#E2E8F0',
+                  backgroundColor: isDark ? '#000000' : '#FFFFFF',
+                }}>
+                  <TouchableOpacity
+                    onPress={() => setCurrentView('live_order_help')}
+                    style={{ paddingRight: 14, paddingVertical: 4 }}
+                    hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+                  >
+                    <Text style={{ fontSize: 22, color: isDark ? '#FFFFFF' : '#0F172A', fontWeight: 'bold' }}>←</Text>
+                  </TouchableOpacity>
+                  <Text style={{
+                    fontSize: 17,
+                    fontWeight: '800',
+                    color: isDark ? '#FFFFFF' : '#0F172A',
+                    letterSpacing: 0.3,
+                    flex: 1,
+                  }}>
+                    {t('cannotDeliver') || 'डिलीवर नहीं कर सकते'}
+                  </Text>
+                </View>
+
+                <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingVertical: 4 }}>
+                  {/* Option A: व्यक्तिगत आपातकाल */}
+                  <TouchableOpacity
+                    style={{
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      paddingVertical: 18,
+                      paddingHorizontal: 20,
+                    }}
+                    onPress={() => {
+                      setSelectedDenialReason({
+                        id: 'personal_emergency',
+                        title: t('personalEmergency') || 'व्यक्तिगत आपातकाल',
+                        desc: 'Urgent personal emergency during live trip',
+                      });
+                      setCurrentView('denial_confirm');
+                    }}
+                    activeOpacity={0.7}
+                  >
+                    <Text style={{ fontSize: 16, fontWeight: '700', color: isDark ? '#FFFFFF' : '#0F172A', flex: 1 }}>
+                      {t('personalEmergency') || 'व्यक्तिगत आपातकाल'}
+                    </Text>
+                    <Text style={{ fontSize: 20, fontWeight: 'bold', color: isDark ? '#9CA3AF' : '#64748B' }}>›</Text>
+                  </TouchableOpacity>
+
+                  <View style={{ height: 1, backgroundColor: isDark ? '#1F2430' : '#E2E8F0', marginHorizontal: 20 }} />
+
+                  {/* Option B: बाइक समस्या */}
+                  <TouchableOpacity
+                    style={{
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      paddingVertical: 18,
+                      paddingHorizontal: 20,
+                    }}
+                    onPress={() => {
+                      setSelectedDenialReason({
+                        id: 'bike_problem',
+                        title: t('bikeProblem') || 'बाइक समस्या',
+                        desc: 'Bike puncture, mechanical breakdown or breakdown',
+                      });
+                      setCurrentView('denial_confirm');
+                    }}
+                    activeOpacity={0.7}
+                  >
+                    <Text style={{ fontSize: 16, fontWeight: '700', color: isDark ? '#FFFFFF' : '#0F172A', flex: 1 }}>
+                      {t('bikeProblem') || 'बाइक समस्या'}
+                    </Text>
+                    <Text style={{ fontSize: 20, fontWeight: 'bold', color: isDark ? '#9CA3AF' : '#64748B' }}>›</Text>
+                  </TouchableOpacity>
+
+                  <View style={{ height: 1, backgroundColor: isDark ? '#1F2430' : '#E2E8F0', marginHorizontal: 20 }} />
+
+                  {/* Option C: दुर्घटना का शिकार हुआ */}
+                  <TouchableOpacity
+                    style={{
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      paddingVertical: 18,
+                      paddingHorizontal: 20,
+                    }}
+                    onPress={() => {
+                      setSelectedDenialReason({
+                        id: 'met_accident',
+                        title: t('metAccident') || 'दुर्घटना का शिकार हुआ',
+                        desc: 'Road accident or injury on the way',
+                      });
+                      setCurrentView('denial_confirm');
+                    }}
+                    activeOpacity={0.7}
+                  >
+                    <Text style={{ fontSize: 16, fontWeight: '700', color: isDark ? '#FFFFFF' : '#0F172A', flex: 1 }}>
+                      {t('metAccident') || 'दुर्घटना का शिकार हुआ'}
+                    </Text>
+                    <Text style={{ fontSize: 20, fontWeight: 'bold', color: isDark ? '#9CA3AF' : '#64748B' }}>›</Text>
+                  </TouchableOpacity>
+
+                  <View style={{ height: 1, backgroundColor: isDark ? '#1F2430' : '#E2E8F0', marginHorizontal: 20 }} />
+
+                  {/* Option D: सड़क अवरोध/बैरिकेडिंग */}
+                  <TouchableOpacity
+                    style={{
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      paddingVertical: 18,
+                      paddingHorizontal: 20,
+                    }}
+                    onPress={() => {
+                      setSelectedDenialReason({
+                        id: 'road_block',
+                        title: t('roadBlock') || 'सड़क अवरोध/बैरिकेडिंग',
+                        desc: 'Road closed, strike or barricading blocking path',
+                      });
+                      setCurrentView('denial_confirm');
+                    }}
+                    activeOpacity={0.7}
+                  >
+                    <Text style={{ fontSize: 16, fontWeight: '700', color: isDark ? '#FFFFFF' : '#0F172A', flex: 1 }}>
+                      {t('roadBlock') || 'सड़क अवरोध/बैरिकेडिंग'}
+                    </Text>
+                    <Text style={{ fontSize: 20, fontWeight: 'bold', color: isDark ? '#9CA3AF' : '#64748B' }}>›</Text>
+                  </TouchableOpacity>
+
+                  <View style={{ height: 1, backgroundColor: isDark ? '#1F2430' : '#E2E8F0', marginHorizontal: 20 }} />
+                </ScrollView>
+              </View>
+            )}
+
+            {/* ══════════════════════════════════════════════════════════════════════════
+                SCREEN 1: PICKUP OTP PROBLEM (Live Distance & 10m Geofence Warning)
+               ══════════════════════════════════════════════════════════════════════════ */}
+            {currentView === 'pickup_otp_screen' && (() => {
+              const rLat = Number(activeOrder?.restaurantLocation?.latitude || activeOrder?.pickupLat || activeOrder?.pickupLocation?.latitude || 0);
+              const rLon = Number(activeOrder?.restaurantLocation?.longitude || activeOrder?.pickupLon || activeOrder?.pickupLocation?.longitude || 0);
+              const riderLat = Number(activeOrder?.riderLocation?.latitude || riderUser?.location?.latitude || 0);
+              const riderLon = Number(activeOrder?.riderLocation?.longitude || riderUser?.location?.longitude || 0);
+              const realMeters = (rLat && rLon && riderLat && riderLon) ? calculateRealDistance(riderLat, riderLon, rLat, rLon) : 0;
+              const isWithin10m = realMeters > 0 && realMeters <= 10;
+
+              return (
+                <View style={{ flex: 1, backgroundColor: isDark ? '#000000' : '#FFFFFF' }}>
+                  {/* Header */}
+                  <View style={{
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    paddingHorizontal: 16,
+                    paddingTop: Platform.OS === 'android' ? (StatusBar.currentHeight || 28) + 12 : 16,
+                    paddingBottom: 14,
+                    borderBottomWidth: 1,
+                    borderBottomColor: isDark ? '#1F2430' : '#E2E8F0',
+                  }}>
+                    <TouchableOpacity onPress={() => setCurrentView('live_order_help')} style={{ paddingRight: 14 }}>
+                      <Text style={{ fontSize: 22, color: isDark ? '#FFFFFF' : '#0F172A', fontWeight: 'bold' }}>←</Text>
+                    </TouchableOpacity>
+                    <Text style={{ fontSize: 17, fontWeight: '800', color: isDark ? '#FFFFFF' : '#0F172A', flex: 1 }}>
+                      पिकअप ओटीपी समस्या
+                    </Text>
+                  </View>
+
+                  <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ padding: 18, paddingBottom: 30 }}>
+                    {/* Restaurant Live Location Info Card */}
+                    <View style={{
+                      backgroundColor: isDark ? '#1E293B' : '#EFF6FF',
+                      borderRadius: 16,
+                      padding: 18,
+                      borderWidth: 1.5,
+                      borderColor: '#3B82F6',
+                      marginBottom: 16,
+                    }}>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8 }}>
+                        <Text style={{ fontSize: 20, marginRight: 8 }}>🏪</Text>
+                        <Text style={{ fontSize: 18, fontWeight: '800', color: isDark ? '#FFFFFF' : '#1E40AF' }}>
+                          {activeOrder?.restaurantName || activeOrder?.storeName || 'Partner Restaurant'}
+                        </Text>
+                      </View>
+                      <Text style={{ fontSize: 13, color: isDark ? '#94A3B8' : '#64748B', marginBottom: 12 }}>
+                        📍 {activeOrder?.pickupAddress || activeOrder?.restaurantAddress || 'Real Pickup Address'}
+                      </Text>
+
+                      {/* Real Distance Badge */}
+                      <View style={{
+                        backgroundColor: isWithin10m ? '#DCFCE7' : '#FEF3C7',
+                        padding: 12,
+                        borderRadius: 10,
+                        borderWidth: 1,
+                        borderColor: isWithin10m ? '#22C55E' : '#F59E0B',
+                        flexDirection: 'row',
+                        alignItems: 'center',
+                      }}>
+                        <Text style={{ fontSize: 22, marginRight: 10 }}>{isWithin10m ? '✅' : '📍'}</Text>
+                        <View style={{ flex: 1 }}>
+                          <Text style={{ fontSize: 14, fontWeight: '900', color: isWithin10m ? '#15803D' : '#B45309' }}>
+                            दूरी: {realMeters} मीटर (Real-Time Distance)
+                          </Text>
+                          <Text style={{ fontSize: 12, color: isWithin10m ? '#166534' : '#92400E', marginTop: 2 }}>
+                            {isWithin10m
+                              ? 'आप रेस्टोरेंट के 10 मीटर के दायरे में हैं।'
+                              : 'कृपया रेस्टोरेंट के 10 मीटर पास जाएँ (Please go within 10 meter distance of restaurant).'}
+                          </Text>
+                        </View>
+                      </View>
+                    </View>
+
+                    {/* Geofence Rule Notice */}
+                    <View style={{
+                      backgroundColor: isDark ? '#181A20' : '#F8FAFC',
+                      padding: 14,
+                      borderRadius: 12,
+                      borderWidth: 1,
+                      borderColor: isDark ? '#334155' : '#CBD5E1',
+                      marginBottom: 20,
+                    }}>
+                      <Text style={{ fontSize: 13, fontWeight: '700', color: isDark ? '#F1F5F9' : '#334155', lineHeight: 20 }}>
+                        ⚠️ नियम: पिकअप ओटीपी केवल तभी सत्यापित होगा जब आप रेस्टोरेंट के 10 मीटर की दूरी पर स्थित हों।
+                      </Text>
+                    </View>
+
+                    {/* Action 1: Call Restaurant */}
+                    {activeOrder?.restaurantPhone && (
+                      <TouchableOpacity
+                        style={{
+                          backgroundColor: '#2563EB',
+                          paddingVertical: 14,
+                          borderRadius: 12,
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          flexDirection: 'row',
+                          marginBottom: 12,
+                        }}
+                        onPress={() => Linking.openURL(`tel:${activeOrder.restaurantPhone}`)}
+                        activeOpacity={0.8}
+                      >
+                        <Text style={{ fontSize: 18, color: '#FFFFFF', marginRight: 8 }}>📞</Text>
+                        <Text style={{ color: '#FFFFFF', fontSize: 15, fontWeight: '800' }}>
+                          रेस्टोरेंट को कॉल करें ({activeOrder.restaurantPhone})
+                        </Text>
+                      </TouchableOpacity>
+                    )}
+
+                    {/* Action 2: Support OTP Bypass */}
+                    <TouchableOpacity
+                      style={{
+                        backgroundColor: '#16A34A',
+                        paddingVertical: 14,
+                        borderRadius: 12,
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        flexDirection: 'row',
+                        marginBottom: 12,
+                      }}
+                      onPress={() => {
+                        setSelectedDenialReason({
+                          id: 'pickup_otp_problem',
+                          title: 'पिकअप ओटीपी समस्या (Bypass Request)',
+                          desc: `Rider at ${realMeters}m from store. Merchant OTP unreachable.`,
+                        });
+                        handleSubmitOrderTicket();
+                      }}
+                      activeOpacity={0.8}
+                    >
+                      <Text style={{ fontSize: 18, color: '#FFFFFF', marginRight: 8 }}>🎧</Text>
+                      <Text style={{ color: '#FFFFFF', fontSize: 15, fontWeight: '800' }}>
+                        सपोर्ट से ओटीपी बाईपास अनुरोध करें
+                      </Text>
+                    </TouchableOpacity>
+                  </ScrollView>
+                </View>
+              );
+            })()}
+
+            {/* ══════════════════════════════════════════════════════════════════════════
+                SCREEN 2: RESTAURANT CLOSED (Call Restaurant & Transfer Order)
+               ══════════════════════════════════════════════════════════════════════════ */}
+            {currentView === 'restaurant_closed_screen' && (
+              <View style={{ flex: 1, backgroundColor: isDark ? '#000000' : '#FFFFFF' }}>
+                {/* Header */}
+                <View style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  paddingHorizontal: 16,
+                  paddingTop: Platform.OS === 'android' ? (StatusBar.currentHeight || 28) + 12 : 16,
+                  paddingBottom: 14,
+                  borderBottomWidth: 1,
+                  borderBottomColor: isDark ? '#1F2430' : '#E2E8F0',
+                }}>
+                  <TouchableOpacity onPress={() => setCurrentView('live_order_help')} style={{ paddingRight: 14 }}>
+                    <Text style={{ fontSize: 22, color: isDark ? '#FFFFFF' : '#0F172A', fontWeight: 'bold' }}>←</Text>
+                  </TouchableOpacity>
+                  <Text style={{ fontSize: 17, fontWeight: '800', color: isDark ? '#FFFFFF' : '#0F172A', flex: 1 }}>
+                    रेस्टोरेंट बंद है
+                  </Text>
+                </View>
+
+                <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ padding: 18, paddingBottom: 30 }}>
+                  <View style={{
+                    backgroundColor: isDark ? '#1E293B' : '#FEF2F2',
+                    borderRadius: 16,
+                    padding: 18,
+                    borderWidth: 1.5,
+                    borderColor: '#EF4444',
+                    marginBottom: 20,
+                  }}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 6 }}>
+                      <Text style={{ fontSize: 24, marginRight: 8 }}>🔒</Text>
+                      <Text style={{ fontSize: 18, fontWeight: '800', color: isDark ? '#FFFFFF' : '#DC2626' }}>
+                        {activeOrder?.restaurantName || activeOrder?.storeName || 'Partner Restaurant'}
+                      </Text>
+                    </View>
+                    <Text style={{ fontSize: 13, color: isDark ? '#94A3B8' : '#7F1D1D', marginBottom: 12 }}>
+                      📍 {activeOrder?.pickupAddress || activeOrder?.restaurantAddress || 'Store Location'}
+                    </Text>
+                    <Text style={{ fontSize: 13, color: isDark ? '#FCA5A5' : '#B91C1C', fontWeight: '700' }}>
+                      यदि रेस्टोरेंट बंद पाया गया है, तो पुष्टि के लिए कृपया पहले स्टोर को कॉल करें।
+                    </Text>
+                  </View>
+
+                  {/* Button 1: Call to Restaurant */}
+                  <TouchableOpacity
+                    style={{
+                      backgroundColor: '#2563EB',
+                      paddingVertical: 14,
+                      borderRadius: 12,
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      flexDirection: 'row',
+                      marginBottom: 14,
+                    }}
+                    onPress={() => {
+                      const ph = activeOrder?.restaurantPhone || activeOrder?.supplierPhone || '1800123456';
+                      Linking.openURL(`tel:${ph}`);
+                    }}
+                    activeOpacity={0.8}
+                  >
+                    <Text style={{ fontSize: 18, color: '#FFFFFF', marginRight: 8 }}>📞</Text>
+                    <Text style={{ color: '#FFFFFF', fontSize: 15, fontWeight: '800' }}>
+                      Call to Restaurant (रेस्टोरेंट को कॉल करें)
+                    </Text>
+                  </TouchableOpacity>
+
+                  {/* Button 2: Report Closed & Transfer Order */}
+                  <TouchableOpacity
+                    style={{
+                      backgroundColor: '#DC2626',
+                      paddingVertical: 14,
+                      borderRadius: 12,
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      flexDirection: 'row',
+                      marginBottom: 14,
+                    }}
+                    onPress={() => {
+                      setSelectedDenialReason({
+                        id: 'restaurant_closed',
+                        title: 'रेस्टोरेंट बंद है',
+                        desc: 'Verified store is shut / locked down at pickup point',
+                      });
+                      setCurrentView('denial_confirm');
+                    }}
+                    activeOpacity={0.8}
+                  >
+                    <Text style={{ fontSize: 18, color: '#FFFFFF', marginRight: 8 }}>🚫</Text>
+                    <Text style={{ color: '#FFFFFF', fontSize: 15, fontWeight: '800' }}>
+                      बंद होने की पुष्टि करें व ऑर्डर ट्रांसफर करें (₹0 Penalty)
+                    </Text>
+                  </TouchableOpacity>
+                </ScrollView>
+              </View>
+            )}
+
+            {/* ══════════════════════════════════════════════════════════════════════════
+                SCREEN 3: RESTAURANT NOT FOUND (Real Location & Navigation Icon)
+               ══════════════════════════════════════════════════════════════════════════ */}
+            {currentView === 'restaurant_not_found_screen' && (() => {
+              const rLat = Number(activeOrder?.restaurantLocation?.latitude || activeOrder?.pickupLat || activeOrder?.pickupLocation?.latitude || 0);
+              const rLon = Number(activeOrder?.restaurantLocation?.longitude || activeOrder?.pickupLon || activeOrder?.pickupLocation?.longitude || 0);
+              const storeAddress = activeOrder?.pickupAddress || activeOrder?.restaurantAddress || 'Store GPS Coordinates';
+
+              return (
+                <View style={{ flex: 1, backgroundColor: isDark ? '#000000' : '#FFFFFF' }}>
+                  {/* Header */}
+                  <View style={{
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    paddingHorizontal: 16,
+                    paddingTop: Platform.OS === 'android' ? (StatusBar.currentHeight || 28) + 12 : 16,
+                    paddingBottom: 14,
+                    borderBottomWidth: 1,
+                    borderBottomColor: isDark ? '#1F2430' : '#E2E8F0',
+                  }}>
+                    <TouchableOpacity onPress={() => setCurrentView('live_order_help')} style={{ paddingRight: 14 }}>
+                      <Text style={{ fontSize: 22, color: isDark ? '#FFFFFF' : '#0F172A', fontWeight: 'bold' }}>←</Text>
+                    </TouchableOpacity>
+                    <Text style={{ fontSize: 17, fontWeight: '800', color: isDark ? '#FFFFFF' : '#0F172A', flex: 1 }}>
+                      रेस्टोरेंट नहीं मिल रहा है
+                    </Text>
+                  </View>
+
+                  <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ padding: 18, paddingBottom: 30 }}>
+                    {/* Real Location Card with Navigation Icon */}
+                    <View style={{
+                      backgroundColor: isDark ? '#1E293B' : '#F0FDF4',
+                      borderRadius: 16,
+                      padding: 18,
+                      borderWidth: 1.5,
+                      borderColor: '#16A34A',
+                      marginBottom: 20,
+                    }}>
+                      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                        <Text style={{ fontSize: 18, fontWeight: '800', color: isDark ? '#FFFFFF' : '#15803D' }}>
+                          {activeOrder?.restaurantName || activeOrder?.storeName || 'Partner Restaurant'}
+                        </Text>
+                        {/* High Visibility Navigation Icon */}
+                        <TouchableOpacity
+                          style={{
+                            backgroundColor: '#0066FF',
+                            width: 44,
+                            height: 44,
+                            borderRadius: 22,
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            shadowColor: '#0066FF',
+                            shadowOffset: { width: 0, height: 2 },
+                            shadowOpacity: 0.3,
+                            shadowRadius: 4,
+                            elevation: 4,
+                          }}
+                          onPress={() => {
+                            const url = Platform.select({
+                              ios: `maps:0,0?q=${rLat},${rLon}`,
+                              android: `geo:${rLat},${rLon}?q=${rLat},${rLon}(${encodeURIComponent(activeOrder?.restaurantName || 'Restaurant')})`,
+                            });
+                            if (url) Linking.openURL(url).catch(() => Linking.openURL(`https://www.google.com/maps/search/?api=1&query=${rLat},${rLon}`));
+                          }}
+                          activeOpacity={0.8}
+                        >
+                          <Text style={{ fontSize: 22, color: '#FFFFFF' }}>↗️</Text>
+                        </TouchableOpacity>
+                      </View>
+
+                      <Text style={{ fontSize: 14, color: isDark ? '#E2E8F0' : '#166534', fontWeight: '700', marginBottom: 6 }}>
+                        📍 असली रेस्टोरेंट लोकेशन (Real Coordinates):
+                      </Text>
+                      <Text style={{ fontSize: 13, color: isDark ? '#94A3B8' : '#4B5563', lineHeight: 18, marginBottom: 8 }}>
+                        {storeAddress}
+                      </Text>
+                      <Text style={{ fontSize: 12, color: '#2563EB', fontWeight: '700' }}>
+                        Lat: {Number(rLat).toFixed(5)}, Lon: {Number(rLon).toFixed(5)}
+                      </Text>
+                    </View>
+
+                    {/* Turn-by-Turn Navigation Map Button */}
+                    <TouchableOpacity
+                      style={{
+                        backgroundColor: '#0066FF',
+                        paddingVertical: 14,
+                        borderRadius: 12,
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        flexDirection: 'row',
+                        marginBottom: 14,
+                      }}
+                      onPress={() => {
+                        const url = `https://www.google.com/maps/dir/?api=1&destination=${rLat},${rLon}`;
+                        Linking.openURL(url);
+                      }}
+                      activeOpacity={0.8}
+                    >
+                      <Text style={{ fontSize: 20, color: '#FFFFFF', marginRight: 8 }}>🧭</Text>
+                      <Text style={{ color: '#FFFFFF', fontSize: 15, fontWeight: '800' }}>
+                        नेविगेशन खोलें (Open Live Navigation)
+                      </Text>
+                    </TouchableOpacity>
+
+                    {/* Call Restaurant */}
+                    {activeOrder?.restaurantPhone && (
+                      <TouchableOpacity
+                        style={{
+                          backgroundColor: '#16A34A',
+                          paddingVertical: 14,
+                          borderRadius: 12,
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          flexDirection: 'row',
+                          marginBottom: 14,
+                        }}
+                        onPress={() => Linking.openURL(`tel:${activeOrder.restaurantPhone}`)}
+                        activeOpacity={0.8}
+                      >
+                        <Text style={{ fontSize: 18, color: '#FFFFFF', marginRight: 8 }}>📞</Text>
+                        <Text style={{ color: '#FFFFFF', fontSize: 15, fontWeight: '800' }}>
+                          दिशा पूछने के लिए कॉल करें ({activeOrder.restaurantPhone})
+                        </Text>
+                      </TouchableOpacity>
+                    )}
+
+                    {/* Cannot Find -> Order Transfer */}
+                    <TouchableOpacity
+                      style={{
+                        backgroundColor: isDark ? '#1F2430' : '#F1F5F9',
+                        paddingVertical: 14,
+                        borderRadius: 12,
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        borderWidth: 1,
+                        borderColor: isDark ? '#334155' : '#CBD5E1',
+                      }}
+                      onPress={() => {
+                        setSelectedDenialReason({
+                          id: 'restaurant_not_found',
+                          title: 'रेस्टोरेंट नहीं मिल रहा है',
+                          desc: 'Location unverified / merchant untraceable',
+                        });
+                        setCurrentView('denial_confirm');
+                      }}
+                      activeOpacity={0.8}
+                    >
+                      <Text style={{ color: '#EF4444', fontSize: 14, fontWeight: '800' }}>
+                        अभी भी नहीं मिला? ऑर्डर ट्रांसफर करें (₹0 Penalty)
+                      </Text>
+                    </TouchableOpacity>
+                  </ScrollView>
+                </View>
+              );
+            })()}
+
+            {/* ══════════════════════════════════════════════════════════════════════════
+                VIEW 3: ID CARD & BILL (Real MongoDB Data)
+               ══════════════════════════════════════════════════════════════════════════ */}
+            {currentView === 'id_card_bill' && (
+              <View style={{ flex: 1, backgroundColor: '#0B0F19' }}>
+                {/* Header */}
+                <View style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  paddingHorizontal: 16,
+                  paddingTop: Platform.OS === 'android' ? (StatusBar.currentHeight || 28) + 12 : 16,
+                  paddingBottom: 14,
+                  borderBottomWidth: 1,
+                  borderBottomColor: '#1E293B',
+                }}>
+                  <TouchableOpacity onPress={() => setCurrentView('main')} style={{ paddingRight: 8 }}>
+                    <Text style={{ fontSize: 22, color: '#FFFFFF', fontWeight: 'bold' }}>←</Text>
+                  </TouchableOpacity>
+                  <Text style={{ fontSize: 17, fontWeight: '800', color: '#FFFFFF', flex: 1, textAlign: 'center' }}>
+                    आईडी कार्ड और बिल दिखाएं
+                  </Text>
+                  <TouchableOpacity onPress={onClose} style={{ paddingLeft: 8 }}>
+                    <Text style={{ fontSize: 20, fontWeight: '700', color: '#94A3B8' }}>✕</Text>
+                  </TouchableOpacity>
+                </View>
+
+                <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ padding: 16, paddingBottom: 36 }}>
+                  {/* ── CARD 1: DIGITAL RIDER ID CARD ── */}
+                  <View style={{
+                    backgroundColor: '#1E293B',
+                    borderRadius: 18,
+                    padding: 18,
+                    borderWidth: 1.5,
+                    borderColor: '#3B82F6',
+                    marginBottom: 20,
+                    shadowColor: '#000',
+                    shadowOffset: { width: 0, height: 4 },
+                    shadowOpacity: 0.3,
+                    shadowRadius: 8,
+                    elevation: 6,
+                  }}>
+                    {/* Header Strip */}
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+                      <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                        <Text style={{ fontSize: 16, marginRight: 6 }}>🛵</Text>
+                        <Text style={{ color: '#60A5FA', fontSize: 12, fontWeight: '900', letterSpacing: 1 }}>
+                          RIDEHUB OFFICIAL PARTNER
+                        </Text>
+                      </View>
+                      <View style={{ backgroundColor: '#16A34A', paddingHorizontal: 10, paddingVertical: 3, borderRadius: 8 }}>
+                        <Text style={{ color: '#FFFFFF', fontSize: 10, fontWeight: '900' }}>VERIFIED ACTIVE</Text>
+                      </View>
+                    </View>
+
+                    {/* Rider Info Row */}
+                    <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 14 }}>
+                      <View style={{
+                        width: 58,
+                        height: 58,
+                        borderRadius: 29,
+                        backgroundColor: '#3B82F6',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        borderWidth: 2,
+                        borderColor: '#60A5FA',
+                        marginRight: 14,
+                      }}>
+                        <Text style={{ fontSize: 26 }}>🚴</Text>
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Text style={{ color: '#FFFFFF', fontSize: 18, fontWeight: '800' }}>
+                          {riderUser?.name || riderUser?.fullName || 'RideHub Delivery Partner'}
+                        </Text>
+                        <Text style={{ color: '#94A3B8', fontSize: 12, marginTop: 2 }}>
+                          ID: RH-{String(riderUser?._id || '9760').slice(-6).toUpperCase()}
+                        </Text>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 4 }}>
+                          <Text style={{ color: '#FBBF24', fontSize: 12, fontWeight: '800', marginRight: 8 }}>
+                            ⭐ 4.9 Rating
+                          </Text>
+                          <Text style={{ color: '#22C55E', fontSize: 12, fontWeight: '700' }}>
+                            ● Verified Partner
+                          </Text>
+                        </View>
+                      </View>
+                    </View>
+
+                    {/* Detail Grid */}
+                    <View style={{
+                      backgroundColor: '#0F172A',
+                      borderRadius: 12,
+                      padding: 12,
+                      flexDirection: 'row',
+                      justifyContent: 'space-between',
+                    }}>
+                      <View style={{ flex: 1 }}>
+                        <Text style={{ color: '#64748B', fontSize: 11, fontWeight: '700' }}>MOBILE</Text>
+                        <Text style={{ color: '#F8FAFC', fontSize: 13, fontWeight: '800', marginTop: 2 }}>
+                          {riderUser?.phone || riderUser?.phoneNumber || '9760XXXXXX'}
+                        </Text>
+                      </View>
+                      <View style={{ width: 1, backgroundColor: '#334155', marginHorizontal: 8 }} />
+                      <View style={{ flex: 1 }}>
+                        <Text style={{ color: '#64748B', fontSize: 11, fontWeight: '700' }}>VEHICLE</Text>
+                        <Text style={{ color: '#F8FAFC', fontSize: 13, fontWeight: '800', marginTop: 2 }}>
+                          {riderUser?.vehicleNumber || 'MP-04-XX-XXXX'}
+                        </Text>
+                      </View>
+                      <View style={{ width: 1, backgroundColor: '#334155', marginHorizontal: 8 }} />
+                      <View style={{ flex: 1 }}>
+                        <Text style={{ color: '#64748B', fontSize: 11, fontWeight: '700' }}>EMERGENCY</Text>
+                        <Text style={{ color: '#EF4444', fontSize: 13, fontWeight: '800', marginTop: 2 }}>
+                          112 (SOS)
+                        </Text>
+                      </View>
+                    </View>
+                  </View>
+
+                  {/* ── CARD 2: REAL-TIME ACTIVE ORDER BILL BREAKDOWN ── */}
+                  <View style={{
+                    backgroundColor: '#1E293B',
+                    borderRadius: 18,
+                    padding: 18,
+                    borderWidth: 1,
+                    borderColor: '#334155',
+                  }}>
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, borderBottomWidth: 1, borderBottomColor: '#334155', paddingBottom: 10 }}>
+                      <View>
+                        <Text style={{ color: '#FFFFFF', fontSize: 16, fontWeight: '800' }}>
+                          🧾 सक्रिय ऑर्डर बिल (Live Bill)
+                        </Text>
+                        <Text style={{ color: '#94A3B8', fontSize: 12, marginTop: 2 }}>
+                          ऑर्डर #{String(activeOrder?.bookingId || activeOrder?._id || 'N/A').slice(-6)}
+                        </Text>
+                      </View>
+                      <View style={{ backgroundColor: '#22C55E20', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6 }}>
+                        <Text style={{ color: '#22C55E', fontSize: 11, fontWeight: '800' }}>ONLINE PAID</Text>
+                      </View>
+                    </View>
+
+                    {activeOrder ? (
+                      <>
+                        {/* Store & Customer Info */}
+                        <View style={{ marginBottom: 14 }}>
+                          <Text style={{ color: '#94A3B8', fontSize: 11, fontWeight: '700' }}>STORE / PARTNER</Text>
+                          <Text style={{ color: '#FFFFFF', fontSize: 15, fontWeight: '800', marginTop: 1 }}>
+                            {activeOrder?.restaurantName || activeOrder?.storeName || 'Partner Store'}
+                          </Text>
+                          <Text style={{ color: '#64748B', fontSize: 12, marginTop: 1 }}>
+                            {activeOrder?.pickupAddress || activeOrder?.restaurantAddress || 'Store Location'}
+                          </Text>
+                        </View>
+
+                        <View style={{ marginBottom: 14 }}>
+                          <Text style={{ color: '#94A3B8', fontSize: 11, fontWeight: '700' }}>CUSTOMER</Text>
+                          <Text style={{ color: '#FFFFFF', fontSize: 15, fontWeight: '800', marginTop: 1 }}>
+                            {activeOrder?.customerName || activeOrder?.userName || 'Customer'}
+                          </Text>
+                          <Text style={{ color: '#64748B', fontSize: 12, marginTop: 1 }}>
+                            {activeOrder?.dropAddress || activeOrder?.customerAddress || 'Customer Drop Address'}
+                          </Text>
+                        </View>
+
+                        {/* Items Breakdown */}
+                        <View style={{ borderTopWidth: 1, borderTopColor: '#334155', paddingTop: 10, marginBottom: 12 }}>
+                          <Text style={{ color: '#94A3B8', fontSize: 11, fontWeight: '700', marginBottom: 8 }}>ORDER ITEMS</Text>
+                          {Array.isArray(activeOrder?.items || activeOrder?.cartItems) && (activeOrder?.items || activeOrder?.cartItems).length > 0 ? (
+                            (activeOrder.items || activeOrder.cartItems).map((it: any, idx: number) => (
+                              <View key={idx} style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 6 }}>
+                                <Text style={{ color: '#F8FAFC', fontSize: 13, flex: 1 }}>
+                                  {it.quantity || it.qty || 1}x {it.name || it.title || 'Item'}
+                                </Text>
+                                <Text style={{ color: '#F8FAFC', fontSize: 13, fontWeight: '700' }}>
+                                  ₹{it.price || it.amount || 0}
+                                </Text>
+                              </View>
+                            ))
+                          ) : (
+                            <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 6 }}>
+                              <Text style={{ color: '#F8FAFC', fontSize: 13 }}>1x Standard Delivery Package</Text>
+                              <Text style={{ color: '#F8FAFC', fontSize: 13, fontWeight: '700' }}>
+                                ₹{activeOrder?.totalAmount || activeOrder?.price || 0}
+                              </Text>
+                            </View>
+                          )}
+                        </View>
+
+                        {/* Bill Summary */}
+                        <View style={{ borderTopWidth: 1, borderTopColor: '#334155', paddingTop: 10 }}>
+                          <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 }}>
+                            <Text style={{ color: '#94A3B8', fontSize: 12 }}>Items Subtotal</Text>
+                            <Text style={{ color: '#F8FAFC', fontSize: 12, fontWeight: '700' }}>
+                              ₹{Math.max(0, Number(activeOrder?.totalAmount || activeOrder?.price || 0) - 40)}
+                            </Text>
+                          </View>
+                          <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 }}>
+                            <Text style={{ color: '#94A3B8', fontSize: 12 }}>Delivery & Platform Partner Fee</Text>
+                            <Text style={{ color: '#F8FAFC', fontSize: 12, fontWeight: '700' }}>₹40</Text>
+                          </View>
+                          <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 6, paddingTop: 6, borderTopWidth: 1, borderTopColor: '#334155' }}>
+                            <Text style={{ color: '#FFFFFF', fontSize: 15, fontWeight: '800' }}>कुल राशि (Total Amount)</Text>
+                            <Text style={{ color: '#22C55E', fontSize: 18, fontWeight: '900' }}>
+                              ₹{activeOrder?.totalAmount || activeOrder?.price || 0}
+                            </Text>
+                          </View>
+                          <View style={{ marginTop: 8, backgroundColor: '#0F172A', padding: 8, borderRadius: 8 }}>
+                            <Text style={{ color: '#22C55E', fontSize: 11, fontWeight: '700', textAlign: 'center' }}>
+                              ✅ 100% प्रीपेड ऑनलाइन भुगतान प्राप्त (COD पूर्णतः बंद है)
+                            </Text>
+                          </View>
+                        </View>
+                      </>
+                    ) : (
+                      <View style={{ paddingVertical: 20, alignItems: 'center' }}>
+                        <Text style={{ fontSize: 32, marginBottom: 8 }}>📦</Text>
+                        <Text style={{ color: '#FFFFFF', fontSize: 14, fontWeight: '700' }}>
+                          वर्तमान में कोई सक्रिय ऑर्डर नहीं है
+                        </Text>
+                        <Text style={{ color: '#94A3B8', fontSize: 12, marginTop: 4, textAlign: 'center' }}>
+                          बिल केवल ऑर्डर स्वीकार करने और डिलीवरी यात्रा के दौरान उपलब्ध होता है।
+                        </Text>
+                      </View>
+                    )}
+                  </View>
+                </ScrollView>
+              </View>
+            )}
             {/* ══════════════════════════════════════════════════════════════════════════
                 VIEW 2: HELP CENTER CATEGORIES (Image 2 - 12 Interactive Items)
                ══════════════════════════════════════════════════════════════════════════ */}
@@ -1624,7 +2656,7 @@ export const RiderHelpModal: React.FC<RiderHelpModalProps> = ({
                ══════════════════════════════════════════════════════════════════════════ */}
             {currentView === 'denial_reasons' && (
               <>
-                {renderHeader('Select Denial Reason', () => setCurrentView('main'))}
+                {renderHeader(t('denyOrder') || 'ऑर्डर अस्वीकार करें', () => setCurrentView('live_order_help'))}
 
                 <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ padding: 14, paddingBottom: 24 }}>
                   <View style={[styles.denialHeaderBox, { backgroundColor: isDark ? '#0F172A' : '#EFF6FF' }]}>
@@ -1658,7 +2690,7 @@ export const RiderHelpModal: React.FC<RiderHelpModalProps> = ({
                ══════════════════════════════════════════════════════════════════════════ */}
             {currentView === 'denial_confirm' && selectedDenialReason && (
               <>
-                {renderHeader('Confirm Rejection', () => setCurrentView('denial_reasons'))}
+                {renderHeader(t('confirmRejection') || 'अस्वीकृति की पुष्टि करें', () => setCurrentView('denial_reasons'))}
 
                 <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ padding: 14, paddingBottom: 24 }}>
                   <View style={[styles.denialConfirmBox, { backgroundColor: isDark ? '#0F172A' : '#EFF6FF' }]}>

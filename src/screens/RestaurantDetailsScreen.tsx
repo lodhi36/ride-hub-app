@@ -42,15 +42,13 @@ const RestaurantDetailsScreen = ({ route, navigation }: any) => {
   useEffect(() => {
     const getCustId = async () => {
       try {
-        const uData = await AsyncStorage.getItem('userData');
-        if (uData) {
-          const parsed = JSON.parse(uData);
-          if (parsed?._id || parsed?.id) setCustomerId(String(parsed._id || parsed.id));
-        }
         const cSession = await AsyncStorage.getItem('customerUser');
         if (cSession) {
           const parsed = JSON.parse(cSession);
-          if (parsed?._id || parsed?.id) setCustomerId(String(parsed._id || parsed.id));
+          const role = String(parsed?.role || 'customer').toLowerCase();
+          if (['customer', 'user'].includes(role) && (parsed?._id || parsed?.id)) {
+            setCustomerId(String(parsed._id || parsed.id));
+          }
         }
       } catch (e) {}
     };

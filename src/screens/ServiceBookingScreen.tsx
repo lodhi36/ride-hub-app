@@ -19,7 +19,7 @@ import {
 import Icon from '../components/PngIcon';
 import { useSocket } from '../context/SocketContext';
 import { rideStore, RideRequestData } from '../services/rideStore';
-import { BASE_URL, DEFAULT_INDIA_LAT, DEFAULT_INDIA_LON, LOCATIONIQ_KEY } from '../config/apiConfig';
+import { BASE_URL, LOCATIONIQ_KEY } from '../config/apiConfig';
 import Geolocation from 'react-native-geolocation-service';
 import { useAuth } from '../context/AuthContext';
 import { useTheme } from '../context/ThemeContext';
@@ -45,7 +45,7 @@ const ServiceBookingScreen: React.FC<ServiceBookingScreenProps> = ({ route, navi
   const [locationTitle, setLocationTitle] = useState('Fetching Location...');
   const [locationSubtitle, setLocationSubtitle] = useState('Please wait...');
   const [coords, setCoords] = useState({ latitude: 0, longitude: 0 });
-  const [mapCenter, setMapCenter] = useState({ latitude: DEFAULT_INDIA_LAT, longitude: DEFAULT_INDIA_LON });
+  const [mapCenter, setMapCenter] = useState<{ latitude: number; longitude: number } | null>(null);
   const [mapZoom, setMapZoom] = useState(5);
   const [specialInstructions, setSpecialInstructions] = useState('');
   const [loadingLocation, setLoadingLocation] = useState(true);
@@ -309,8 +309,8 @@ const ServiceBookingScreen: React.FC<ServiceBookingScreenProps> = ({ route, navi
       <div id="map"></div>
       <script>
         var hasValidCoords = Boolean(${Boolean(coords.latitude && coords.longitude && coords.latitude > 0 && coords.longitude > 0)});
-        var lat = ${coords.latitude || DEFAULT_INDIA_LAT};
-        var lon = ${coords.longitude || DEFAULT_INDIA_LON};
+        var lat = ${coords.latitude || 0};
+        var lon = ${coords.longitude || 0};
         var zoom = 15;
         var map = L.map('map', { zoomControl: false, attributionControl: false }).setView([lat, lon], zoom);
 

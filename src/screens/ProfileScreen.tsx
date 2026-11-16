@@ -1,4 +1,5 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
+import { useFocusEffect } from '@react-navigation/native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
   Dimensions,
@@ -17,6 +18,7 @@ import {
   Switch,
 } from 'react-native';
 import { PermissionsAndroid } from 'react-native';
+import { WebView } from 'react-native-webview';
 import Geolocation from 'react-native-geolocation-service';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as ImagePicker from 'react-native-image-picker';
@@ -25,6 +27,9 @@ import { PngIcon } from '../components/PngIcon';
 import { useAuth } from '../context/AuthContext';
 import { useSocket } from '../context/SocketContext';
 import api, { UPLOADS_URL } from '../services/api';
+import { resolveUploadUrl } from '../config/apiConfig';
+import { LottieAnimation } from '../components/LottieAnimation';
+import { reverseGeocodeCoords } from '../services/LocationAddressService';
 import AddressSelectionModal from '../components/AddressSelectionModal';
 import { CartService } from '../services/CartService';
 import { getSellerCategoryType, getCategoryTerminology } from './RiderHomeScreen';
@@ -76,14 +81,422 @@ const ProfileScreen = ({ navigation, route }: any) => {
   // ProfileScreen in Ride Hub is strictly the Supplier / Store management profile
   const isSupplier = true;
 
+  // ── SPEC PART 2 & 3: PERMANENT STORE LOCATION STATE & HANDLERS ──
+  const [confirmLocationModalVisible, setConfirmLocationModalVisible] = useState(false);
+  const [pendingLocationData, setPendingLocationData] = useState<{
+    latitude: number;
+    longitude: number;
+    formattedAddress: string;
+    accuracy: number;
+  } | null>(null);
+  const [confirmingLocation, setConfirmingLocation] = useState(false);
+
+  const handleStartConfirmPermanentLocation = async () => {
+    try {
+      if (Platform.OS === 'android') {
+        const granted = await PermissionsAndroid.request(
+          PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION
+        );
+        if (granted !== PermissionsAndroid.RESULTS.GRANTED) {
+          Alert.alert('Permission Denied', 'GPS Location permission is required to detect your permanent store coordinates.');
+          return;
+        }
+      }
+
+      setConfirmingLocation(true);
+      Geolocation.getCurrentPosition(
+        async (position) => {
+          try {
+            if (!position || !position.coords) {
+              setConfirmingLocation(false);
+              Alert.alert('Location Error', 'Could not obtain GPS fix. Please ensure device location is enabled.');
+              return;
+            }
+            const { latitude, longitude, accuracy } = position.coords;
+
+            // Strict Zero Dummy validation
+            if (!latitude || !longitude || (Math.abs(latitude - 23.2505) < 0.0001 && Math.abs(longitude - 77.4065) < 0.0001)) {
+              setConfirmingLocation(false);
+              Alert.alert('Invalid GPS Fix', 'Dummy or default coordinates detected. Please ensure live device GPS is active.');
+              return;
+            }
+
+            const addr = await reverseGeocodeCoords(latitude, longitude);
+            setPendingLocationData({
+              latitude,
+              longitude,
+              formattedAddress: addr || `Lat: ${latitude.toFixed(5)}, Lon: ${longitude.toFixed(5)}`,
+              accuracy: Math.round(accuracy || 5),
+            });
+            setConfirmingLocation(false);
+            setConfirmLocationModalVisible(true);
+          } catch (posErr: any) {
+            setConfirmingLocation(false);
+            Alert.alert('Error', posErr.message || 'Failed to resolve location address.');
+          }
+        },
+        (error) => {
+          setConfirmingLocation(false);
+          Alert.alert('GPS Error', error.message || 'Unable to retrieve device GPS coordinates.');
+        },
+        { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
+      );
+    } catch (e: any) {
+      setConfirmingLocation(false);
+      Alert.alert('Error', e.message || 'Could not initiate GPS detection.');
+    }
+  };
+
+  const handleSavePermanentLocation = async () => {
+    if (!pendingLocationData) return;
+    try {
+      setConfirmingLocation(true);
+      const res = await api.post('/profile/supplier-permanent-location', {
+        latitude: pendingLocationData.latitude,
+        longitude: pendingLocationData.longitude,
+        formattedAddress: pendingLocationData.formattedAddress,
+        accuracy: pendingLocationData.accuracy,
+        isConfirmed: true,
+      });
+
+      if (res.data && res.data.success) {
+        setProfile((prev: any) => ({
+          ...(prev || {}),
+          permanentStoreLocation: res.data.permanentStoreLocation,
+          location: pendingLocationData.formattedAddress,
+          businessAddress: pendingLocationData.formattedAddress,
+        }));
+        setConfirmLocationModalVisible(false);
+        Alert.alert(
+          'Permanent Store Location Locked ✓',
+          'Your physical store coordinates are permanently locked in Ride Hub. They will never change when you travel or re-login.'
+        );
+      } else {
+        Alert.alert('Failed', res.data?.message || 'Could not lock store location.');
+      }
+    } catch (err: any) {
+      Alert.alert('Error', err.response?.data?.message || err.message || 'Server error saving store location.');
+    } finally {
+      setConfirmingLocation(false);
+    }
+  };
+
+  // ── SPEC PART 8: 3 STORE PHOTOS SHOWCASE STATE & HANDLERS ──
+  const [showcaseSlots, setShowcaseSlots] = useState<{ uri?: string; url?: string; caption?: string }[]>([
+    { caption: 'Store Front & Board' },
+    { caption: 'Inside Store & Ambience' },
+    { caption: 'Products & Specialties' },
+  ]);
+  const [isSavingPhotos, setIsSavingPhotos] = useState(false);
+
+  // Sync existing storePhotos on profile load
+  useEffect(() => {
+    if (profile?.storePhotos && Array.isArray(profile.storePhotos)) {
+      const isReal = (u: any) => {
+        if (!u || typeof u !== 'string') return false;
+        const s = u.toLowerCase();
+        return !s.includes('dummy') && !s.includes('sample') && !s.includes('placeholder') && !s.includes('default');
+      };
+      const p0 = profile.storePhotos[0]?.url || profile.storePhotos[0] || '';
+      const p1 = profile.storePhotos[1]?.url || profile.storePhotos[1] || '';
+      const p2 = profile.storePhotos[2]?.url || profile.storePhotos[2] || '';
+      setShowcaseSlots([
+        { url: isReal(p0) ? p0 : '', caption: 'Store Front & Board' },
+        { url: isReal(p1) ? p1 : '', caption: 'Inside Store & Ambience' },
+        { url: isReal(p2) ? p2 : '', caption: 'Products & Specialties' },
+      ]);
+    }
+  }, [profile?.storePhotos]);
+
+  const handlePickShowcasePhoto = (slotIndex: number) => {
+    Alert.alert(
+      `Showcase Photo ${slotIndex + 1}`,
+      `Select photo for ${showcaseSlots[slotIndex]?.caption || 'store showcase'}:`,
+      [
+        {
+          text: '📷 Take Camera Photo',
+          onPress: () => {
+            ImagePicker.launchCamera(
+              { mediaType: 'photo', maxWidth: 1200, maxHeight: 1200, quality: 0.8 },
+              (resp) => {
+                if (resp.assets && resp.assets[0]?.uri) {
+                  const updated = [...showcaseSlots];
+                  updated[slotIndex] = { ...updated[slotIndex], uri: resp.assets[0].uri };
+                  setShowcaseSlots(updated);
+                }
+              }
+            );
+          },
+        },
+        {
+          text: '🖼️ Choose from Gallery',
+          onPress: () => {
+            ImagePicker.launchImageLibrary(
+              { mediaType: 'photo', maxWidth: 1200, maxHeight: 1200, quality: 0.8 },
+              (resp) => {
+                if (resp.assets && resp.assets[0]?.uri) {
+                  const updated = [...showcaseSlots];
+                  updated[slotIndex] = { ...updated[slotIndex], uri: resp.assets[0].uri };
+                  setShowcaseSlots(updated);
+                }
+              }
+            );
+          },
+        },
+        { text: 'Cancel', style: 'cancel' },
+      ]
+    );
+  };
+
+  const handleRemoveShowcasePhoto = (slotIndex: number) => {
+    const updated = [...showcaseSlots];
+    updated[slotIndex] = { caption: updated[slotIndex]?.caption || '' };
+    setShowcaseSlots(updated);
+  };
+
+  const handleSaveAll3ShowcasePhotos = async () => {
+    try {
+      setIsSavingPhotos(true);
+      const formData = new FormData();
+      let hasAnyNew = false;
+      const captions: string[] = [];
+
+      showcaseSlots.forEach((slot, idx) => {
+        captions.push(slot.caption || `Photo ${idx + 1}`);
+        if (slot.uri) {
+          hasAnyNew = true;
+          formData.append('photos', {
+            uri: slot.uri,
+            name: `store_showcase_${idx + 1}_${Date.now()}.jpg`,
+            type: 'image/jpeg',
+          } as any);
+        } else if (slot.url) {
+          // If already on server
+          formData.append('existingUrls', slot.url);
+        }
+      });
+
+      formData.append('captions', JSON.stringify(captions));
+
+      const res = await api.post('/profile/upload-store-showcase-photos', formData, {
+        headers: { 'Content-Type': 'multipart/form-data', 'X-Role': 'supplier' },
+      });
+
+      if (res.data && res.data.success) {
+        setProfile((prev: any) => ({
+          ...(prev || {}),
+          storePhotos: res.data.storePhotos,
+        }));
+        Alert.alert('Success ✓', 'Store showcase photos uploaded and saved to your profile!');
+      } else {
+        Alert.alert('Notice', res.data?.message || 'Could not upload photos.');
+      }
+    } catch (e: any) {
+      Alert.alert('Upload Error', e.response?.data?.message || e.message || 'Error uploading showcase photos.');
+    } finally {
+      setIsSavingPhotos(false);
+    }
+  };
+
+  // ── SPEC PART 9: SUPPLIER STORE JSON ANIMATION STATE & HANDLERS ──
+  const [lottieModalVisible, setLottieModalVisible] = useState(false);
+  const [lottieInputMode, setLottieInputMode] = useState<'file' | 'preset'>('file');
+  const [selectedJsonFile, setSelectedJsonFile] = useState<{
+    name: string;
+    size: number;
+    content: any;
+  } | null>(null);
+  const [customLottieInput, setCustomLottieInput] = useState('');
+  const [lottieTitleInput, setLottieTitleInput] = useState('');
+  const [isSavingLottie, setIsSavingLottie] = useState(false);
+
+  const handleJsonFileMessage = useCallback((event: any) => {
+    try {
+      const data = JSON.parse(event.nativeEvent.data);
+      if (data.type === 'FILE_PICKED') {
+        setSelectedJsonFile({
+          name: data.fileName || 'store_animation.json',
+          size: data.fileSize || 0,
+          content: data.rawJson,
+        });
+        setLottieTitleInput((prev) => (prev ? prev : (data.fileName || 'Store Showcase').replace(/\.json$/i, '')));
+      } else if (data.type === 'FILE_ERROR') {
+        Alert.alert('Invalid File', data.error || 'The selected file is not a valid JSON.');
+      }
+    } catch (e: any) {
+      Alert.alert('File Read Error', 'Failed to read file from storage.');
+    }
+  }, []);
+
+  // Curated ready-to-use 60 FPS Lottie showcase presets
+  const LOTTIE_PRESETS = [
+    {
+      title: 'Grand Welcome & Open',
+      desc: 'Welcoming customer animation with sparkling badge',
+      json: {
+        v: '5.5.7', fr: 60, ip: 0, op: 180, w: 500, h: 500, nm: 'Welcome', ddd: 0, assets: [],
+        layers: [
+          { ddd: 0, ind: 1, ty: 4, nm: 'Badge', sr: 1, ks: { o: { a: 0, k: 100 }, r: { a: 1, k: [{ t: 0, s: [0] }, { t: 180, s: [360] }] }, p: { a: 0, k: [250, 250, 0] }, a: { a: 0, k: [0, 0, 0] }, s: { a: 0, k: [100, 100, 100] } }, shapes: [{ ty: 'rc', p: { a: 0, k: [0, 0] }, s: { a: 0, k: [240, 240] }, r: { a: 0, k: 40 } }, { ty: 'fl', c: { a: 0, k: [0, 0.4, 1, 1] } }] }
+        ]
+      }
+    },
+    {
+      title: 'Hot Sale & 50% Off Offer',
+      desc: 'Pulsing promotional badge for discounts and special deals',
+      json: {
+        v: '5.5.7', fr: 60, ip: 0, op: 180, w: 500, h: 500, nm: 'Sale', ddd: 0, assets: [],
+        layers: [
+          { ddd: 0, ind: 1, ty: 4, nm: 'SaleTag', sr: 1, ks: { o: { a: 0, k: 100 }, r: { a: 0, k: 0 }, p: { a: 0, k: [250, 250, 0] }, a: { a: 0, k: [0, 0, 0] }, s: { a: 1, k: [{ t: 0, s: [90, 90, 100] }, { t: 90, s: [110, 110, 100] }, { t: 180, s: [90, 90, 100] }] } }, shapes: [{ ty: 'el', p: { a: 0, k: [0, 0] }, s: { a: 0, k: [260, 260] } }, { ty: 'fl', c: { a: 0, k: [0.95, 0.2, 0.2, 1] } }] }
+        ]
+      }
+    },
+    {
+      title: 'Super Fresh Quality Express',
+      desc: 'Quality certified badge highlighting fresh items and top hygiene',
+      json: {
+        v: '5.5.7', fr: 60, ip: 0, op: 180, w: 500, h: 500, nm: 'Fresh', ddd: 0, assets: [],
+        layers: [
+          { ddd: 0, ind: 1, ty: 4, nm: 'Quality', sr: 1, ks: { o: { a: 0, k: 100 }, r: { a: 0, k: 0 }, p: { a: 0, k: [250, 250, 0] }, a: { a: 0, k: [0, 0, 0] }, s: { a: 1, k: [{ t: 0, s: [95, 95, 100] }, { t: 90, s: [105, 105, 100] }, { t: 180, s: [95, 95, 100] }] } }, shapes: [{ ty: 'rc', p: { a: 0, k: [0, 0] }, s: { a: 0, k: [250, 250] }, r: { a: 0, k: 50 } }, { ty: 'fl', c: { a: 0, k: [0.06, 0.72, 0.5, 1] } }] }
+        ]
+      }
+    },
+    {
+      title: 'Ultra Fast Delivery',
+      desc: 'High-speed delivery motion banner for rapid dispatch',
+      json: {
+        v: '5.5.7', fr: 60, ip: 0, op: 180, w: 500, h: 500, nm: 'FastDelivery', ddd: 0, assets: [],
+        layers: [
+          { ddd: 0, ind: 1, ty: 4, nm: 'Fast', sr: 1, ks: { o: { a: 0, k: 100 }, r: { a: 0, k: 0 }, p: { a: 1, k: [{ t: 0, s: [230, 250, 0] }, { t: 90, s: [270, 250, 0] }, { t: 180, s: [230, 250, 0] }] }, a: { a: 0, k: [0, 0, 0] }, s: { a: 0, k: [100, 100, 100] } }, shapes: [{ ty: 'el', p: { a: 0, k: [0, 0] }, s: { a: 0, k: [240, 240] } }, { ty: 'fl', c: { a: 0, k: [0.96, 0.62, 0.05, 1] } }] }
+        ]
+      }
+    }
+  ];
+
+  const handleToggleLottieActive = async (newValue: boolean) => {
+    try {
+      const res = await api.post('/profile/upload-store-lottie', {
+        toggleOnly: true,
+        isActive: newValue,
+      });
+      if (res.data && res.data.success) {
+        const anim = res.data.supplierLottieAnimation;
+        setProfile((prev: any) => ({
+          ...(prev || {}),
+          supplierLottieAnimation: anim,
+        }));
+        try {
+          await AsyncStorage.setItem('cached_supplier_lottie', JSON.stringify(anim));
+          const suppUserStr = await AsyncStorage.getItem('supplierUser');
+          if (suppUserStr) {
+            const p = { ...JSON.parse(suppUserStr), supplierLottieAnimation: anim };
+            await AsyncStorage.setItem('supplierUser', JSON.stringify(p));
+          }
+        } catch (_) {}
+      }
+    } catch (e: any) {
+      Alert.alert('Error', e.message || 'Could not toggle animation.');
+    }
+  };
+
+  const handleDeleteLottie = async () => {
+    Alert.alert('Remove Animation', 'Are you sure you want to remove your store Lottie animation?', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Remove',
+        style: 'destructive',
+        onPress: async () => {
+          // 1. Instant 0ms Optimistic UI update
+          setProfile((prev: any) => ({
+            ...(prev || {}),
+            supplierLottieAnimation: null,
+          }));
+
+          // 2. Clear local storage in parallel
+          AsyncStorage.removeItem('cached_supplier_lottie').catch(() => {});
+          AsyncStorage.getItem('supplierUser').then((suppUserStr) => {
+            if (suppUserStr) {
+              const p = { ...JSON.parse(suppUserStr), supplierLottieAnimation: null };
+              AsyncStorage.setItem('supplierUser', JSON.stringify(p)).catch(() => {});
+            }
+          }).catch(() => {});
+
+          // 3. Fast backend sync
+          try {
+            await api.delete('/profile/store-lottie');
+          } catch (e: any) {
+            console.log('[DELETE LOTTIE NOTICE]', e?.message);
+          }
+        },
+      },
+    ]);
+  };
+
+  const handlePublishLottie = async (jsonContent: any, title: string) => {
+    try {
+      setIsSavingLottie(true);
+
+      // Instant optimistic UI update for instant feedback
+      const parsedDirectJson = typeof jsonContent === 'string' ? JSON.parse(jsonContent) : jsonContent;
+      const previewAnim = {
+        rawJson: parsedDirectJson,
+        url: '',
+        title: title || 'Store Showcase Animation',
+        isActive: true,
+      };
+      setProfile((prev: any) => ({
+        ...(prev || {}),
+        supplierLottieAnimation: previewAnim,
+      }));
+      setLottieModalVisible(false);
+
+      const res = await api.post('/profile/upload-store-lottie', {
+        rawJson: jsonContent,
+        title: title || 'Store Showcase Animation',
+      });
+
+      if (res.data && res.data.success) {
+        const anim = {
+          ...res.data.supplierLottieAnimation,
+          rawJson: parsedDirectJson, // Keep rawJson locally so rendering is 100% immediate and never blocked by network fetch
+        };
+        setProfile((prev: any) => ({
+          ...(prev || {}),
+          supplierLottieAnimation: anim,
+        }));
+        AsyncStorage.setItem('cached_supplier_lottie', JSON.stringify(anim)).catch(() => {});
+        AsyncStorage.getItem('supplierUser').then((suppUserStr) => {
+          if (suppUserStr) {
+            const p = { ...JSON.parse(suppUserStr), supplierLottieAnimation: anim };
+            AsyncStorage.setItem('supplierUser', JSON.stringify(p)).catch(() => {});
+          }
+        }).catch(() => {});
+      } else {
+        Alert.alert('Upload Error', res.data?.message || 'Could not publish animation.');
+      }
+    } catch (e: any) {
+      Alert.alert('Error', e.response?.data?.message || e.message || 'Failed to publish Lottie animation.');
+    } finally {
+      setIsSavingLottie(false);
+    }
+  };
+
   // Restore supplier cached profile immediately on mount
   useEffect(() => {
     const initSupplierProfile = async () => {
       try {
+        let cachedLottie: any = null;
+        try {
+          const lottieRaw = await AsyncStorage.getItem('cached_supplier_lottie');
+          if (lottieRaw) cachedLottie = JSON.parse(lottieRaw);
+        } catch (_) {}
+
         const suppUserStr = await AsyncStorage.getItem('supplierUser');
         if (suppUserStr) {
           const parsed = JSON.parse(suppUserStr);
           if (parsed) {
+            if (!parsed.supplierLottieAnimation && cachedLottie) {
+              parsed.supplierLottieAnimation = cachedLottie;
+            }
             setProfile(parsed);
             setEditNameText(parsed.name || parsed.restaurantName || '');
             setEditBioText(parsed.bio || '');
@@ -93,7 +506,11 @@ const ProfileScreen = ({ navigation, route }: any) => {
           }
         }
         if (user) {
-          setProfile(user);
+          const u = { ...user };
+          if (!u.supplierLottieAnimation && cachedLottie) {
+            u.supplierLottieAnimation = cachedLottie;
+          }
+          setProfile(u);
           setEditNameText(user.restaurantName || user.name || '');
           setEditBioText(user.bio || '');
           setEditLocationText(user.businessAddress || user.location || user.fullAddress || user.address || '');
@@ -104,27 +521,152 @@ const ProfileScreen = ({ navigation, route }: any) => {
     initSupplierProfile();
   }, [user]);
 
-  // Fetch strictly completed orders isolated to THIS restaurant partner
-  useEffect(() => {
-    const fetchSupplierCompletedOrders = async () => {
-      try {
-        const restoId = String(profile?._id || profile?.id || user?._id || user?.id || '');
-        if (!restoId) return;
-        const res = await api.get(`/bookings/my-bookings?role=supplier&restaurantId=${restoId}&date=ALL`);
-        if (res.data && Array.isArray(res.data.bookings)) {
-          // Strictly isolate data: only count orders belonging to this restaurant
-          const completed = res.data.bookings.filter((b: any) => {
-            const bResto = String(b.restaurantId || b.restaurant?._id || b.restaurant || b.supplierId || '');
-            const isTarget = bResto === restoId;
-            const status = String(b.status || '').toUpperCase();
-            return isTarget && ['COMPLETED', 'DELIVERED', 'SERVICE_COMPLETED'].includes(status);
-          });
-          setCompletedOrdersCount(completed.length);
+  // Single Backend Source of Truth for Completed Orders Count (Persistent & Isolated)
+  const fetchSupplierCompletedOrders = useCallback(async (isSilent: boolean = false) => {
+    try {
+      const restoId = String(profile?._id || profile?.id || user?._id || user?.id || '');
+      if (!restoId) return;
+
+      // 1. Immediately read cached count from disk on initial mount (prevents 0 -> 1 toggling)
+      if (!isSilent) {
+        const cachedCount = await AsyncStorage.getItem(`cached_completed_orders_${restoId}`);
+        if (cachedCount !== null) {
+          const parsed = parseInt(cachedCount, 10);
+          if (!isNaN(parsed)) setCompletedOrdersCount(parsed);
         }
-      } catch (e) {}
-    };
-    fetchSupplierCompletedOrders();
+      }
+
+      // 2. Fetch authoritative count from single backend source of truth
+      let finalCount: number | null = null;
+      try {
+        const res = await api.get(`/profile/completed-count/${restoId}`);
+        if (res.data?.success && typeof res.data.completedCount === 'number') {
+          finalCount = res.data.completedCount;
+        }
+      } catch (_) {}
+
+      // 3. Fallback to /bookings/earnings if single endpoint is unreachable
+      if (finalCount === null) {
+        try {
+          const earnRes = await api.get(`/bookings/earnings?providerId=${restoId}`);
+          if (earnRes.data?.success && typeof earnRes.data.completedServicesCount === 'number') {
+            finalCount = earnRes.data.completedServicesCount;
+          }
+        } catch (_) {}
+      }
+
+      if (finalCount !== null) {
+        setCompletedOrdersCount(finalCount);
+        await AsyncStorage.setItem(`cached_completed_orders_${restoId}`, String(finalCount));
+      }
+    } catch (e) {}
   }, [profile?._id, profile?.id, user?._id, user?.id]);
+
+  // Initial fetch on mount
+  useEffect(() => {
+    fetchSupplierCompletedOrders(false);
+  }, [fetchSupplierCompletedOrders]);
+
+  // Background sync on screen focus without reloading or screen blink
+  useFocusEffect(
+    useCallback(() => {
+      fetchSupplierCompletedOrders(true);
+    }, [fetchSupplierCompletedOrders])
+  );
+
+  // ⚡ REAL-TIME: Socket.IO listener for live completed orders updates without reload
+  useEffect(() => {
+    if (!socket) return;
+
+    const onRealtimeCompletedOrder = (data: any) => {
+      const restoId = String(profile?._id || profile?.id || user?._id || user?.id || '');
+      const eventResto = String(data?.restaurantId || data?.supplierId || data?.providerId || data?.booking?.restaurantId || '');
+
+      // If store ID is specified in event, ensure it matches this store
+      if (eventResto && restoId && eventResto !== restoId) {
+        return;
+      }
+
+      console.log('⚡ [PROFILE SCREEN] Real-time order completed event received! Updating count with 0ms delay.');
+
+      // 1. Instantly increment in UI & local cache (0ms immediate feedback!)
+      setCompletedOrdersCount((prev) => {
+        const updated = prev + 1;
+        if (restoId) {
+          AsyncStorage.setItem(`cached_completed_orders_${restoId}`, String(updated)).catch(() => {});
+        }
+        return updated;
+      });
+
+      // 2. Background sync authoritative count from backend
+      fetchSupplierCompletedOrders(true);
+    };
+
+    socket.on('service_completed', onRealtimeCompletedOrder);
+    socket.on('order_completed_count_updated', onRealtimeCompletedOrder);
+    socket.on('earnings_updated', onRealtimeCompletedOrder);
+
+    const onOrderStatusUpdate = (data: any) => {
+      const st = String(data?.status || data?.booking?.status || '').toUpperCase();
+      if (['COMPLETED', 'DELIVERED', 'SERVICE_COMPLETED'].includes(st)) {
+        onRealtimeCompletedOrder(data);
+      }
+    };
+    socket.on('order_status_updated', onOrderStatusUpdate);
+    socket.on('booking_status_updated', onOrderStatusUpdate);
+
+    return () => {
+      socket.off('service_completed', onRealtimeCompletedOrder);
+      socket.off('order_completed_count_updated', onRealtimeCompletedOrder);
+      socket.off('earnings_updated', onRealtimeCompletedOrder);
+      socket.off('order_status_updated', onOrderStatusUpdate);
+      socket.off('booking_status_updated', onOrderStatusUpdate);
+    };
+  }, [socket, profile?._id, profile?.id, user?._id, user?.id, fetchSupplierCompletedOrders]);
+
+  // ⚡ Live Socket listener for store showcase / animation changes (0ms live update without reload)
+  useEffect(() => {
+    if (!socket) return;
+
+    const onShowcaseUpdate = (data: any) => {
+      const currentRestoId = String(profile?._id || profile?.id || user?._id || user?.id || '');
+      const eventSupplierId = String(data?.supplierId || data?.restaurantId || '');
+
+      if (!currentRestoId || (eventSupplierId && eventSupplierId !== currentRestoId)) {
+        return;
+      }
+
+      console.log('⚡ [PROFILE SCREEN] Real-time showcase animation update received via socket!');
+      const newLottie = data?.supplierLottieAnimation || null;
+      setProfile((prev: any) => ({
+        ...(prev || {}),
+        supplierLottieAnimation: newLottie,
+      }));
+
+      if (newLottie) {
+        AsyncStorage.setItem('cached_supplier_lottie', JSON.stringify(newLottie)).catch(() => {});
+        AsyncStorage.getItem('supplierUser').then((suppUserStr) => {
+          if (suppUserStr) {
+            const p = { ...JSON.parse(suppUserStr), supplierLottieAnimation: newLottie };
+            AsyncStorage.setItem('supplierUser', JSON.stringify(p)).catch(() => {});
+          }
+        }).catch(() => {});
+      } else {
+        AsyncStorage.removeItem('cached_supplier_lottie').catch(() => {});
+        AsyncStorage.getItem('supplierUser').then((suppUserStr) => {
+          if (suppUserStr) {
+            const p = { ...JSON.parse(suppUserStr), supplierLottieAnimation: null };
+            AsyncStorage.setItem('supplierUser', JSON.stringify(p)).catch(() => {});
+          }
+        }).catch(() => {});
+      }
+    };
+
+    socket.on('supplier_showcase_updated', onShowcaseUpdate);
+    return () => {
+      socket.off('supplier_showcase_updated', onShowcaseUpdate);
+    };
+  }, [socket, profile?._id, profile?.id, user?._id, user?.id]);
 
   // Fetch real categories from database for category editing
   useEffect(() => {
@@ -283,7 +825,6 @@ const ProfileScreen = ({ navigation, route }: any) => {
           isMobileVerified: true,
         };
         await updateUser(updatedUserData);
-        await AsyncStorage.setItem('user_phone', cleanPhone);
         if (res.data.user) {
           setProfile(res.data.user);
         }
@@ -340,12 +881,10 @@ const ProfileScreen = ({ navigation, route }: any) => {
       const suppUser = await AsyncStorage.getItem('supplierUser');
       if (suppUser) {
         const parsed = JSON.parse(suppUser);
-        if (parsed?._id || parsed?.id) return String(parsed._id || parsed.id);
-      }
-      const rawUser = await AsyncStorage.getItem('userData');
-      if (rawUser) {
-        const parsed = JSON.parse(rawUser);
-        if (parsed?._id || parsed?.id) return String(parsed._id || parsed.id);
+        const pRole = String(parsed?.role || '').toLowerCase();
+        if (['supplier', 'seller_partner', 'restaurant'].includes(pRole) && (parsed?._id || parsed?.id)) {
+          return String(parsed._id || parsed.id);
+        }
       }
     } catch (e) {}
     return '';
@@ -353,10 +892,10 @@ const ProfileScreen = ({ navigation, route }: any) => {
 
   const fetchProfile = async () => {
     try {
-      if (!profile) setLoading(true);
+      if (!profile && !user) setLoading(true);
 
-      // 1. Authoritative: Fetch from /auth/partner-profile using supplierToken or userToken
-      const suppToken = (await AsyncStorage.getItem('supplierToken')) || (await AsyncStorage.getItem('userToken'));
+      // 1. Authoritative: Fetch from /auth/partner-profile using supplierToken ONLY (never fallback to ambiguous userToken)
+      const suppToken = await AsyncStorage.getItem('supplierToken');
       if (suppToken) {
         try {
           const res = await api.get('/auth/partner-profile', {
@@ -364,8 +903,22 @@ const ProfileScreen = ({ navigation, route }: any) => {
           });
           if (res.data && res.data.success && (res.data.partner || res.data.user)) {
             const p = res.data.partner || res.data.user;
+            const pRole = String(p.role || '').toLowerCase();
+            if (!['supplier', 'seller_partner', 'restaurant'].includes(pRole)) {
+              setLoading(false);
+              return;
+            }
+            // Preserve supplierLottieAnimation ONLY for this exact supplier
+            if (!p.supplierLottieAnimation) {
+              const cachedLottieStr = await AsyncStorage.getItem(`cached_supplier_lottie_${p._id || p.id}`);
+              if (cachedLottieStr) {
+                p.supplierLottieAnimation = JSON.parse(cachedLottieStr);
+              }
+            } else {
+              await AsyncStorage.setItem(`cached_supplier_lottie_${p._id || p.id}`, JSON.stringify(p.supplierLottieAnimation));
+            }
             setProfile(p);
-            setEditNameText(p.name || p.restaurantName || '');
+            setEditNameText(p.restaurantName || p.name || '');
             setEditBioText(p.bio || '');
             setEditLocationText(p.businessAddress || p.location || p.address || '');
             await AsyncStorage.setItem('supplierUser', JSON.stringify(p));
@@ -375,17 +928,30 @@ const ProfileScreen = ({ navigation, route }: any) => {
         } catch (e) {}
       }
 
-      // 2. Fallback to /profile/:userId with role=supplier query
+      // 2. Fallback to /profile/:userId with strict role check
       const userId = await resolveUserId();
       if (!userId) return;
 
       const res = await api.get(`/profile/${userId}?role=supplier`);
       if (res.data && res.data.success && res.data.profile) {
-        setProfile(res.data.profile);
-        setEditNameText(res.data.profile.name || res.data.profile.restaurantName || '');
-        setEditBioText(res.data.profile.bio || '');
-        setEditLocationText(res.data.profile.businessAddress || res.data.profile.location || res.data.profile.address || '');
-        await AsyncStorage.setItem('supplierUser', JSON.stringify(res.data.profile));
+        const prof = res.data.profile;
+        const profRole = String(prof.role || '').toLowerCase();
+        if (!['supplier', 'seller_partner', 'restaurant'].includes(profRole)) {
+          return;
+        }
+        if (!prof.supplierLottieAnimation) {
+          const cachedLottieStr = await AsyncStorage.getItem(`cached_supplier_lottie_${prof._id || prof.id}`);
+          if (cachedLottieStr) {
+            prof.supplierLottieAnimation = JSON.parse(cachedLottieStr);
+          }
+        } else {
+          await AsyncStorage.setItem(`cached_supplier_lottie_${prof._id || prof.id}`, JSON.stringify(prof.supplierLottieAnimation));
+        }
+        setProfile(prof);
+        setEditNameText(prof.restaurantName || prof.name || '');
+        setEditBioText(prof.bio || '');
+        setEditLocationText(prof.businessAddress || prof.location || prof.address || '');
+        await AsyncStorage.setItem('supplierUser', JSON.stringify(prof));
       }
     } catch (error) {
       console.log('[PROFILE FETCH NOTICE]', error);
@@ -419,13 +985,11 @@ const ProfileScreen = ({ navigation, route }: any) => {
       try {
         const suppUser = await AsyncStorage.getItem('supplierUser');
         if (suppUser) {
-          const p = { ...JSON.parse(suppUser), ...updates };
-          await AsyncStorage.setItem('supplierUser', JSON.stringify(p));
-        }
-        const raw = await AsyncStorage.getItem('userData');
-        if (raw) {
-          const p = { ...JSON.parse(raw), ...updates };
-          await AsyncStorage.setItem('userData', JSON.stringify(p));
+          const parsedSupp = JSON.parse(suppUser);
+          if (String(parsedSupp?._id || parsedSupp?.id) === String(userId)) {
+            const p = { ...parsedSupp, ...updates };
+            await AsyncStorage.setItem('supplierUser', JSON.stringify(p));
+          }
         }
       } catch (e) {}
 
@@ -693,13 +1257,11 @@ const ProfileScreen = ({ navigation, route }: any) => {
             try {
               const suppUser = await AsyncStorage.getItem('supplierUser');
               if (suppUser) {
-                const p = { ...JSON.parse(suppUser), profilePicture: '', coverImage: '', image: '', photos: [], supplierPhotos: [] };
-                await AsyncStorage.setItem('supplierUser', JSON.stringify(p));
-              }
-              const raw = await AsyncStorage.getItem('userData');
-              if (raw) {
-                const p = { ...JSON.parse(raw), profilePicture: '', coverImage: '', image: '', photos: [], supplierPhotos: [] };
-                await AsyncStorage.setItem('userData', JSON.stringify(p));
+                const parsedSupp = JSON.parse(suppUser);
+                if (String(parsedSupp?._id || parsedSupp?.id) === String(user?._id || user?.id)) {
+                  const p = { ...parsedSupp, profilePicture: '', coverImage: '', image: '', photos: [], supplierPhotos: [] };
+                  await AsyncStorage.setItem('supplierUser', JSON.stringify(p));
+                }
               }
             } catch (storageErr) {}
             await fetchProfile();
@@ -719,6 +1281,14 @@ const ProfileScreen = ({ navigation, route }: any) => {
         text: 'Log Out',
         style: 'destructive',
         onPress: async () => {
+          try {
+            const FastStorage = require('../services/FastStorage').default;
+            if (FastStorage?.clearUserSession) await FastStorage.clearUserSession();
+          } catch (_) {}
+          try {
+            const { clearSupplierLocationCache } = require('../services/LocationAddressService');
+            if (clearSupplierLocationCache) await clearSupplierLocationCache();
+          } catch (_) {}
           await logout('SUPPLIER');
           navigation.reset({
             index: 0,
@@ -1145,7 +1715,7 @@ const ProfileScreen = ({ navigation, route }: any) => {
     );
   }
  
-  if (loading) {
+  if (loading && !profile && !user) {
     return (
       <SafeAreaView style={styles.loadingContainer} edges={['top']}>
         <ActivityIndicator size="large" color="#0066FF" />
@@ -1280,6 +1850,50 @@ const ProfileScreen = ({ navigation, route }: any) => {
               <Text style={styles.roleTagText}>{terminology.menuNavIcon} {isRestaurant ? 'RESTAURANT' : terminology.storeTypeLabel.toUpperCase()}</Text>
             </View>
           </View>
+          {/* PROMINENT STORE VIDEO JSON & SHOWCASE SHORTCUTS */}
+          <View style={{ flexDirection: 'row', gap: 10, marginTop: 14 }}>
+            <TouchableOpacity
+              style={{
+                flex: 1,
+                flexDirection: 'row',
+                alignItems: 'center',
+                justifyContent: 'center',
+                backgroundColor: '#7C3AED',
+                paddingVertical: 11,
+                paddingHorizontal: 10,
+                borderRadius: 12,
+                elevation: 3,
+              }}
+              onPress={() => { setSelectedJsonFile(null); setLottieInputMode('file'); setLottieModalVisible(true); }}
+              activeOpacity={0.85}
+            >
+              <Text style={{ fontSize: 16, marginRight: 6 }}>🎬</Text>
+              <Text style={{ color: '#FFFFFF', fontWeight: '800', fontSize: 13 }}>
+                Store Video JSON
+              </Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={{
+                flex: 1,
+                flexDirection: 'row',
+                alignItems: 'center',
+                justifyContent: 'center',
+                backgroundColor: '#2563EB',
+                paddingVertical: 11,
+                paddingHorizontal: 10,
+                borderRadius: 12,
+                elevation: 3,
+              }}
+              onPress={handleStartConfirmPermanentLocation}
+              activeOpacity={0.85}
+            >
+              <Text style={{ fontSize: 16, marginRight: 6 }}>📍</Text>
+              <Text style={{ color: '#FFFFFF', fontWeight: '800', fontSize: 13 }}>
+                Lock Store GPS
+              </Text>
+            </TouchableOpacity>
+          </View>
         </View>
 
         {/* ============================================================ */}
@@ -1310,12 +1924,21 @@ const ProfileScreen = ({ navigation, route }: any) => {
             <Text style={[styles.statLabel, isDark && { color: '#94A3B8' }]}>Store Status</Text>
           </View>
 
-          {/* Completed Orders strictly isolated to this store */}
-          <View style={[styles.statCard, isDark && { backgroundColor: '#1E293B', borderColor: '#334155', borderWidth: 1 }]}>
-            <PngIcon name="checkmark-done" size={20} color="#0066FF" style={{ marginBottom: 4 }} />
+          {/* Completed Orders strictly isolated to this store (Real-time live updates without reload) */}
+          <TouchableOpacity
+            style={[styles.statCard, isDark && { backgroundColor: '#1E293B', borderColor: '#334155', borderWidth: 1 }]}
+            activeOpacity={0.8}
+            onPress={() => {
+              try { navigation.navigate('Earnings'); } catch (_) {}
+            }}
+          >
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5, marginBottom: 4 }}>
+              <PngIcon name="checkmark-done" size={20} color="#0066FF" />
+              <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: '#22C55E' }} />
+            </View>
             <Text style={[styles.statVal, isDark && { color: '#38BDF8' }]}>{completedOrdersCount}</Text>
             <Text style={[styles.statLabel, isDark && { color: '#94A3B8' }]}>Completed Orders</Text>
-          </View>
+          </TouchableOpacity>
 
           {/* Store Category (No Earnings here; strictly in Wallet/Earnings screen) */}
           <View style={[styles.statCard, isDark && { backgroundColor: '#1E293B', borderColor: '#334155', borderWidth: 1 }]}>
@@ -1413,6 +2036,256 @@ const ProfileScreen = ({ navigation, route }: any) => {
           </View>
         </View>
 
+        {/* ============================================================ */}
+        {/* 3A. SPEC PART 9: STORE VIDEO JSON (LOTTIE ANIMATION) CARD */}
+        {/* ============================================================ */}
+        <View style={[styles.infoCard, isDark && { backgroundColor: '#1E293B', borderColor: '#334155', borderWidth: 1 }]}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+              <Text style={{ fontSize: 20 }}>🎬</Text>
+              <Text style={[styles.cardHeaderTitle, isDark && { color: '#F8FAFC' }]}>Store Video JSON (Animation)</Text>
+            </View>
+            <View style={{ backgroundColor: '#FAF5FF', paddingHorizontal: 9, paddingVertical: 4, borderRadius: 12, borderWidth: 1, borderColor: '#E9D5FF' }}>
+              <Text style={{ color: '#7E22CE', fontSize: 11, fontWeight: '800' }}>60 FPS SHOWCASE</Text>
+            </View>
+          </View>
+
+          <Text style={{ fontSize: 12, color: isDark ? '#94A3B8' : '#64748B', marginBottom: 12, lineHeight: 17 }}>
+            Showcase your store with an eye-catching 60 FPS animated promotional video JSON banner at the top of your customer store menu.
+          </Text>
+
+          {Boolean(profile?.supplierLottieAnimation?.url || profile?.supplierLottieAnimation?.rawJson) ? (
+            <View style={{
+              borderRadius: 14,
+              overflow: 'hidden',
+              marginBottom: 12,
+              backgroundColor: isDark ? '#0F172A' : '#F8FAFC',
+              borderWidth: 1,
+              borderColor: isDark ? '#334155' : '#E2E8F0',
+            }}>
+              <LottieAnimation
+                key={profile.supplierLottieAnimation.url || (profile.supplierLottieAnimation.rawJson ? 'raw_json_active' : 'lottie_view')}
+                source={profile.supplierLottieAnimation.rawJson || profile.supplierLottieAnimation.url}
+                height={150}
+                speed={1.5}
+                loop={true}
+                autoPlay={true}
+                preserveAspectRatio="xMidYMid meet"
+                style={{ width: '100%' }}
+              />
+              <View style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                padding: 10,
+                borderTopWidth: 1,
+                borderTopColor: isDark ? '#334155' : '#E2E8F0',
+              }}>
+                <View>
+                  <Text style={{ fontSize: 12, fontWeight: '700', color: isDark ? '#F8FAFC' : '#0F172A' }}>
+                    {profile.supplierLottieAnimation.title || 'Store Video Animation'}
+                  </Text>
+                  <Text style={{ fontSize: 10, color: isDark ? '#94A3B8' : '#64748B' }}>
+                    {profile.supplierLottieAnimation.isActive ? 'Active on Store Menu ✓' : 'Disabled (Hidden)'}
+                  </Text>
+                </View>
+                <Switch
+                  value={Boolean(profile.supplierLottieAnimation.isActive)}
+                  onValueChange={handleToggleLottieActive}
+                  trackColor={{ false: '#CBD5E1', true: '#10B981' }}
+                />
+              </View>
+            </View>
+          ) : (
+            <View style={{
+              backgroundColor: isDark ? '#0F172A' : '#F8FAFC',
+              padding: 16,
+              borderRadius: 12,
+              alignItems: 'center',
+              marginBottom: 12,
+              borderWidth: 1,
+              borderColor: isDark ? '#334155' : '#E2E8F0',
+            }}>
+              <Text style={{ fontSize: 26, marginBottom: 4 }}>🎬</Text>
+              <Text style={{ fontSize: 13, fontWeight: '700', color: isDark ? '#F8FAFC' : '#0F172A' }}>
+                No Store Video JSON Added Yet
+              </Text>
+              <Text style={{ fontSize: 11, color: isDark ? '#94A3B8' : '#64748B', textAlign: 'center', marginTop: 2 }}>
+                Add a curated animation or paste your custom Lottie JSON to showcase on your store menu.
+              </Text>
+            </View>
+          )}
+
+          <View style={{ flexDirection: 'row', gap: 8 }}>
+            <TouchableOpacity
+              style={[styles.smallSaveBtn, { flex: 1, alignItems: 'center', justifyContent: 'center', paddingVertical: 12, backgroundColor: '#7C3AED' }]}
+              onPress={() => setLottieModalVisible(true)}
+            >
+              <Text style={[styles.smallSaveBtnText, { fontWeight: '800' }]}>
+                {(profile?.supplierLottieAnimation?.url || profile?.supplierLottieAnimation?.rawJson) ? '🔄 Replace Store Video JSON' : '➕ Upload Store Video JSON'}
+              </Text>
+            </TouchableOpacity>
+
+            {Boolean(profile?.supplierLottieAnimation?.url || profile?.supplierLottieAnimation?.rawJson) && (
+              <TouchableOpacity
+                style={{
+                  paddingHorizontal: 14,
+                  paddingVertical: 12,
+                  borderRadius: 8,
+                  backgroundColor: '#FEE2E2',
+                  justifyContent: 'center',
+                  alignItems: 'center',
+                }}
+                onPress={handleDeleteLottie}
+              >
+                <Text style={{ color: '#DC2626', fontWeight: '700', fontSize: 12 }}>Delete</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+        </View>
+
+        {/* ============================================================ */}
+        {/* 3B. SPEC PART 8: 3 STORE PHOTOS SHOWCASE CARD */}
+        {/* ============================================================ */}
+        <View style={[styles.infoCard, isDark && { backgroundColor: '#1E293B', borderColor: '#334155', borderWidth: 1 }]}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+              <Text style={{ fontSize: 20 }}>🏪</Text>
+              <Text style={[styles.cardHeaderTitle, isDark && { color: '#F8FAFC' }]}>Store Showcase (3 Photos)</Text>
+            </View>
+            <View style={{ backgroundColor: '#EFF6FF', paddingHorizontal: 9, paddingVertical: 4, borderRadius: 12, borderWidth: 1, borderColor: '#BFDBFE' }}>
+              <Text style={{ color: '#1D4ED8', fontSize: 11, fontWeight: '800' }}>AUTO-SLIDER</Text>
+            </View>
+          </View>
+          <Text style={{ fontSize: 12, color: isDark ? '#94A3B8' : '#64748B', marginBottom: 14, lineHeight: 17 }}>
+            Showcase your store with 3 high-quality views (Front, Inside & Products). These will auto-slide on the customer store menu.
+          </Text>
+
+          <View style={{ flexDirection: 'row', gap: 10, marginBottom: 14 }}>
+            {showcaseSlots.map((slot, sIdx) => {
+              const photoSrc = slot.uri || (slot.url ? resolveUploadUrl(slot.url) : null);
+              return (
+                <View key={`slot-${sIdx}`} style={{ flex: 1, alignItems: 'center' }}>
+                  <TouchableOpacity
+                    activeOpacity={0.8}
+                    onPress={() => handlePickShowcasePhoto(sIdx)}
+                    style={{
+                      width: '100%',
+                      height: 95,
+                      borderRadius: 12,
+                      borderWidth: 1.5,
+                      borderColor: photoSrc ? '#10B981' : (isDark ? '#334155' : '#CBD5E1'),
+                      borderStyle: photoSrc ? 'solid' : 'dashed',
+                      backgroundColor: isDark ? '#0F172A' : '#F8FAFC',
+                      overflow: 'hidden',
+                      justifyContent: 'center',
+                      alignItems: 'center',
+                    }}
+                  >
+                    {photoSrc ? (
+                      <Image source={{ uri: photoSrc }} style={{ width: '100%', height: '100%' }} resizeMode="cover" />
+                    ) : (
+                      <View style={{ alignItems: 'center' }}>
+                        <Text style={{ fontSize: 22 }}>📷</Text>
+                        <Text style={{ fontSize: 10, fontWeight: '700', color: isDark ? '#94A3B8' : '#64748B', marginTop: 4 }}>
+                          Slot {sIdx + 1}
+                        </Text>
+                      </View>
+                    )}
+                  </TouchableOpacity>
+
+                  <Text style={{ fontSize: 10, fontWeight: '700', color: isDark ? '#E2E8F0' : '#1E293B', marginTop: 4, textAlign: 'center' }} numberOfLines={2}>
+                    {slot.caption}
+                  </Text>
+
+                  {photoSrc && (
+                    <TouchableOpacity onPress={() => handleRemoveShowcasePhoto(sIdx)} style={{ marginTop: 2 }}>
+                      <Text style={{ fontSize: 10, color: '#EF4444', fontWeight: '700' }}>Remove ✕</Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
+              );
+            })}
+          </View>
+
+          <TouchableOpacity
+            style={[styles.smallSaveBtn, { width: '100%', alignItems: 'center', justifyContent: 'center', paddingVertical: 12 }]}
+            onPress={handleSaveAll3ShowcasePhotos}
+            disabled={isSavingPhotos}
+          >
+            {isSavingPhotos ? (
+              <ActivityIndicator color="#FFFFFF" size="small" />
+            ) : (
+              <Text style={styles.smallSaveBtnText}>💾 Save & Publish 3 Showcase Photos</Text>
+            )}
+          </TouchableOpacity>
+        </View>
+
+        {/* ============================================================ */}
+        {/* 3C. SPEC PART 2 & 3: PERMANENT STORE LOCATION CARD */}
+        {/* ============================================================ */}
+        <View style={[styles.infoCard, isDark && { backgroundColor: '#1E293B', borderColor: '#334155', borderWidth: 1 }]}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+              <Text style={{ fontSize: 20 }}>📍</Text>
+              <Text style={[styles.cardHeaderTitle, isDark && { color: '#F8FAFC' }]}>Permanent Store Location</Text>
+            </View>
+            <View style={{
+              backgroundColor: profile?.permanentStoreLocation?.isConfirmed ? '#DCFCE7' : '#FEF3C7',
+              paddingHorizontal: 8,
+              paddingVertical: 3,
+              borderRadius: 12,
+            }}>
+              <Text style={{
+                color: profile?.permanentStoreLocation?.isConfirmed ? '#166534' : '#92400E',
+                fontSize: 11,
+                fontWeight: '800',
+              }}>
+                {profile?.permanentStoreLocation?.isConfirmed ? 'LOCKED ✓' : 'UNCONFIRMED'}
+              </Text>
+            </View>
+          </View>
+
+          <Text style={{ fontSize: 12, color: isDark ? '#94A3B8' : '#64748B', marginBottom: 12, lineHeight: 17 }}>
+            Your physical store coordinates are permanently locked in Ride Hub database. They will NEVER change when you travel or re-login.
+          </Text>
+
+          {profile?.permanentStoreLocation?.latitude && profile?.permanentStoreLocation?.longitude ? (
+            <View style={{
+              backgroundColor: isDark ? '#0F172A' : '#F8FAFC',
+              padding: 12,
+              borderRadius: 12,
+              borderWidth: 1,
+              borderColor: isDark ? '#334155' : '#E2E8F0',
+              marginBottom: 12,
+            }}>
+              <Text style={{ fontSize: 13, fontWeight: '700', color: isDark ? '#F8FAFC' : '#0F172A', marginBottom: 4 }}>
+                {profile.permanentStoreLocation.formattedAddress || 'Store Address Verified'}
+              </Text>
+              <Text style={{ fontSize: 11, color: isDark ? '#94A3B8' : '#64748B' }}>
+                GPS: {Number(profile.permanentStoreLocation.latitude).toFixed(5)}, {Number(profile.permanentStoreLocation.longitude).toFixed(5)}
+                {profile.permanentStoreLocation.accuracy ? ` (± ${profile.permanentStoreLocation.accuracy}m)` : ''}
+              </Text>
+              {profile.permanentStoreLocation.confirmedAt && (
+                <Text style={{ fontSize: 10, color: '#10B981', marginTop: 4, fontWeight: '700' }}>
+                  Confirmed: {new Date(profile.permanentStoreLocation.confirmedAt).toLocaleDateString()}
+                </Text>
+              )}
+            </View>
+          ) : null}
+
+          <TouchableOpacity
+            style={[styles.smallSaveBtn, { width: '100%', alignItems: 'center', justifyContent: 'center', paddingVertical: 12, backgroundColor: '#2563EB' }]}
+            onPress={handleStartConfirmPermanentLocation}
+            disabled={confirmingLocation}
+          >
+            {confirmingLocation ? (
+              <ActivityIndicator color="#FFFFFF" size="small" />
+            ) : (
+              <Text style={styles.smallSaveBtnText}>🎯 Detect & Lock Permanent Store GPS</Text>
+            )}
+          </TouchableOpacity>
+        </View>
         {/* ============================================================ */}
         {/* 4. ACTIONS & MENU SECTION */}
         {/* ============================================================ */}
@@ -1588,6 +2461,311 @@ const ProfileScreen = ({ navigation, route }: any) => {
         visible={showLangModal}
         onClose={() => setShowLangModal(false)}
       />
+      {/* SPEC PART 2 & 3: PERMANENT LOCATION CONFIRMATION MODAL */}
+      <Modal visible={confirmLocationModalVisible} transparent animationType="slide">
+        <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.65)', justifyContent: 'center', alignItems: 'center', padding: 20 }}>
+          <View style={{ width: '100%', maxWidth: 380, backgroundColor: isDark ? '#1E293B' : '#FFFFFF', borderRadius: 20, padding: 20, elevation: 8 }}>
+            <Text style={{ fontSize: 18, fontWeight: '800', color: isDark ? '#F8FAFC' : '#0F172A', marginBottom: 8 }}>
+              Confirm Permanent Store Location
+            </Text>
+            <Text style={{ fontSize: 13, color: isDark ? '#94A3B8' : '#64748B', marginBottom: 14, lineHeight: 18 }}>
+              Are you currently at your physical store location? This GPS location will be locked permanently in the Ride Hub database.
+            </Text>
+
+            <View style={{ backgroundColor: isDark ? '#0F172A' : '#F1F5F9', padding: 14, borderRadius: 12, marginBottom: 16 }}>
+              <Text style={{ fontSize: 13, fontWeight: '700', color: isDark ? '#F8FAFC' : '#0F172A', marginBottom: 6 }}>
+                {pendingLocationData?.formattedAddress}
+              </Text>
+              <Text style={{ fontSize: 11, color: isDark ? '#94A3B8' : '#64748B' }}>
+                Latitude: {pendingLocationData?.latitude.toFixed(6)}
+              </Text>
+              <Text style={{ fontSize: 11, color: isDark ? '#94A3B8' : '#64748B' }}>
+                Longitude: {pendingLocationData?.longitude.toFixed(6)}
+              </Text>
+              <Text style={{ fontSize: 11, color: '#10B981', fontWeight: '700', marginTop: 4 }}>
+                Accuracy: ± {pendingLocationData?.accuracy} meters (Verified)
+              </Text>
+            </View>
+
+            <View style={{ flexDirection: 'row', gap: 10 }}>
+              <TouchableOpacity
+                style={{ flex: 1, paddingVertical: 12, borderRadius: 10, borderWidth: 1, borderColor: isDark ? '#334155' : '#CBD5E1', alignItems: 'center' }}
+                onPress={() => setConfirmLocationModalVisible(false)}
+              >
+                <Text style={{ fontWeight: '700', color: isDark ? '#94A3B8' : '#64748B' }}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={{ flex: 1.5, paddingVertical: 12, borderRadius: 10, backgroundColor: '#0066FF', alignItems: 'center' }}
+                onPress={handleSavePermanentLocation}
+                disabled={confirmingLocation}
+              >
+                {confirmingLocation ? (
+                  <ActivityIndicator color="#FFFFFF" size="small" />
+                ) : (
+                  <Text style={{ fontWeight: '800', color: '#FFFFFF' }}>Lock Location ✓</Text>
+                )}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* SPEC PART 9: STORE VIDEO JSON / LOTTIE UPLOAD MODAL */}
+      <Modal visible={lottieModalVisible} transparent animationType="slide">
+        <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.65)', justifyContent: 'center', alignItems: 'center', padding: 16 }}>
+          <View style={{ width: '100%', maxWidth: 400, maxHeight: '88%', backgroundColor: isDark ? '#1E293B' : '#FFFFFF', borderRadius: 20, padding: 20 }}>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+              <Text style={{ fontSize: 17, fontWeight: '800', color: isDark ? '#F8FAFC' : '#0F172A' }}>
+                Store Video JSON (Animation)
+              </Text>
+              <TouchableOpacity onPress={() => setLottieModalVisible(false)}>
+                <Text style={{ fontSize: 18, color: '#94A3B8', fontWeight: '700' }}>✕</Text>
+              </TouchableOpacity>
+            </View>
+
+            {/* Mode Switch: JSON File Upload vs Curated Presets */}
+            <View style={{ flexDirection: 'row', backgroundColor: isDark ? '#0F172A' : '#F1F5F9', borderRadius: 10, padding: 3, marginBottom: 14 }}>
+              <TouchableOpacity
+                style={{ flex: 1, paddingVertical: 8, alignItems: 'center', borderRadius: 8, backgroundColor: lottieInputMode === 'file' ? '#7C3AED' : 'transparent' }}
+                onPress={() => setLottieInputMode('file')}
+              >
+                <Text style={{ fontSize: 12, fontWeight: '700', color: lottieInputMode === 'file' ? '#FFFFFF' : (isDark ? '#94A3B8' : '#64748B') }}>
+                  📁 Upload .JSON File
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={{ flex: 1, paddingVertical: 8, alignItems: 'center', borderRadius: 8, backgroundColor: lottieInputMode === 'preset' ? '#7C3AED' : 'transparent' }}
+                onPress={() => setLottieInputMode('preset')}
+              >
+                <Text style={{ fontSize: 12, fontWeight: '700', color: lottieInputMode === 'preset' ? '#FFFFFF' : (isDark ? '#94A3B8' : '#64748B') }}>
+                  ✨ Curated Presets
+                </Text>
+              </TouchableOpacity>
+            </View>
+
+            {lottieInputMode === 'file' ? (
+              <View style={{ width: '100%' }}>
+                {!selectedJsonFile ? (
+                  <View style={{
+                    width: '100%',
+                    height: 155,
+                    borderRadius: 14,
+                    overflow: 'hidden',
+                    borderWidth: 1.5,
+                    borderColor: '#7C3AED',
+                    borderStyle: 'dashed',
+                    backgroundColor: isDark ? '#0F172A' : '#FAF5FF',
+                    marginBottom: 10,
+                  }}>
+                    <WebView
+                      originWhitelist={['*']}
+                      source={{
+                        html: `<!DOCTYPE html>
+<html>
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body, html {
+      width: 100%;
+      height: 100%;
+      background: transparent;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      overflow: hidden;
+    }
+    .picker-btn {
+      width: 100%;
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      padding: 12px;
+      text-align: center;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .icon { font-size: 34px; margin-bottom: 6px; }
+    .main-text { font-size: 14px; font-weight: 800; color: #7C3AED; margin-bottom: 3px; }
+    .sub-text { font-size: 11px; color: ${isDark ? '#94A3B8' : '#64748B'}; font-weight: 500; }
+    input[type="file"] { display: none; }
+  </style>
+</head>
+<body>
+  <label for="jsonFileInput" class="picker-btn" id="pickerLabel">
+    <div class="icon">📁</div>
+    <div class="main-text">Tap to Select .JSON File</div>
+    <div class="sub-text">Choose any Store JSON from device storage</div>
+  </label>
+  <input id="jsonFileInput" type="file" accept=".json,application/json" onchange="handleFile(this)" />
+  <script>
+    function handleFile(input) {
+      var file = input.files && input.files[0];
+      if (!file) return;
+      var label = document.getElementById('pickerLabel');
+      label.innerHTML = '<div class="icon">⏳</div><div class="main-text">Reading ' + file.name + '...</div>';
+      var reader = new FileReader();
+      reader.onload = function(e) {
+        try {
+          var text = e.target.result;
+          var parsed = JSON.parse(text);
+          if (window.ReactNativeWebView) {
+            window.ReactNativeWebView.postMessage(JSON.stringify({
+              type: 'FILE_PICKED',
+              fileName: file.name,
+              fileSize: file.size,
+              rawJson: parsed
+            }));
+          }
+        } catch (err) {
+          if (window.ReactNativeWebView) {
+            window.ReactNativeWebView.postMessage(JSON.stringify({
+              type: 'FILE_ERROR',
+              error: 'Invalid JSON file: ' + err.message
+            }));
+          }
+          label.innerHTML = '<div class="icon">❌</div><div class="main-text">Invalid JSON File</div><div class="sub-text">Tap to try another file</div>';
+        }
+      };
+      reader.onerror = function() {
+        if (window.ReactNativeWebView) {
+          window.ReactNativeWebView.postMessage(JSON.stringify({
+            type: 'FILE_ERROR',
+            error: 'Failed to read file from storage'
+          }));
+        }
+        label.innerHTML = '<div class="icon">❌</div><div class="main-text">Read Error</div><div class="sub-text">Tap to retry</div>';
+      };
+      reader.readAsText(file);
+    }
+  </script>
+</body>
+</html>`
+                      }}
+                      onMessage={handleJsonFileMessage}
+                      style={{ backgroundColor: 'transparent', flex: 1 }}
+                      javaScriptEnabled={true}
+                      domStorageEnabled={true}
+                      allowFileAccess={true}
+                    />
+                  </View>
+                ) : (
+                  <View style={{ width: '100%', marginBottom: 10 }}>
+                    {/* Selected File Card */}
+                    <View style={{
+                      backgroundColor: isDark ? '#0F172A' : '#FAF5FF',
+                      borderWidth: 1.5,
+                      borderColor: '#22C55E',
+                      borderRadius: 14,
+                      padding: 12,
+                      marginBottom: 10,
+                    }}>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1 }}>
+                          <Text style={{ fontSize: 24 }}>📄</Text>
+                          <View style={{ flex: 1 }}>
+                            <Text style={{ fontSize: 13, fontWeight: '800', color: isDark ? '#F8FAFC' : '#0F172A' }} numberOfLines={1}>
+                              {selectedJsonFile.name}
+                            </Text>
+                            <Text style={{ fontSize: 11, color: '#22C55E', fontWeight: '700', marginTop: 2 }}>
+                              ✓ Valid Store JSON ({(selectedJsonFile.size / 1024).toFixed(1)} KB)
+                            </Text>
+                          </View>
+                        </View>
+                        <TouchableOpacity
+                          onPress={() => setSelectedJsonFile(null)}
+                          style={{ backgroundColor: isDark ? '#334155' : '#E2E8F0', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6 }}
+                        >
+                          <Text style={{ fontSize: 11, fontWeight: '700', color: isDark ? '#CBD5E1' : '#475569' }}>Change</Text>
+                        </TouchableOpacity>
+                      </View>
+                    </View>
+
+                    {/* Animation Title */}
+                    <TextInput
+                      style={{
+                        backgroundColor: isDark ? '#0F172A' : '#F8FAFC',
+                        color: isDark ? '#F8FAFC' : '#0F172A',
+                        borderWidth: 1,
+                        borderColor: isDark ? '#334155' : '#CBD5E1',
+                        borderRadius: 10,
+                        padding: 10,
+                        fontSize: 12,
+                        marginBottom: 12,
+                      }}
+                      placeholder="Store Showcase Title (e.g. Mega Sale Banner)"
+                      placeholderTextColor="#94A3B8"
+                      value={lottieTitleInput}
+                      onChangeText={setLottieTitleInput}
+                    />
+
+                    {/* Submit Button */}
+                    <TouchableOpacity
+                      style={{
+                        backgroundColor: '#7C3AED',
+                        paddingVertical: 13,
+                        borderRadius: 12,
+                        alignItems: 'center',
+                        elevation: 3,
+                      }}
+                      onPress={() => {
+                        if (!selectedJsonFile) {
+                          Alert.alert('No File', 'Please select a JSON file first.');
+                          return;
+                        }
+                        handlePublishLottie(
+                          selectedJsonFile.content,
+                          lottieTitleInput.trim() || selectedJsonFile.name.replace(/\.json$/i, '')
+                        );
+                      }}
+                      disabled={isSavingLottie}
+                    >
+                      {isSavingLottie ? (
+                        <ActivityIndicator color="#FFFFFF" size="small" />
+                      ) : (
+                        <Text style={{ color: '#FFFFFF', fontWeight: '800', fontSize: 14 }}>
+                          🚀 Upload & Publish Store JSON
+                        </Text>
+                      )}
+                    </TouchableOpacity>
+                  </View>
+                )}
+              </View>
+            ) : (
+              <ScrollView style={{ maxHeight: 340 }}>
+                {LOTTIE_PRESETS.map((preset, pIdx) => (
+                  <TouchableOpacity
+                    key={`preset-${pIdx}`}
+                    activeOpacity={0.8}
+                    style={{
+                      padding: 12,
+                      borderRadius: 12,
+                      borderWidth: 1,
+                      borderColor: isDark ? '#334155' : '#E2E8F0',
+                      backgroundColor: isDark ? '#0F172A' : '#F8FAFC',
+                      marginBottom: 10,
+                    }}
+                    onPress={() => handlePublishLottie(preset.json, preset.title)}
+                  >
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <Text style={{ fontSize: 14, fontWeight: '800', color: isDark ? '#F8FAFC' : '#0F172A' }}>
+                        {preset.title}
+                      </Text>
+                      <Text style={{ fontSize: 12, color: '#7C3AED', fontWeight: '800' }}>Select ✓</Text>
+                    </View>
+                    <Text style={{ fontSize: 11, color: isDark ? '#94A3B8' : '#64748B', marginTop: 4 }}>
+                      {preset.desc}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            )}
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 };

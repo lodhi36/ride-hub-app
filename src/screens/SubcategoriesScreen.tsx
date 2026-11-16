@@ -16,12 +16,16 @@ import {
 } from 'react-native';
 import Icon from '../components/PngIcon';
 import api, { UPLOADS_URL } from '../services/api';
+import { resolveUploadUrl } from '../config/apiConfig';
 import { CartService } from '../services/CartService';
 import { useSocket } from '../context/SocketContext';
 import { CATEGORY_IMAGES, CATEGORY_ICONS } from '../utils/categoryHelper';
 import { LottieAnimation } from '../components/LottieAnimation';
 import { useAppLanguage } from '../context/LanguageContext';
 import { useTheme } from '../context/ThemeContext';
+import FastStorage from '../services/FastStorage';
+import { SubcategoriesSkeleton, ProductGridSkeleton, BannerSkeleton } from '../components/ShimmerSkeleton';
+import CachedImage, { prefetchImages } from '../components/CachedImage';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
@@ -131,9 +135,7 @@ const CATEGORY_DEFAULT_PRODUCTS: Record<string, any[]> = {
 
 const resolveFullUrl = (u?: string) => {
   if (!u || !u.trim()) return '';
-  if (u.startsWith('http') || u.startsWith('data:')) return u;
-  const clean = u.replace(/^\/?(api\/)?(uploads\/)?/, '');
-  return `${UPLOADS_URL}/${clean}`;
+  return resolveUploadUrl(u);
 };
 
 export default function SubcategoriesScreen({ route, navigation }: any) {
@@ -182,22 +184,42 @@ export default function SubcategoriesScreen({ route, navigation }: any) {
   // Theme
   const { isDark, currentColors } = useTheme('customer');
 
-  // States
-  const cachedInitialSubs = _subcategoriesGeneralCache[categoryIdentifier] || selectedCategory?.subcategories || [];
+  // States - Instant Zero-Lag Sync Hydration from FastStorage
+  const cachedInitialSubs = useMemo(() => {
+    return (
+      FastStorage.getItemSync<any[]>(`@cached_subcats_${categoryIdentifier}`) ||
+      FastStorage.getItemSync<any[]>(`@cached_subcats_${cleanCategoryKey}`) ||
+      _subcategoriesGeneralCache[categoryIdentifier] ||
+      selectedCategory?.subcategories ||
+      []
+    );
+  }, [categoryIdentifier, cleanCategoryKey, selectedCategory]);
+
   const [subcategories, setSubcategories] = useState<any[]>(cachedInitialSubs);
   const [loading, setLoading] = useState<boolean>(cachedInitialSubs.length === 0);
   const [activeFilter, setActiveFilter] = useState<string>('ALL');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [isSearchVisible, setIsSearchVisible] = useState<boolean>(false);
-  const [categoryBanners, setCategoryBanners] = useState<any[]>([]);
+  const [categoryBanners, setCategoryBanners] = useState<any[]>(() => {
+    const cached = FastStorage.getItemSync<any[]>(`@cached_banners_${cleanCategoryKey}`);
+    return Array.isArray(cached) && cached.length > 0 ? cached : [];
+  });
   const [bannerActiveIndex, setBannerActiveIndex] = useState<number>(0);
   const bannerScrollRef = React.useRef<ScrollView>(null);
-  const [adminBannerUrl, setAdminBannerUrl] = useState<string | null>(null);
+  const [adminBannerUrl, setAdminBannerUrl] = useState<string | null>(() => {
+    const cached = FastStorage.getItemSync<any[]>(`@cached_banners_${cleanCategoryKey}`);
+    return (Array.isArray(cached) && cached.length > 0 && cached[0].imageUrl) ? cached[0].imageUrl : null;
+  });
   const [bannerAspectRatio, setBannerAspectRatio] = useState<number>(2.27);
   const [adminLottieConfig, setAdminLottieConfig] = useState<any>(null);
   const [displayMode, setDisplayMode] = useState<'IMAGE' | 'LOTTIE' | 'BOTH'>('BOTH');
-  const [products, setProducts] = useState<any[]>([]);
-  const [supplierData, setSupplierData] = useState<any>(null);
+  const [products, setProducts] = useState<any[]>(() => {
+    const cached = FastStorage.getItemSync<any[]>(`@cached_products_${cleanCategoryKey}`);
+    return Array.isArray(cached) && cached.length > 0 ? cached : [];
+  });
+  const [supplierData, setSupplierData] = useState<any>(() => {
+    return FastStorage.getItemSync<any>(`@cached_supplier_${cleanCategoryKey}`) || null;
+  });
 
   // Cart synchronization
   const [cartCount, setCartCount] = useState<number>(() => CartService.getCartCount());
@@ -228,20 +250,24 @@ export default function SubcategoriesScreen({ route, navigation }: any) {
       let dMode: 'IMAGE' | 'LOTTIE' | 'BOTH' = 'IMAGE';
       const allBanners: any[] = [];
 
-      const resolveFullUrl = (u?: string) => {
-        if (!u || !u.trim()) return '';
-        if (u.startsWith('http') || u.startsWith('data:')) return u;
-        const clean = u.replace(/^\/?(api\/)?(uploads\/)?/, '');
-        return `${UPLOADS_URL}/${clean}`;
-      };
-
       // 1. Fetch /banner collection for this category as primary authoritative source
-      const bannerTarget = categoryTitle.toUpperCase().replace(/\s+/g, '_');
-      const res = await api.get(`/banner?target=${bannerTarget}&status=Active`).catch(() => null);
+      const targetCandidates = [
+        cleanCategoryKey.toUpperCase(),
+        categoryTitle.toUpperCase().replace(/\s+/g, '_'),
+        cleanCategoryKey === 'kirana' ? 'GROCERY' : null,
+        cleanCategoryKey === 'grocery' ? 'KIRANA' : null,
+        cleanCategoryKey === 'vegetables' ? 'FRUITS' : null,
+      ].filter(Boolean) as string[];
+
+      const res = await api.get('/banner?status=Active').catch(() => null);
       if (res?.data?.success && Array.isArray(res.data.data) && res.data.data.length > 0) {
-        const activeBanners = res.data.data.filter((b: any) => b.status === 'Active');
-        activeBanners.forEach((b: any) => {
-          const cleanUrl = resolveFullUrl(b.imageUrl);
+        const matchingBanners = res.data.data.filter((b: any) => {
+          if (b.status !== 'Active') return false;
+          const bt = String(b.target || '').toUpperCase();
+          return targetCandidates.some((tc) => bt.includes(tc) || tc.includes(bt));
+        });
+        matchingBanners.forEach((b: any) => {
+          const cleanUrl = resolveUploadUrl(b.imageUrl);
           if (cleanUrl) {
             const rawBase = cleanUrl.split('?')[0].trim().toLowerCase();
             if (!allBanners.some((existing) => existing.rawBase === rawBase)) {
@@ -253,15 +279,17 @@ export default function SubcategoriesScreen({ route, navigation }: any) {
       }
 
       // 2. Fetch ScreenMedia ONLY for Lottie config or fallback if /banner is empty
-      const screenRes = await api.get(`/screen-media/target/${cleanCategoryKey}`).catch(() => null);
+      const screenTarget = `${cleanCategoryKey.toUpperCase()}_BANNER`;
+      const screenRes = (await api.get(`/screen-media/target/${screenTarget}`).catch(() => null)) ||
+                        (await api.get(`/screen-media/target/${cleanCategoryKey}`).catch(() => null));
       if (screenRes?.data?.success && screenRes.data.screen) {
         const sc = screenRes.data.screen;
         if (sc.isActive !== false) {
           const rawImg = sc.imageUrl || (sc.currentMediaType === 'IMAGE' || sc.currentMediaType === 'BOTH' ? sc.mediaUrl : '');
           const rawLottie = sc.lottieUrl || (sc.currentMediaType === 'LOTTIE' ? sc.mediaUrl : '');
 
-          const img = resolveFullUrl(rawImg);
-          const lottie = resolveFullUrl(rawLottie);
+          const img = resolveUploadUrl(rawImg);
+          const lottie = resolveUploadUrl(rawLottie);
 
           // If no banners from /banner, fallback to ScreenMedia image
           if (img && allBanners.length === 0) {
@@ -304,6 +332,11 @@ export default function SubcategoriesScreen({ route, navigation }: any) {
       }
 
       setCategoryBanners(allBanners);
+      if (allBanners.length > 0) {
+        FastStorage.setItem(`@cached_banners_${cleanCategoryKey}`, allBanners, 30 * 60 * 1000);
+        const bUrls = allBanners.map((b: any) => b.imageUrl).filter(Boolean);
+        prefetchImages(bUrls);
+      }
       const primaryUrl = allBanners.length > 0 ? allBanners[0].imageUrl : null;
       setAdminBannerUrl(primaryUrl);
       if (primaryUrl) {
@@ -335,32 +368,38 @@ export default function SubcategoriesScreen({ route, navigation }: any) {
     return () => clearInterval(timer);
   }, [categoryBanners.length]);
 
-  // Fetch Category & Subcategories from Backend API
+  // Fetch Category & Subcategories from Backend API (Deduplicated + Cached)
   const fetchCategoryDetails = useCallback(async () => {
     try {
-      if (!_subcategoriesGeneralCache[categoryIdentifier]) {
+      if (subcategories.length === 0 && !_subcategoriesGeneralCache[categoryIdentifier]) {
         setLoading(true);
       }
-      const res = await api.get(`/categories/${categoryIdentifier}`).catch(() => null);
-      if (res?.data?.success && res.data.category) {
-        const activeSubs = (res.data.subcategories || res.data.category?.subcategories || []).filter(
-          (s: any) => s.isActive !== false
-        );
+      const activeSubs = await FastStorage.deduplicate(`subcats_fetch_${categoryIdentifier}`, async () => {
+        const res = await api.get(`/categories/${categoryIdentifier}`).catch(() => null);
+        if (res?.data?.success && res.data.category) {
+          return (res.data.subcategories || res.data.category?.subcategories || []).filter(
+            (s: any) => s.isActive !== false
+          );
+        } else if (selectedCategory?.subcategories && selectedCategory.subcategories.length > 0) {
+          return selectedCategory.subcategories.filter((s: any) => s.isActive !== false);
+        }
+        return [];
+      });
+
+      if (activeSubs && activeSubs.length > 0) {
         _subcategoriesGeneralCache[categoryIdentifier] = activeSubs;
         setSubcategories(activeSubs);
-      } else if (selectedCategory?.subcategories && selectedCategory.subcategories.length > 0) {
-        const activeSubs = selectedCategory.subcategories.filter((s: any) => s.isActive !== false);
-        _subcategoriesGeneralCache[categoryIdentifier] = activeSubs;
-        setSubcategories(activeSubs);
+        FastStorage.setItem(`@cached_subcats_${categoryIdentifier}`, activeSubs, 60 * 60 * 1000);
+        FastStorage.setItem(`@cached_subcats_${cleanCategoryKey}`, activeSubs, 60 * 60 * 1000);
       }
     } catch (err) {
       console.log('[SubcategoriesScreen] Error fetching category details:', err);
     } finally {
       setLoading(false);
     }
-  }, [categoryIdentifier, selectedCategory]);
+  }, [categoryIdentifier, selectedCategory, cleanCategoryKey, subcategories.length]);
 
-  // Fetch Online Store and Products for this Category
+  // Fetch Online Store and Products for this Category (Deduplicated + Cached)
   const fetchCategoryProducts = useCallback(async () => {
     try {
       const coordsParams =
@@ -384,6 +423,7 @@ export default function SubcategoriesScreen({ route, navigation }: any) {
 
       const storeId = catStore._id;
       setSupplierData(catStore);
+      FastStorage.setItem(`@cached_supplier_${cleanCategoryKey}`, catStore, 15 * 60 * 1000);
 
       // Try fetching backend store menu
       const menuRes = await api.get(`/menu/${storeId}?forCustomer=true`).catch(() => null);
@@ -402,6 +442,11 @@ export default function SubcategoriesScreen({ route, navigation }: any) {
       }
 
       setProducts(beItems);
+      if (beItems.length > 0) {
+        FastStorage.setItem(`@cached_products_${cleanCategoryKey}`, beItems, 15 * 60 * 1000);
+        const pImages = beItems.map((p: any) => resolveFullUrl(p.image || p.imageUrl)).filter(Boolean);
+        prefetchImages(pImages);
+      }
     } catch (e) {
       console.log('[SubcategoriesScreen] Error fetching products:', e);
       setProducts([]);
@@ -757,11 +802,8 @@ export default function SubcategoriesScreen({ route, navigation }: any) {
         ) : null}
 
         {/* 3. DYNAMIC SUBCATEGORIES ROWS (Row 1 & Row 2 layout) */}
-        {loading ? (
-          <View style={styles.loadingWrap}>
-            <ActivityIndicator size="small" color="#0066FF" />
-            <Text style={styles.loadingText}>Loading {categoryTitle} subcategories...</Text>
-          </View>
+        {loading && subcategories.length === 0 ? (
+          <SubcategoriesSkeleton />
         ) : subcategories.length === 0 ? (
           /* CLEAN EMPTY STATE IF NO ACTIVE SUBCATEGORIES */
           <View style={styles.emptyContainer}>
@@ -826,7 +868,9 @@ export default function SubcategoriesScreen({ route, navigation }: any) {
             </TouchableOpacity>
           </View>
 
-          {filteredProducts.length === 0 ? (
+          {loading && products.length === 0 ? (
+            <ProductGridSkeleton count={4} />
+          ) : filteredProducts.length === 0 ? (
             <View style={styles.emptyWrap}>
               <Icon name="cube-outline" size={48} color="#94A3B8" />
               <Text style={styles.emptyWrapTitle}>

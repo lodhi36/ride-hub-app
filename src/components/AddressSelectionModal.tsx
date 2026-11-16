@@ -23,6 +23,7 @@ import {
   reverseGeocodeCoords,
   deleteAddressFromStorage,
 } from '../services/LocationAddressService';
+import api from '../services/api';
 import { useTheme } from '../context/ThemeContext';
 
 interface AddressSelectionModalProps {
@@ -61,6 +62,7 @@ const AddressSelectionModal: React.FC<AddressSelectionModalProps> = ({
   // Form fields
   const [tag, setTag] = useState<'Home' | 'Work' | 'Other'>('Home');
   const [houseNo, setHouseNo] = useState<string>('');
+  const [floor, setFloor] = useState<string>('');
   const [landmark, setLandmark] = useState<string>('');
   const [city, setCity] = useState<string>('');
   const [pincode, setPincode] = useState<string>('');
@@ -230,11 +232,38 @@ const AddressSelectionModal: React.FC<AddressSelectionModalProps> = ({
   const loadAddresses = async () => {
     try {
       setLoadingList(true);
-      const list = await getSavedAddresses();
-      setSavedAddresses(list);
-      // If no saved addresses exist yet, auto open the add form
-      if (list.length === 0) {
-        setShowAddForm(true);
+      const localList = await getSavedAddresses();
+      if (localList && localList.length > 0) {
+        setSavedAddresses(localList);
+      }
+
+      // Sync with MongoDB backend
+      try {
+        const resp = await api.get('/customer/addresses');
+        if (resp.data?.success && Array.isArray(resp.data?.addresses) && resp.data.addresses.length > 0) {
+          const remoteList: DeliveryAddress[] = resp.data.addresses.map((a: any) => ({
+            id: a._id?.toString() || a.id || `addr_${Date.now()}`,
+            tag: a.tag || 'Home',
+            houseNo: a.houseNumber || a.houseNo || '',
+            landmark: a.landmark || a.formattedAddress || a.address || '',
+            city: a.city || 'Bhopal',
+            pincode: a.pincode || '',
+            fullAddress: a.formattedAddress || a.address || '',
+            latitude: a.latitude || (a.location?.coordinates && a.location.coordinates[1]) || 0,
+            longitude: a.longitude || (a.location?.coordinates && a.location.coordinates[0]) || 0,
+            isCurrentLocation: false,
+          }));
+          setSavedAddresses(remoteList);
+          for (const item of remoteList) {
+            await saveAddressToStorage(item);
+          }
+        } else if ((!localList || localList.length === 0) && (!resp.data?.addresses || resp.data.addresses.length === 0)) {
+          setShowAddForm(true);
+        }
+      } catch (_) {
+        if (!localList || localList.length === 0) {
+          setShowAddForm(true);
+        }
       }
     } catch (e) {
       console.log('[LOAD ADDRESSES ERROR]', e);
@@ -273,6 +302,13 @@ const AddressSelectionModal: React.FC<AddressSelectionModalProps> = ({
 
       const pos = res.fix;
       setFormCoords(pos);
+      // REQUIREMENT 2: Accuracy check > 50 meters
+      if (pos.accuracy && pos.accuracy > 50) {
+        Alert.alert(
+          'GPS शुद्धता चेतावनी',
+          'लोकेशन ठीक नहीं मिल रही, कृपया पिन खुद ठीक करें।\n(GPS शुद्धता: ' + Math.round(pos.accuracy) + 'm)'
+        );
+      }
       const geo = await reverseGeocodeCoords(pos.latitude, pos.longitude);
 
       const gpsAddr: DeliveryAddress = {
@@ -324,7 +360,7 @@ const AddressSelectionModal: React.FC<AddressSelectionModalProps> = ({
     const newAddr: DeliveryAddress = {
       id: `addr_${Date.now()}`,
       tag,
-      houseNo: houseNo.trim(),
+      houseNo: [houseNo.trim(), floor.trim()].filter(Boolean).join(', '),
       landmark: landmark.trim(),
       city: city.trim() || 'Bhopal',
       pincode: pincode.trim(),
@@ -333,6 +369,25 @@ const AddressSelectionModal: React.FC<AddressSelectionModalProps> = ({
       longitude: defaultLon,
       isCurrentLocation: Boolean(formCoords),
     };
+
+    // Save to backend database
+    try {
+      await api.post('/customer/addresses', {
+        tag,
+        label: tag,
+        houseNumber: houseNo.trim(),
+        floor: floor.trim(),
+        landmark: landmark.trim(),
+        address: full,
+        formattedAddress: full,
+        latitude: defaultLat,
+        longitude: defaultLon,
+        locationAccuracy: formCoords?.accuracy || 15,
+        isDefault: true,
+      });
+    } catch (e: any) {
+      console.log('[CUSTOMER ADDR BACKEND SYNC NOTE]:', e.message);
+    }
 
     const updated = await saveAddressToStorage(newAddr);
     setSavedAddresses(updated);
@@ -371,61 +426,6 @@ const AddressSelectionModal: React.FC<AddressSelectionModalProps> = ({
     setShowAddForm(false);
   };
 
-
-  // Bhopal Service Zones for Instant Customer Selection
-  const BHOPAL_CUSTOMER_ZONES = [
-    {
-      id: 'zone_old_bhopal',
-      name: 'Your Zone (Old Bhopal)',
-      area: 'Karond, Lalghati, New Market, Ashoka Garden',
-      latitude: 23.2720,
-      longitude: 77.3980,
-      tag: 'Old Bhopal',
-    },
-    {
-      id: 'zone_arwaliya',
-      name: 'Arwaliya (Old Bhopal)',
-      area: 'Arwaliya, Huzur Tahsil, Bhanpur, Berasia Road',
-      latitude: 23.3050,
-      longitude: 77.4200,
-      tag: 'Old Bhopal',
-    },
-    {
-      id: 'zone_new_bhopal',
-      name: 'New Bhopal',
-      area: 'MP Nagar, Arera Colony, Shahpura, Kolar Road',
-      latitude: 23.2050,
-      longitude: 77.4300,
-      tag: 'New Bhopal',
-    },
-    {
-      id: 'zone_bhel',
-      name: 'BHEL',
-      area: 'BHEL Township, Awadhpuri, Piplani, Indrapuri',
-      latitude: 23.2420,
-      longitude: 77.4800,
-      tag: 'BHEL',
-    },
-  ];
-
-  const handleSelectZoneLocation = async (zoneItem: typeof BHOPAL_CUSTOMER_ZONES[0]) => {
-    const zoneAddr: DeliveryAddress = {
-      id: `addr_${zoneItem.id}_${Date.now()}`,
-      tag: 'Home',
-      houseNo: zoneItem.name,
-      landmark: zoneItem.area,
-      city: 'Bhopal',
-      pincode: '462001',
-      fullAddress: `${zoneItem.name}, ${zoneItem.area}, Bhopal`,
-      latitude: zoneItem.latitude,
-      longitude: zoneItem.longitude,
-      isCurrentLocation: true,
-    };
-    await saveAddressToStorage(zoneAddr);
-    await setActiveDeliveryAddress(zoneAddr);
-    onSelectAddress(zoneAddr);
-    onClose();
-  };
 
   const { isDark, currentColors } = useTheme();
 
@@ -511,46 +511,6 @@ const AddressSelectionModal: React.FC<AddressSelectionModalProps> = ({
                 <Text style={styles.chevronActionText}>➔</Text>
               )}
             </TouchableOpacity>
-
-            {/* QUICK SERVICE ZONE SELECTOR */}
-            <View style={{ marginTop: 14, marginBottom: 8 }}>
-              <Text style={{ fontSize: 13, fontWeight: '800', color: '#0F172A', marginBottom: 4 }}>
-                📍 Or Select Service Zone in Bhopal
-              </Text>
-              <Text style={{ fontSize: 11, color: '#64748B', marginBottom: 10 }}>
-                Instant location for Old Bhopal (Your Zone & Arwaliya), New Bhopal & BHEL
-              </Text>
-              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
-                {BHOPAL_CUSTOMER_ZONES.map((z) => (
-                  <TouchableOpacity
-                    key={z.id}
-                    style={{
-                      flex: 1,
-                      minWidth: '47%',
-                      backgroundColor: z.name.includes('Arwaliya') ? '#FEF3C7' : '#F1F5F9',
-                      borderRadius: 12,
-                      padding: 10,
-                      borderWidth: 1,
-                      borderColor: z.name.includes('Arwaliya') ? '#F59E0B' : '#E2E8F0',
-                    }}
-                    onPress={() => handleSelectZoneLocation(z)}
-                    activeOpacity={0.8}
-                  >
-                    <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 2 }}>
-                      <Text style={{ fontSize: 12, fontWeight: '800', color: '#0F172A' }}>
-                        {z.name}
-                      </Text>
-                      <View style={{ backgroundColor: z.tag === 'Old Bhopal' ? '#B45309' : '#0066FF', borderRadius: 4, paddingHorizontal: 5, paddingVertical: 1 }}>
-                        <Text style={{ color: '#FFFFFF', fontSize: 9, fontWeight: '800' }}>{z.tag}</Text>
-                      </View>
-                    </View>
-                    <Text style={{ fontSize: 10, color: '#475569' }} numberOfLines={2}>
-                      {z.area}
-                    </Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
-            </View>
 
             {/* TOGGLE FORM BUTTON */}
             {!showAddForm ? (

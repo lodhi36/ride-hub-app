@@ -19,7 +19,6 @@ import Icon from '../components/PngIcon';
 import api, { BASE_URL } from '../services/api';
 import AddressSelectionModal from '../components/AddressSelectionModal';
 import { CustomerHelpCenterModal } from '../components/CustomerHelpCenterModal';
-import { FriendDeliveryLocationModal } from '../components/FriendDeliveryLocationModal';
 import { AuthContext } from '../context/AuthContext';
 import { useSocket } from '../context/SocketContext';
 import { useTheme } from '../context/ThemeContext';
@@ -29,6 +28,7 @@ import {
   getActiveDeliveryAddress,
   fetchCurrentGpsPosition,
   reverseGeocodeCoords,
+  isDummyCoordinates,
 } from '../services/LocationAddressService';
 import { resolveCategoryName } from '../utils/categoryHelper';
 
@@ -162,24 +162,13 @@ export const CartScreen: React.FC<any> = ({ route, navigation }) => {
   const [cartState, setCartState] = useState<CartState>(() => CartService.getCart());
   const [deliveryAddress, setDeliveryAddress] = useState<DeliveryAddress | null>(null);
   const [addressModalVisible, setAddressModalVisible] = useState<boolean>(false);
-  const [selectedPaymentMethod, setSelectedPaymentMethod] = useState<'cod' | 'online'>('cod');
+  const [selectedPaymentMethod, setSelectedPaymentMethod] = useState<'online'>('online');
   const [specialInstructions, setSpecialInstructions] = useState<string>('');
   const [placingOrder, setPlacingOrder] = useState<boolean>(false);
   const [showCustomerHelpModal, setShowCustomerHelpModal] = useState<boolean>(false);
 
-  // ── Delivery Target Selection: Self vs Friend ──
-  const [deliveryTargetMode, setDeliveryTargetMode] = useState<'SELF' | 'FRIEND'>('SELF');
-  const [friendName, setFriendName] = useState<string>('');
-  const [friendPhone, setFriendPhone] = useState<string>('');
-  const [friendLocationInput, setFriendLocationInput] = useState<string>('');
-  const [friendCoords, setFriendCoords] = useState<{ latitude: number; longitude: number } | null>(null);
-  const [friendResolvedAddress, setFriendResolvedAddress] = useState<string>('');
-  const [friendChecking, setFriendChecking] = useState<boolean>(false);
-  const [friendLocationStatus, setFriendLocationStatus] = useState<'NONE' | 'INSIDE' | 'OUTSIDE'>('NONE');
-  const [friendDistanceKm, setFriendDistanceKm] = useState<number | null>(null);
   const [isOutside5KmRadius, setIsOutside5KmRadius] = useState<boolean>(false);
   const [actualRoadDistanceKm, setActualRoadDistanceKm] = useState<number | null>(null);
-  const [friendMapModalVisible, setFriendMapModalVisible] = useState<boolean>(false);
 
   // Idempotency submission ref to prevent double-tap submissions
   const isSubmittingRef = useRef<boolean>(false);
@@ -270,11 +259,8 @@ export const CartScreen: React.FC<any> = ({ route, navigation }) => {
     return itemsList.reduce((acc, it) => acc + it.price * it.quantity, 0);
   }, [itemsList]);
 
-  // Active Distance in KM based on Target Mode (FRIEND vs SELF)
+  // Active Distance in KM
   const activeDistanceKm = useMemo(() => {
-    if (deliveryTargetMode === 'FRIEND') {
-      return actualRoadDistanceKm || friendDistanceKm || 0;
-    }
     const rLat = Number(restaurant.businessLatitude || restaurant.latitude || 0);
     const rLon = Number(restaurant.businessLongitude || restaurant.longitude || 0);
     const cLat = Number(deliveryAddress?.latitude || 0);
@@ -283,7 +269,7 @@ export const CartScreen: React.FC<any> = ({ route, navigation }) => {
       return parseFloat(calculateHaversineKm(rLat, rLon, cLat, cLon).toFixed(1));
     }
     return 1.5; // Safe default local distance
-  }, [deliveryTargetMode, actualRoadDistanceKm, friendDistanceKm, restaurant, deliveryAddress]);
+  }, [restaurant, deliveryAddress]);
 
   // Delivery Charge Formula:
   // - 1 to 2 km -> ₹20 flat
@@ -357,117 +343,7 @@ export const CartScreen: React.FC<any> = ({ route, navigation }) => {
     setIsOutside5KmRadius(hDist > 5.0);
   };
 
-  // Re-check 5 KM road distance when friend coordinates change
-  useEffect(() => {
-    if (deliveryTargetMode === 'FRIEND' && friendCoords) {
-      check5KmRoadDistance(friendCoords.latitude, friendCoords.longitude);
-    }
-  }, [deliveryTargetMode, friendCoords, rId]);
-
-  // ── Friend Location Verification (Text / Address / Link) ──
-  const handleCheckFriendLocation = async () => {
-    if (!friendLocationInput.trim()) {
-      Alert.alert(
-        'Address or Location Needed',
-        'कृपया अपने दोस्त का पता या WhatsApp Location लिंक यहाँ पेस्ट करें और Verify पर क्लिक करें।'
-      );
-      return;
-    }
-
-    try {
-      setFriendChecking(true);
-      setFriendLocationStatus('NONE');
-
-      let resolvedLat = 0;
-      let resolvedLon = 0;
-      let displayAddress = '';
-
-      // 1. Try coordinate parsing from link or raw text
-      let parsed = extractCoordinatesFromLinkOrText(friendLocationInput);
-
-      // If short link e.g. maps.app.goo.gl, expand via fetch redirect
-      if (!parsed && friendLocationInput.includes('http')) {
-        try {
-          const resp = await fetch(friendLocationInput.trim(), { method: 'GET', redirect: 'follow' });
-          if (resp.url) {
-            parsed = extractCoordinatesFromLinkOrText(resp.url);
-          }
-        } catch (_) {}
-      }
-
-      if (parsed) {
-        resolvedLat = parsed.latitude;
-        resolvedLon = parsed.longitude;
-        try {
-          const geo = await reverseGeocodeCoords(parsed.latitude, parsed.longitude);
-          displayAddress = geo.fullAddress || `Lat: ${parsed.latitude.toFixed(4)}, Lon: ${parsed.longitude.toFixed(4)}`;
-        } catch (_) {
-          displayAddress = `Lat: ${parsed.latitude.toFixed(4)}, Lon: ${parsed.longitude.toFixed(4)}`;
-        }
-      } else {
-        // 2. Multi-step Forward Geocoding for plain text address (e.g. Lambakheda, MP Nagar, Bhopal)
-        const geoResult = await geocodeAddressText(friendLocationInput.trim());
-        if (geoResult) {
-          resolvedLat = geoResult.latitude;
-          resolvedLon = geoResult.longitude;
-          displayAddress = geoResult.formattedAddress;
-        }
-      }
-
-      if (!resolvedLat || !resolvedLon || resolvedLat === 0) {
-        Alert.alert(
-          'Location Not Recognized',
-          'Could not find coordinates for this address. Please ensure the colony/area name, city (Bhopal), or 6-digit PIN code is mentioned, or use "Open Pin on Map".'
-        );
-        setFriendLocationStatus('NONE');
-        return;
-      }
-
-      // 3. First Validation: Zone Check via Backend API
-      const zoneRes = await api.post('/zones/check-customer-serviceable', {
-        latitude: resolvedLat,
-        longitude: resolvedLon,
-      });
-
-      if (zoneRes.data && zoneRes.data.serviceable === false) {
-        setFriendLocationStatus('OUTSIDE');
-        setFriendDistanceKm(zoneRes.data.distanceKm || null);
-        setFriendCoords({ latitude: resolvedLat, longitude: resolvedLon });
-        setFriendResolvedAddress(displayAddress || friendLocationInput.trim());
-        setIsOutside5KmRadius(false);
-      } else {
-        setFriendLocationStatus('INSIDE');
-        setFriendCoords({ latitude: resolvedLat, longitude: resolvedLon });
-        setFriendResolvedAddress(displayAddress || friendLocationInput.trim());
-
-        // 4. Second Validation: 5 KM Road Distance from Restaurant
-        await check5KmRoadDistance(resolvedLat, resolvedLon);
-      }
-    } catch (err: any) {
-      console.warn('[CartScreen] Error verifying friend location:', err);
-      Alert.alert('Verification Notice', 'Could not complete verification. Please check internet connection.');
-    } finally {
-      setFriendChecking(false);
-    }
-  };
-
-  // Called when user picks friend address from the map modal
-  const handleFriendLocationConfirmed = (locationData: {
-    latitude: number;
-    longitude: number;
-    address: string;
-    name?: string;
-    phone?: string;
-  }) => {
-    setFriendCoords({ latitude: locationData.latitude, longitude: locationData.longitude });
-    setFriendResolvedAddress(locationData.address);
-    setFriendLocationInput(locationData.address);
-    setFriendLocationStatus('INSIDE');
-    if (locationData.name) setFriendName(locationData.name);
-    if (locationData.phone) setFriendPhone(locationData.phone);
-    check5KmRoadDistance(locationData.latitude, locationData.longitude);
-  };
-
+  
   const handleUpdateQuantity = (itemId: string, delta: number) => {
     CartService.updateItemQuantity(itemId, delta);
   };
@@ -482,49 +358,11 @@ export const CartScreen: React.FC<any> = ({ route, navigation }) => {
     }
 
     // ── 1. SELF Mode Validations ──
-    if (deliveryTargetMode === 'SELF') {
-      if (!deliveryAddress || !deliveryAddress.fullAddress) {
-        Alert.alert('Delivery Address Required', 'Please select or add a delivery address to continue.', [
-          { text: 'Select Address', onPress: () => setAddressModalVisible(true) },
-        ]);
-        return;
-      }
-    } else {
-      // ── 2. FRIEND Mode Validations ──
-      if (!friendName.trim()) {
-        Alert.alert('Friend Name Required', "Please enter your friend's full name.");
-        return;
-      }
-
-      const cleanPhone = friendPhone.replace(/\D/g, '');
-      if (cleanPhone.length < 10) {
-        Alert.alert('Valid Phone Number Required', "Please enter your friend's valid 10-digit mobile number so the delivery partner can contact them.");
-        return;
-      }
-
-      if (!friendCoords) {
-        Alert.alert(
-          'Friend Delivery Location Required',
-          "Please verify your friend's address or pin their exact delivery location on the map before proceeding."
-        );
-        return;
-      }
-
-      if (friendLocationStatus === 'OUTSIDE') {
-        Alert.alert(
-          'Out of Service Zone',
-          'Sorry! This location is out of our delivery zone.'
-        );
-        return;
-      }
-
-      if (isOutside5KmRadius) {
-        Alert.alert(
-          'Restaurant Range Exceeded',
-          "Sorry! This restaurant cannot deliver to your friend's selected address because it is outside the 5 KM delivery range. Please select another restaurant or change the delivery address."
-        );
-        return;
-      }
+    if (!deliveryAddress || !deliveryAddress.fullAddress) {
+      Alert.alert('Delivery Address Required', 'Please select or add a delivery address to continue.', [
+        { text: 'Select Address', onPress: () => setAddressModalVisible(true) },
+      ]);
+      return;
     }
 
     try {
@@ -532,34 +370,34 @@ export const CartScreen: React.FC<any> = ({ route, navigation }) => {
       setPlacingOrder(true);
 
       const newBookingId = `ride_${Date.now()}_${Math.floor(Math.random() * 9000 + 1000)}`;
-      let custLat = deliveryTargetMode === 'FRIEND' && friendCoords ? friendCoords.latitude : Number(deliveryAddress?.latitude || 0);
-      let custLon = deliveryTargetMode === 'FRIEND' && friendCoords ? friendCoords.longitude : Number(deliveryAddress?.longitude || 0);
+      let custLat = Number(deliveryAddress?.latitude || 0);
+      let custLon = Number(deliveryAddress?.longitude || 0);
 
-      if (custLat === 0 || custLon === 0 || custLat === 23.2599) {
+      if (isDummyCoordinates(custLat, custLon)) {
         const liveGps = await fetchCurrentGpsPosition(false);
-        if (liveGps && liveGps.latitude && liveGps.longitude) {
+        if (liveGps && liveGps.latitude && liveGps.longitude && !isDummyCoordinates(liveGps.latitude, liveGps.longitude)) {
           custLat = liveGps.latitude;
           custLon = liveGps.longitude;
         }
       }
 
+      if (isDummyCoordinates(custLat, custLon)) {
+        isSubmittingRef.current = false;
+        setPlacingOrder(false);
+        Alert.alert('Location Required', 'Unable to fetch current location. Retry.');
+        return;
+      }
+
       const restoLat = Number(restaurant.businessLatitude || restaurant.latitude || (custLat !== 0 ? custLat : 0));
       const restoLon = Number(restaurant.businessLongitude || restaurant.longitude || (custLon !== 0 ? custLon : 0));
 
-      const deliveryFullAddr =
-        deliveryTargetMode === 'FRIEND' && friendResolvedAddress
-          ? `${friendName.trim()} (${friendPhone.trim()}) - ${friendResolvedAddress}`
-          : (deliveryAddress?.fullAddress || 'Customer Address');
+      const deliveryFullAddr = deliveryAddress?.fullAddress || 'Customer Address';
 
       const orderCustomerName =
-        deliveryTargetMode === 'FRIEND' && friendName.trim()
-          ? friendName.trim()
-          : ((deliveryAddress as any)?.contactPersonName || user?.name || (user as any)?.username || 'Customer');
+        (deliveryAddress as any)?.contactPersonName || user?.name || (user as any)?.username || 'Customer';
 
       const orderCustomerPhone =
-        deliveryTargetMode === 'FRIEND' && friendPhone.trim()
-          ? friendPhone.trim()
-          : ((deliveryAddress as any)?.contactPersonPhone || user?.phoneNumber || '9999999999');
+        (deliveryAddress as any)?.contactPersonPhone || user?.phoneNumber || '9999999999';
 
       const richCartItems = itemsList.map((it) => ({
         id: it.id,
@@ -583,12 +421,19 @@ export const CartScreen: React.FC<any> = ({ route, navigation }) => {
         customerMobile: orderCustomerPhone,
         pickupLocation: restaurant.address || restaurant.businessAddress || restoName,
         dropLocation: deliveryFullAddr,
+        customerAddress: deliveryFullAddr,
+        destinationAddress: deliveryFullAddr,
         pickupLatitude: restoLat,
         pickupLongitude: restoLon,
         destinationLatitude: custLat,
         destinationLongitude: custLon,
         latitude: custLat,
         longitude: custLon,
+        houseNumber: deliveryAddress?.houseNo || '',
+        floor: (deliveryAddress as any)?.floor || '',
+        landmark: deliveryAddress?.landmark || '',
+        addressTag: deliveryAddress?.tag || 'Home',
+        locationAccuracy: (deliveryAddress as any)?.locationAccuracy || 15,
         deliveryFee: deliveryFee,
         subtotal: subtotal,
         distanceKm: activeDistanceKm,
@@ -601,12 +446,13 @@ export const CartScreen: React.FC<any> = ({ route, navigation }) => {
         restaurantName: restoName,
         storeName: restoName,
         items: richCartItems,
-        orderType: deliveryTargetMode === 'FRIEND' ? 'SOMEONE_ELSE' : 'SELF',
-        recipientName: deliveryTargetMode === 'FRIEND' ? friendName.trim() : null,
-        recipientPhone: deliveryTargetMode === 'FRIEND' ? friendPhone.trim() : null,
-        recipientAddress: deliveryTargetMode === 'FRIEND' ? (friendResolvedAddress || friendLocationInput.trim()) : null,
-        recipientLatitude: deliveryTargetMode === 'FRIEND' ? custLat : null,
-        recipientLongitude: deliveryTargetMode === 'FRIEND' ? custLon : null,
+        cartItems: richCartItems,
+        orderType: 'SELF',
+        recipientName: null,
+        recipientPhone: null,
+        recipientAddress: null,
+        recipientLatitude: null,
+        recipientLongitude: null,
         calculatedRoadDistance: actualRoadDistanceKm || null,
         allowedDeliveryRadius: 5,
         customerNotes: specialInstructions.trim(),
@@ -708,202 +554,26 @@ export const CartScreen: React.FC<any> = ({ route, navigation }) => {
         </View>
       ) : (
         <ScrollView style={styles.scrollView} contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
-          {/* 1. DELIVERY TARGET: SELF VS FRIEND */}
+          {/* 1. DELIVERY ADDRESS SECTION */}
           <View style={styles.targetSectionCard}>
-            <Text style={styles.sectionHeaderTitle}>Who is this order for?</Text>
-            <View style={styles.deliveryTargetRow}>
-              <TouchableOpacity
-                style={[styles.deliveryTargetBtn, deliveryTargetMode === 'SELF' && styles.deliveryTargetBtnActive]}
-                onPress={() => setDeliveryTargetMode('SELF')}
-                activeOpacity={0.8}
-              >
-                <Icon
-                  name="person"
-                  size={18}
-                  color={deliveryTargetMode === 'SELF' ? '#0066FF' : '#64748B'}
-                />
-                <Text
-                  style={[
-                    styles.deliveryTargetText,
-                    deliveryTargetMode === 'SELF' && styles.deliveryTargetTextActive,
-                  ]}
-                >
-                  Order for Myself
+            <View style={styles.addressHeaderRow}>
+              <View style={styles.addressIconWrap}>
+                <Icon name="location-sharp" size={18} color="#0066FF" />
+              </View>
+              <View style={{ flex: 1, marginLeft: 10 }}>
+                <Text style={styles.addressLabel}>Delivery Address</Text>
+                <Text style={styles.addressValue} numberOfLines={2}>
+                  {deliveryAddress?.fullAddress || 'Select Delivery Address'}
                 </Text>
-              </TouchableOpacity>
-
+              </View>
               <TouchableOpacity
-                style={[styles.deliveryTargetBtn, deliveryTargetMode === 'FRIEND' && styles.deliveryTargetBtnActive]}
-                onPress={() => setDeliveryTargetMode('FRIEND')}
-                activeOpacity={0.8}
+                style={styles.changeAddressBtn}
+                onPress={() => setAddressModalVisible(true)}
+                activeOpacity={0.7}
               >
-                <Icon
-                  name="people"
-                  size={18}
-                  color={deliveryTargetMode === 'FRIEND' ? '#0066FF' : '#64748B'}
-                />
-                <Text
-                  style={[
-                    styles.deliveryTargetText,
-                    deliveryTargetMode === 'FRIEND' && styles.deliveryTargetTextActive,
-                  ]}
-                >
-                  Order for Friend
-                </Text>
+                <Text style={styles.changeAddressText}>Change</Text>
               </TouchableOpacity>
             </View>
-
-            {/* If Order for Friend is selected */}
-            {deliveryTargetMode === 'FRIEND' && (
-              <View style={styles.friendDetailsContainer}>
-                <Text style={styles.friendNoticeTitle}>Friend Delivery Information</Text>
-                <Text style={styles.friendNoticeSub}>
-                  Enter your friend's contact and delivery address or WhatsApp location pin link.
-                </Text>
-
-                <View style={styles.friendInputGroup}>
-                  <Text style={styles.friendInputLabel}>Friend's Name *</Text>
-                  <TextInput
-                    style={styles.friendTextInput}
-                    placeholder="e.g. Rahul Sharma"
-                    placeholderTextColor="#94A3B8"
-                    value={friendName}
-                    onChangeText={setFriendName}
-                  />
-                </View>
-
-                <View style={styles.friendInputGroup}>
-                  <Text style={styles.friendInputLabel}>Friend's Phone (Rider will call them) *</Text>
-                  <TextInput
-                    style={styles.friendTextInput}
-                    placeholder="e.g. 9876543210"
-                    placeholderTextColor="#94A3B8"
-                    keyboardType="phone-pad"
-                    maxLength={12}
-                    value={friendPhone}
-                    onChangeText={setFriendPhone}
-                  />
-                </View>
-
-                {/* Open Pin on Map Dedicated Button */}
-                <TouchableOpacity
-                  style={styles.openMapBtn}
-                  onPress={() => setFriendMapModalVisible(true)}
-                  activeOpacity={0.85}
-                >
-                  <Text style={styles.openMapBtnIcon}>🗺️</Text>
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.openMapBtnTitle}>Choose on Interactive Map</Text>
-                    <Text style={styles.openMapBtnSub}>Drag map pin, check Bhopal zones & 5 KM distance</Text>
-                  </View>
-                  <Text style={styles.openMapBtnArrow}>›</Text>
-                </TouchableOpacity>
-
-                <View style={styles.friendInputGroup}>
-                  <Text style={styles.friendInputLabel}>Or Enter Address / WhatsApp Location Link</Text>
-                  <View style={styles.linkInputRow}>
-                    <TextInput
-                      style={[styles.friendTextInput, { flex: 1, marginRight: 8 }]}
-                      placeholder="e.g. Lambakheda, MP Nagar, or Maps link"
-                      placeholderTextColor="#94A3B8"
-                      value={friendLocationInput}
-                      onChangeText={(t) => {
-                        setFriendLocationInput(t);
-                        setFriendLocationStatus('NONE');
-                      }}
-                    />
-                    <TouchableOpacity
-                      style={[styles.verifyLinkBtn, friendChecking && { opacity: 0.7 }]}
-                      onPress={handleCheckFriendLocation}
-                      disabled={friendChecking}
-                      activeOpacity={0.8}
-                    >
-                      {friendChecking ? (
-                        <ActivityIndicator color="#FFFFFF" size="small" />
-                      ) : (
-                        <Text style={styles.verifyLinkBtnText}>Verify</Text>
-                      )}
-                    </TouchableOpacity>
-                  </View>
-                </View>
-
-                {/* Friend Location Status Banners */}
-                {friendLocationStatus === 'OUTSIDE' && (
-                  <View style={styles.outOfZoneBox}>
-                    <View style={styles.outOfZoneHeaderRow}>
-                      <Icon name="warning" size={18} color="#DC2626" style={{ marginRight: 6 }} />
-                      <Text style={styles.outOfZoneTitle}>Outside Service Zone</Text>
-                    </View>
-                    <Text style={styles.outOfZoneDesc}>
-                      Sorry! This location is out of our delivery zone.
-                    </Text>
-                  </View>
-                )}
-
-                {friendLocationStatus === 'INSIDE' && (
-                  <View>
-                    <View style={styles.insideZoneBox}>
-                      <Icon name="checkmark-circle" size={20} color="#16A34A" style={{ marginRight: 8 }} />
-                      <View style={{ flex: 1 }}>
-                        <Text style={styles.insideZoneTitle}>Delivery address is within our service zone.</Text>
-                        <Text style={styles.insideZoneDesc} numberOfLines={2}>
-                          {friendResolvedAddress || friendLocationInput}
-                        </Text>
-                      </View>
-                    </View>
-
-                    {/* 5 KM Check Result */}
-                    {isOutside5KmRadius ? (
-                      <View style={[styles.outOfZoneBox, { marginTop: 8 }]}>
-                        <View style={styles.outOfZoneHeaderRow}>
-                          <Icon name="close-circle" size={18} color="#DC2626" style={{ marginRight: 6 }} />
-                          <Text style={styles.outOfZoneTitle}>Outside 5 KM Range</Text>
-                        </View>
-                        <Text style={styles.outOfZoneDesc}>
-                          Sorry! This restaurant cannot deliver to your friend's selected address because it is outside the 5 KM delivery range. Please select another restaurant or change the delivery address.
-                        </Text>
-                        {actualRoadDistanceKm !== null && (
-                          <Text style={styles.outOfZoneDistance}>
-                            Actual road distance: {actualRoadDistanceKm} KM (Limit: 5 KM)
-                          </Text>
-                        )}
-                      </View>
-                    ) : (
-                      actualRoadDistanceKm !== null && (
-                        <View style={styles.distanceOkBox}>
-                          <Icon name="checkmark-done" size={16} color="#15803D" style={{ marginRight: 6 }} />
-                          <Text style={styles.distanceOkText}>
-                            Road distance: {actualRoadDistanceKm} KM (Within 5 KM delivery range)
-                          </Text>
-                        </View>
-                      )
-                    )}
-                  </View>
-                )}
-              </View>
-            )}
-
-            {/* If Order for Myself is selected */}
-            {deliveryTargetMode === 'SELF' && (
-              <View style={styles.addressHeaderRow}>
-                <View style={styles.addressIconWrap}>
-                  <Icon name="location-sharp" size={18} color="#0066FF" />
-                </View>
-                <View style={{ flex: 1, marginLeft: 10 }}>
-                  <Text style={styles.addressLabel}>Delivery Address</Text>
-                  <Text style={styles.addressValue} numberOfLines={2}>
-                    {deliveryAddress?.fullAddress || 'Select Delivery Address'}
-                  </Text>
-                </View>
-                <TouchableOpacity
-                  style={styles.changeAddressBtn}
-                  onPress={() => setAddressModalVisible(true)}
-                  activeOpacity={0.7}
-                >
-                  <Text style={styles.changeAddressText}>Change</Text>
-                </TouchableOpacity>
-              </View>
-            )}
           </View>
 
           {/* 2. CART ITEMS LIST */}
@@ -981,58 +651,40 @@ export const CartScreen: React.FC<any> = ({ route, navigation }) => {
             </View>
           </View>
 
-          {/* 5. PAYMENT METHOD */}
+          {/* 5. PAYMENT METHOD (COD Removed - 100% Online Payment) */}
           <View style={styles.cardSection}>
-            <Text style={styles.sectionHeaderTitle}>Select Payment Method</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+              <Text style={styles.sectionHeaderTitle}>Payment Method</Text>
+              <View style={{ backgroundColor: '#DCFCE7', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6 }}>
+                <Text style={{ color: '#16A34A', fontSize: 11, fontWeight: '800' }}>✓ 100% SECURE</Text>
+              </View>
+            </View>
 
-            <TouchableOpacity
+            <View
               style={[
                 styles.paymentOptionCard,
-                selectedPaymentMethod === 'cod' && styles.paymentOptionCardActive,
+                styles.paymentOptionCardActive,
+                { borderColor: '#22C55E', backgroundColor: '#F0FDF4' }
               ]}
-              onPress={() => setSelectedPaymentMethod('cod')}
-              activeOpacity={0.8}
             >
               <View
                 style={[
                   styles.paymentRadio,
-                  selectedPaymentMethod === 'cod' && styles.paymentRadioActive,
+                  styles.paymentRadioActive,
+                  { borderColor: '#16A34A' }
                 ]}
               >
-                {selectedPaymentMethod === 'cod' && <View style={styles.paymentRadioDot} />}
+                <View style={[styles.paymentRadioDot, { backgroundColor: '#16A34A' }]} />
               </View>
               <View style={{ flex: 1, marginLeft: 12 }}>
-                <Text style={styles.paymentTitle}>Cash on Delivery (COD)</Text>
-                <Text style={styles.paymentSub}>Pay with cash or UPI on delivery</Text>
-              </View>
-              <Text style={{ fontSize: 24 }}>💵</Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={[
-                styles.paymentOptionCard,
-                selectedPaymentMethod === 'online' && styles.paymentOptionCardActive,
-              ]}
-              onPress={() => setSelectedPaymentMethod('online')}
-              activeOpacity={0.8}
-            >
-              <View
-                style={[
-                  styles.paymentRadio,
-                  selectedPaymentMethod === 'online' && styles.paymentRadioActive,
-                ]}
-              >
-                {selectedPaymentMethod === 'online' && <View style={styles.paymentRadioDot} />}
-              </View>
-              <View style={{ flex: 1, marginLeft: 12 }}>
-                <Text style={styles.paymentTitle}>Online Payment</Text>
-                <Text style={styles.paymentSub}>UPI, Debit/Credit Card, Netbanking</Text>
+                <Text style={[styles.paymentTitle, { color: '#15803D' }]}>Online Payment</Text>
+                <Text style={styles.paymentSub}>UPI (Google Pay, PhonePe, Paytm), Cards & Netbanking</Text>
               </View>
               <Text style={{ fontSize: 24 }}>💳</Text>
-            </TouchableOpacity>
+            </View>
           </View>
 
-          <View style={{ height: 100 }} />
+          <View style={{ height: 90 }} />
         </ScrollView>
       )}
 
@@ -1047,30 +699,20 @@ export const CartScreen: React.FC<any> = ({ route, navigation }) => {
           <TouchableOpacity
             style={[
               styles.placeOrderBtn,
-              (placingOrder ||
-                (deliveryTargetMode === 'FRIEND' &&
-                  (friendLocationStatus === 'OUTSIDE' || isOutside5KmRadius))) && {
+              (placingOrder || isOutside5KmRadius) && {
                 backgroundColor: '#94A3B8',
               },
             ]}
             onPress={handleProceedToPay}
-            disabled={
-              placingOrder ||
-              (deliveryTargetMode === 'FRIEND' &&
-                (friendLocationStatus === 'OUTSIDE' || isOutside5KmRadius))
-            }
+            disabled={placingOrder || isOutside5KmRadius}
             activeOpacity={0.85}
           >
             {placingOrder ? (
               <ActivityIndicator color="#FFFFFF" size="small" />
             ) : (
               <Text style={styles.placeOrderBtnText}>
-                {deliveryTargetMode === 'FRIEND' && friendLocationStatus === 'OUTSIDE'
-                  ? 'Outside Service Zone'
-                  : deliveryTargetMode === 'FRIEND' && isOutside5KmRadius
+                {isOutside5KmRadius
                   ? 'Delivery not available for this location (> 5 km)'
-                  : selectedPaymentMethod === 'cod'
-                  ? `Place Order • ₹${grandTotal}`
                   : `Pay & Place Order • ₹${grandTotal}`}
               </Text>
             )}
@@ -1093,21 +735,7 @@ export const CartScreen: React.FC<any> = ({ route, navigation }) => {
         orderStage="BEFORE_PAYMENT"
       />
 
-      {/* DEDICATED FRIEND DELIVERY LOCATION MODAL (INTERACTIVE MAP) */}
-      <FriendDeliveryLocationModal
-        visible={friendMapModalVisible}
-        onClose={() => setFriendMapModalVisible(false)}
-        initialCoords={friendCoords}
-        initialName={friendName}
-        initialPhone={friendPhone}
-        restaurantCoords={{
-          latitude: Number(restaurant?.businessLatitude || restaurant?.latitude || 0),
-          longitude: Number(restaurant?.businessLongitude || restaurant?.longitude || 0),
-        }}
-        restaurantName={restoName}
-        restaurantId={rId || restaurant?._id || restaurant?.id}
-        onConfirm={handleFriendLocationConfirmed}
-      />
+
     </SafeAreaView>
   );
 };
@@ -1160,7 +788,7 @@ const styles = StyleSheet.create({
   },
   scrollContent: {
     padding: 16,
-    paddingBottom: 24,
+    paddingBottom: 220,
   },
   emptyContainer: {
     flex: 1,
@@ -1427,201 +1055,4 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: '800',
   },
-  // ── Self vs Friend Styles ──
-  targetSectionCard: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 16,
-    padding: 16,
-    marginBottom: 14,
-    borderWidth: 1,
-    borderColor: '#E2E8F0',
-  },
-  deliveryTargetRow: {
-    flexDirection: 'row',
-    backgroundColor: '#F1F5F9',
-    borderRadius: 12,
-    padding: 4,
-    marginBottom: 8,
-  },
-  deliveryTargetBtn: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 10,
-    borderRadius: 10,
-  },
-  deliveryTargetBtnActive: {
-    backgroundColor: '#FFFFFF',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.08,
-    shadowRadius: 3,
-    elevation: 2,
-  },
-  deliveryTargetText: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: '#64748B',
-    marginLeft: 6,
-  },
-  deliveryTargetTextActive: {
-    color: '#0066FF',
-    fontWeight: '800',
-  },
-  friendDetailsContainer: {
-    marginTop: 12,
-    paddingTop: 12,
-    borderTopWidth: 1,
-    borderTopColor: '#F1F5F9',
-  },
-  friendNoticeTitle: {
-    fontSize: 13.5,
-    fontWeight: '800',
-    color: '#0F172A',
-    marginBottom: 2,
-  },
-  friendNoticeSub: {
-    fontSize: 12,
-    color: '#64748B',
-    marginBottom: 12,
-    lineHeight: 16,
-  },
-  friendInputGroup: {
-    marginBottom: 10,
-  },
-  friendInputLabel: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: '#475569',
-    marginBottom: 4,
-  },
-  friendTextInput: {
-    borderWidth: 1,
-    borderColor: '#CBD5E1',
-    borderRadius: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 9,
-    fontSize: 13,
-    color: '#0F172A',
-    backgroundColor: '#F8FAFC',
-  },
-  linkInputRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  verifyLinkBtn: {
-    backgroundColor: '#0066FF',
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderRadius: 10,
-    alignItems: 'center',
-    justifyContent: 'center',
-    minWidth: 70,
-  },
-  verifyLinkBtnText: {
-    color: '#FFFFFF',
-    fontSize: 13,
-    fontWeight: '800',
-  },
-  outOfZoneBox: {
-    backgroundColor: '#FEF2F2',
-    borderWidth: 1.5,
-    borderColor: '#F87171',
-    borderRadius: 12,
-    padding: 12,
-    marginTop: 4,
-  },
-  outOfZoneHeaderRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 4,
-  },
-  outOfZoneTitle: {
-    fontSize: 13,
-    fontWeight: '800',
-    color: '#DC2626',
-  },
-  outOfZoneDesc: {
-    fontSize: 12,
-    color: '#991B1B',
-    lineHeight: 17,
-  },
-  outOfZoneDistance: {
-    fontSize: 11.5,
-    fontWeight: '700',
-    color: '#B91C1C',
-    marginTop: 4,
-  },
-  insideZoneBox: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#F0FDF4',
-    borderWidth: 1.5,
-    borderColor: '#4ADE80',
-    borderRadius: 12,
-    padding: 12,
-    marginTop: 4,
-  },
-  insideZoneTitle: {
-    fontSize: 13,
-    fontWeight: '800',
-    color: '#16A34A',
-  },
-  insideZoneDesc: {
-    fontSize: 12,
-    color: '#15803D',
-    marginTop: 2,
-  },
-  openMapBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#FFFFFF',
-    borderWidth: 1.5,
-    borderColor: '#EC4899',
-    borderRadius: 12,
-    padding: 12,
-    marginBottom: 12,
-    shadowColor: '#EC4899',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
-    elevation: 2,
-  },
-  openMapBtnIcon: {
-    fontSize: 24,
-    marginRight: 10,
-  },
-  openMapBtnTitle: {
-    fontSize: 13.5,
-    fontWeight: '800',
-    color: '#0F172A',
-  },
-  openMapBtnSub: {
-    fontSize: 11.5,
-    color: '#64748B',
-    marginTop: 2,
-  },
-  openMapBtnArrow: {
-    fontSize: 22,
-    color: '#EC4899',
-    fontWeight: '700',
-    marginLeft: 6,
-  },
-  distanceOkBox: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#F0FDF4',
-    borderWidth: 1,
-    borderColor: '#86EFAC',
-    borderRadius: 10,
-    padding: 10,
-    marginTop: 8,
-  },
-  distanceOkText: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: '#15803D',
-    flex: 1,
-  },
-});
+  });

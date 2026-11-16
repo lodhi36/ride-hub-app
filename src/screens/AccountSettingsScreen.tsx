@@ -58,11 +58,12 @@ const AccountSettingsScreen = ({ navigation }: any) => {
         type: asset.type || 'image/jpeg',
       } as any);
 
-      const token = await AsyncStorage.getItem('userToken');
+      const token = (await AsyncStorage.getItem('customerToken')) || (await AsyncStorage.getItem('userToken'));
       const res = await api.post('/profile/upload-photo', formData, {
         headers: {
           'Content-Type': 'multipart/form-data',
           'Authorization': `Bearer ${token}`,
+          'X-Role': 'customer',
         },
       });
 
@@ -202,42 +203,51 @@ const AccountSettingsScreen = ({ navigation }: any) => {
       }
 
       const uId = user?._id || (user as any)?.id;
+      const uRole = String((user as any)?.role || 'customer').toLowerCase();
+      if (uRole !== 'customer' && uRole !== 'user' && uRole !== '') {
+        Alert.alert('Session Error', 'Customer profile cannot be updated from a partner session.');
+        return;
+      }
       if (uId) {
         try {
-          await api.put(`/profile/${uId}`, {
+          const profRes = await api.put(`/profile/${uId}`, {
             name: name.trim(),
             email: cleanEmail,
             phoneNumber: cleanPhone,
             upiId: upiId.trim(),
             profilePicture: profilePicture,
           });
+          if (!res?.data?.user && profRes?.data?.user) {
+            res = profRes;
+          }
         } catch (pErr) {}
       }
 
-      const savedUser = (res && res.data && res.data.user) ? res.data.user : {
-        ...user,
-        _id: user?._id || 'user_' + Date.now(),
-        name: name.trim(),
-        email: cleanEmail,
-        phoneNumber: cleanPhone,
-        profilePicture: profilePicture,
-        username: name.trim().toLowerCase().replace(/\s+/g, '_'),
-      };
+      const savedUser = (res && res.data && res.data.user && String(res.data.user.role || '').toLowerCase() === 'customer')
+        ? res.data.user
+        : {
+            ...user,
+            _id: uId,
+            role: 'customer',
+            name: name.trim(),
+            email: cleanEmail,
+            phoneNumber: cleanPhone,
+            profilePicture: profilePicture,
+          };
       const savedToken = res?.data?.token;
 
       if (savedToken && typeof savedToken === 'string' && savedToken.includes('.')) {
-        await AsyncStorage.setItem('userToken', savedToken);
         await AsyncStorage.setItem('customerToken', savedToken);
+        await AsyncStorage.setItem('userToken', savedToken);
         api.defaults.headers.common['Authorization'] = `Bearer ${savedToken}`;
         if (login) {
-          await login(savedToken, savedToken, savedUser);
+          await login(savedToken, '', savedUser);
         } else {
           updateUser(savedUser);
         }
       } else {
         updateUser(savedUser);
       }
-      await AsyncStorage.setItem('userData', JSON.stringify(savedUser));
       await AsyncStorage.setItem('customerUser', JSON.stringify(savedUser));
       await AsyncStorage.setItem('registeredCustomerName', savedUser.name || 'Customer');
 
@@ -254,7 +264,6 @@ const AccountSettingsScreen = ({ navigation }: any) => {
         profilePicture: profilePicture,
       };
       updateUser(fallbackUser as any);
-      await AsyncStorage.setItem('userData', JSON.stringify(fallbackUser));
       await AsyncStorage.setItem('customerUser', JSON.stringify(fallbackUser));
       await AsyncStorage.setItem('registeredCustomerName', fallbackUser.name || 'Customer');
       Alert.alert('Saved ✅', 'Personal information updated successfully!', [

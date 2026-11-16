@@ -1,6 +1,6 @@
 import axios from 'axios';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { BASE_URL, REQUEST_TIMEOUT, SOCKET_URL, UPLOADS_URL, CONNECTION_INFO, CENTRAL_IP, CLOUD_URL, setDynamicServerUrl } from '../config/apiConfig';
+import { BASE_URL, REQUEST_TIMEOUT, SOCKET_URL, UPLOADS_URL, CONNECTION_INFO, CENTRAL_IP, CLOUD_URL, USE_CLOUD, setDynamicServerUrl } from '../config/apiConfig';
 
 // ============================================================
 // CENTRALIZED AXIOS INSTANCE
@@ -19,6 +19,20 @@ const api = axios.create({
     'Accept': 'application/json',
   },
 });
+
+// Hydrate last locked working backend URL if available
+AsyncStorage.getItem('LOCKED_WORKING_BACKEND_URL').then((saved) => {
+  if (saved && !USE_CLOUD) {
+    if (saved.includes('onrender.com')) {
+      AsyncStorage.removeItem('LOCKED_WORKING_BACKEND_URL').catch(() => {});
+      api.defaults.baseURL = normalizedBaseUrl;
+      setDynamicServerUrl(normalizedBaseUrl);
+    } else {
+      api.defaults.baseURL = saved;
+      setDynamicServerUrl(saved);
+    }
+  }
+}).catch(() => {});
 
 // In-Memory Token Cache to eliminate redundant AsyncStorage bridge latency on every request
 let _cachedTokens: { [key: string]: string | null } = {};
@@ -116,17 +130,16 @@ api.interceptors.response.use(
       const altCandidates = USE_CLOUD
         ? [`${CLOUD_URL}/api`]
         : [
-            'http://10.166.80.3:5000/api',
             `http://${CENTRAL_IP}:5000/api`,
             'http://127.0.0.1:5000/api',
             'http://localhost:5000/api',
             'http://10.0.2.2:5000/api',
-            `${CLOUD_URL}/api`,
           ];
       // Only keep distinct alternative URLs that are different from the failed one
       const altUrls = Array.from(new Set(altCandidates)).filter(u => u.replace(/\/+$/, '') !== currentNorm);
 
       for (const altBaseUrl of altUrls) {
+        if (!USE_CLOUD && altBaseUrl.includes('onrender.com')) continue;
         try {
           const targetUrl = altBaseUrl.endsWith('/') ? altBaseUrl : `${altBaseUrl}/`;
           console.log(`[API Fallback Auto-Connect] Trying: ${targetUrl}${config.url}`);
@@ -145,32 +158,57 @@ api.interceptors.response.use(
           // Lock working backend URL globally so every other screen connects instantly!
           api.defaults.baseURL = targetUrl;
           setDynamicServerUrl(targetUrl);
+          if (USE_CLOUD || !targetUrl.includes('onrender.com')) {
+            AsyncStorage.setItem('LOCKED_WORKING_BACKEND_URL', targetUrl).catch(() => {});
+          }
           return res;
         } catch (e) {}
       }
     }
 
     if (error.response && error.response.status === 401 && !config._retry) {
-      if (config.url === 'auth/refresh' || config.url === 'auth/login') {
+      if (config.url === 'auth/refresh' || config.url === 'auth/login' || config.url === 'auth/otp/login' || config.url === 'auth/register') {
         return Promise.reject(error);
       }
-      
+
       config._retry = true;
       try {
-        const refreshToken = await AsyncStorage.getItem('refreshToken');
-        if (refreshToken) {
-          const res = await axios.post(`${BASE_URL}/auth/refresh`, { refreshToken });
+        const activeRole = ((await AsyncStorage.getItem('activeRole')) || '').toUpperCase();
+        let roleRefreshKey = 'refreshToken';
+        let roleTokenKey = 'userToken';
+        if (activeRole === 'DELIVERY' || activeRole === 'RIDER') {
+          roleRefreshKey = 'deliveryRefreshToken';
+          roleTokenKey = 'deliveryToken';
+        } else if (activeRole === 'SUPPLIER') {
+          roleRefreshKey = 'supplierRefreshToken';
+          roleTokenKey = 'supplierToken';
+        } else if (activeRole === 'CUSTOMER') {
+          roleRefreshKey = 'customerRefreshToken';
+          roleTokenKey = 'customerToken';
+        }
+
+        const refreshToken = (await AsyncStorage.getItem(roleRefreshKey)) || (await AsyncStorage.getItem('refreshToken'));
+        if (refreshToken && refreshToken !== 'undefined' && refreshToken !== 'null') {
+          const activeBase = api.defaults.baseURL || normalizedBaseUrl;
+          const refreshUrl = activeBase.endsWith('/') ? `${activeBase}auth/refresh` : `${activeBase}/auth/refresh`;
+          const res = await axios.post(refreshUrl, { refreshToken });
           if (res.data && res.data.token) {
             await AsyncStorage.setItem('userToken', res.data.token);
+            if (roleTokenKey !== 'userToken') {
+              await AsyncStorage.setItem(roleTokenKey, res.data.token);
+            }
+            if (res.data.refreshToken) {
+              await AsyncStorage.setItem(roleRefreshKey, res.data.refreshToken);
+              await AsyncStorage.setItem('refreshToken', res.data.refreshToken);
+            }
+            clearApiCachedAuth();
             config.headers.Authorization = `Bearer ${res.data.token}`;
             return api(config);
           }
         }
       } catch (refreshError) {
-        console.error('[API Refresh Token Failed]', refreshError);
-        // Refresh token invalid/expired, we should log out.
-        await AsyncStorage.removeItem('userToken');
-        await AsyncStorage.removeItem('refreshToken');
+        // LIFETIME SESSION PERSISTENCE: NEVER delete tokens or auto-logout on transient 401 / refresh error!
+        console.log('[API Refresh Note] Preserving persistent session despite refresh error');
       }
     }
 

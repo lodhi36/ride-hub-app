@@ -16,6 +16,7 @@ import { io } from 'socket.io-client';
 import { useAuth } from '../context/AuthContext';
 import { BASE_URL, LOCAL_URL, SOCKET_URL, resolveUploadUrl } from '../config/apiConfig';
 import api from '../services/api';
+import splash from '../assets/splash.png';
 import {
   fetchCurrentGpsPositionDetailed,
   reverseGeocodeCoords,
@@ -45,8 +46,8 @@ export interface SplashScreenConfig {
 }
 
 const DEFAULT_SPLASH_CONFIG: SplashScreenConfig = {
-  backgroundColor: '#0066FF',
-  splashImage: '',
+  backgroundColor: '#01299a',
+  splashImage: '/uploads/splash_screen_latest.png',
   brandNamePrimary: 'RIDE',
   brandNameSecondary: 'HUB',
   brandTagline: 'EXPRESS ECOSYSTEM',
@@ -182,13 +183,21 @@ const SplashScreen = ({ navigation }: any) => {
     const fetchLiveConfig = async () => {
       try {
         const res = await api.get('/settings/splash');
-        if (res.data && res.data.success && isMounted) {
-          const liveConfig = res.data.config;
+        const liveConfig = res?.data?.splashScreen || res?.data?.config || res?.data?.data;
+        if (liveConfig && isMounted) {
+          console.log('[SplashScreen] Admin splash config loaded:', liveConfig.splashImage);
           setConfig((prev) => ({ ...prev, ...liveConfig }));
           AsyncStorage.setItem('@cached_splash_config', JSON.stringify(liveConfig)).catch(() => {});
         }
       } catch (err) {
-        // Fallback to cached or default
+        console.log('[SplashScreen] Fallback to /screen-media/SPLASH_SCREEN');
+        try {
+          const smRes = await api.get('/screen-media/SPLASH_SCREEN');
+          const smImg = smRes?.data?.screen?.imageUrl || smRes?.data?.screen?.mediaUrl;
+          if (smImg && isMounted) {
+            setConfig((prev) => ({ ...prev, splashImage: smImg }));
+          }
+        } catch (_) {}
       }
     };
 
@@ -202,7 +211,14 @@ const SplashScreen = ({ navigation }: any) => {
         timeout: 5000,
       });
 
-      socket.on('splash_updated', (updatedConfig: SplashScreenConfig) => {
+      socket.on('splash_screen_updated', (updatedConfig: any) => {
+        if (isMounted && updatedConfig) {
+          setConfig((prev) => ({ ...prev, ...updatedConfig }));
+          AsyncStorage.setItem('@cached_splash_config', JSON.stringify(updatedConfig)).catch(() => {});
+        }
+      });
+
+      socket.on('splash_updated', (updatedConfig: any) => {
         if (isMounted && updatedConfig) {
           setConfig((prev) => ({ ...prev, ...updatedConfig }));
           AsyncStorage.setItem('@cached_splash_config', JSON.stringify(updatedConfig)).catch(() => {});
@@ -210,7 +226,7 @@ const SplashScreen = ({ navigation }: any) => {
       });
 
       socket.on('screen_media_updated', (data: any) => {
-        if (data?.screenId === 'splash_screen' && isMounted) {
+        if ((data?.screenId === 'SPLASH_SCREEN' || data?.screenId === 'splash_screen') && isMounted) {
           fetchLiveConfig();
         }
       });
@@ -322,7 +338,7 @@ const SplashScreen = ({ navigation }: any) => {
     };
   }, []);
 
-  const displayDurationMs = (config.durationSeconds || 3.5) * 1000;
+  const displayDurationMs = Math.max(3000, ((config.durationSeconds || 3.0) * 1000));
 
   // 3. Entrance & Pulse Animations
   useEffect(() => {
@@ -384,19 +400,94 @@ const SplashScreen = ({ navigation }: any) => {
     return () => clearInterval(tickerInterval);
   }, []);
 
-  // Automatic navigation to RoleSelection
+  // Connect all roles: resolve active role or return RoleSelection
+  const resolveNextScreen = async () => {
+    try {
+      const activeRoleRaw = await AsyncStorage.getItem('activeRole');
+      const activeRole = (activeRoleRaw || '').toUpperCase();
+      const customerToken = await AsyncStorage.getItem('customerToken');
+      const deliveryToken = await AsyncStorage.getItem('deliveryToken');
+      const supplierToken = await AsyncStorage.getItem('supplierToken');
+      const deliveryUserRaw = await AsyncStorage.getItem('deliveryUser');
+      const customerUserRaw = await AsyncStorage.getItem('customerUser');
+      const supplierUserRaw = await AsyncStorage.getItem('supplierUser');
+
+      console.log(`[SplashScreen] Resolving next screen. activeRole: "${activeRole}", hasDeliveryToken: ${Boolean(deliveryToken)}, hasDeliveryUser: ${Boolean(deliveryUserRaw)}`);
+
+      // 1. DELIVERY / RIDER PARTNER: If active role is DELIVERY or RIDER with saved token or user
+      if ((activeRole === 'DELIVERY' || activeRole === 'RIDER') && (deliveryToken || deliveryUserRaw)) {
+        await AsyncStorage.setItem('activeRole', 'DELIVERY');
+        if (deliveryToken) await AsyncStorage.setItem('userToken', deliveryToken);
+        return 'DeliveryRiderHomeScreen';
+      }
+
+      // 2. CUSTOMER: If active role is CUSTOMER with saved token or user
+      if (activeRole === 'CUSTOMER' && (customerToken || customerUserRaw)) {
+        return 'CustomerHomeScreen';
+      }
+
+      // 3. SUPPLIER: If active role is SUPPLIER with saved token or user
+      if (activeRole === 'SUPPLIER' && (supplierToken || supplierUserRaw)) {
+        const supplierUser = supplierUserRaw ? JSON.parse(supplierUserRaw) : null;
+        if (supplierUser?.approvalStatus !== 'APPROVED') {
+          return 'SellerPendingApprovalScreen';
+        }
+        return 'RiderHomeScreen';
+      }
+
+      // 4. Fallback checks: If activeRole wasn't set or was desynced, inspect saved user sessions
+      if (deliveryToken && deliveryUserRaw) {
+        try {
+          const dUser = JSON.parse(deliveryUserRaw);
+          const r = (dUser?.role || '').toLowerCase();
+          if (r === 'rider' || r === 'delivery_partner' || r === 'provider') {
+            await AsyncStorage.setItem('activeRole', 'DELIVERY');
+            return 'DeliveryRiderHomeScreen';
+          }
+        } catch (_) {}
+      }
+
+      if (customerToken && customerUserRaw) {
+        await AsyncStorage.setItem('activeRole', 'CUSTOMER');
+        return 'CustomerHomeScreen';
+      }
+
+      if (supplierToken && supplierUserRaw) {
+        await AsyncStorage.setItem('activeRole', 'SUPPLIER');
+        try {
+          const sUser = JSON.parse(supplierUserRaw);
+          if (sUser?.approvalStatus !== 'APPROVED') {
+            return 'SellerPendingApprovalScreen';
+          }
+        } catch (_) {}
+        return 'RiderHomeScreen';
+      }
+    } catch (e) {
+      console.warn('[SplashScreen] Role resolution error:', e);
+    }
+    return 'RoleSelection';
+  };
+
+  // Automatic navigation to active role / RoleSelection
   useEffect(() => {
+    let isMounted = true;
     if (!isLoading && navigation) {
-      const timer = setTimeout(() => {
-        navigation.replace('RoleSelection');
+      const timer = setTimeout(async () => {
+        if (!isMounted) return;
+        const targetScreen = await resolveNextScreen();
+        navigation.replace(targetScreen);
       }, displayDurationMs);
-      return () => clearTimeout(timer);
+      return () => {
+        isMounted = false;
+        clearTimeout(timer);
+      };
     }
   }, [isLoading, navigation, displayDurationMs]);
 
-  const handleSkip = () => {
+  const handleSkip = async () => {
     if (navigation) {
-      navigation.replace('RoleSelection');
+      const targetScreen = await resolveNextScreen();
+      navigation.replace(targetScreen);
     }
   };
 
@@ -461,33 +552,13 @@ const SplashScreen = ({ navigation }: any) => {
       </Animated.View>
 
       {/* Render Admin-Uploaded Splash Image with Zero-Cut, 100% Auto-Adjust for All Devices */}
-      {uploadedSplashUri && !imageLoadError ? (
-        <View style={styles.splashWrap}>
-          <Image
-            source={{ uri: uploadedSplashUri }}
-            style={styles.containedSplashImage}
-            resizeMode="contain"
-            onError={(e) => {
-              console.log('[SplashScreen] Remote splash load failure for URI:', uploadedSplashUri, e?.nativeEvent?.error);
-              setImageLoadError(true);
-            }}
-          />
-        </View>
-      ) : (
-        /* Dynamic Brand Typography & Pulse when no splash image is uploaded by Admin */
-        <View style={styles.brandedFallbackContainer}>
-          <Animated.View style={[styles.brandLogoWrap, { opacity: logoFade, transform: [{ scale: logoScale }] }]}>
-            <View style={styles.brandIconCircle}>
-              <Text style={styles.brandEmoji}>🚀</Text>
-            </View>
-            <View style={styles.brandNameRow}>
-              <Text style={styles.brandPrimaryText}>{config.brandNamePrimary || 'RIDE'}</Text>
-              <Text style={styles.brandSecondaryText}> {config.brandNameSecondary || 'HUB'}</Text>
-            </View>
-            <Text style={styles.brandTaglineText}>{config.brandTagline || 'EXPRESS ECOSYSTEM'}</Text>
-          </Animated.View>
-        </View>
-      )}
+      <View style={styles.splashWrap}>
+        <Image
+          source={splash}
+          style={styles.containedSplashImage}
+          resizeMode="contain"
+        />
+      </View>
     </TouchableOpacity>
   );
 };
@@ -495,7 +566,7 @@ const SplashScreen = ({ navigation }: any) => {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#0066FF',
+    backgroundColor: '#01299a',
     alignItems: 'center',
     justifyContent: 'center',
     position: 'relative',
@@ -567,10 +638,10 @@ const styles = StyleSheet.create({
     textShadowRadius: 5,
   },
   splashWrap: {
-    width: '100%',
-    height: '100%',
+    ...StyleSheet.absoluteFillObject,
     justifyContent: 'center',
     alignItems: 'center',
+    backgroundColor: '#01299a',
   },
   containedSplashImage: {
     width: '100%',

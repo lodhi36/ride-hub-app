@@ -51,8 +51,9 @@ export default function LoginScreen({ navigation }: any) {
   useEffect(() => {
     const checkAlreadyLoggedIn = async () => {
       try {
-        const token = await AsyncStorage.getItem('userToken') || await AsyncStorage.getItem('customerToken');
-        if (token) {
+        const activeRole = await AsyncStorage.getItem('activeRole');
+        const custToken = await AsyncStorage.getItem('customerToken');
+        if (activeRole === 'CUSTOMER' && custToken) {
           navigation.replace('CustomerHomeScreen');
         }
       } catch (e) {}
@@ -108,7 +109,14 @@ export default function LoginScreen({ navigation }: any) {
       }
     } catch (error: any) {
       const errMsg = error.response?.data?.message || 'Cannot connect to server.';
-      triggerToast(errMsg);
+      if (error.response?.data?.errorType === 'ROLE_CONFLICT') {
+        Alert.alert('रोल प्रतिबंध (Role Restriction)', errMsg, [
+          { text: 'रोल बदलें (Change Role)', onPress: () => navigation.navigate('RoleSelection') },
+          { text: 'ठीक है (OK)', style: 'cancel' },
+        ]);
+      } else {
+        triggerToast(errMsg);
+      }
     } finally {
       setLoading(false);
     }

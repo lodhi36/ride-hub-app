@@ -21,6 +21,7 @@ import {
   Linking,
   TextInput,
   Platform,
+  AppState,
 } from 'react-native';
 import RazorpayCheckout from 'react-native-razorpay';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -39,10 +40,22 @@ import Svg, { Circle, Line, Path } from 'react-native-svg';
 import Icon from '../components/PngIcon';
 import { AuthContext } from '../context/AuthContext';
 import { useSocket } from '../context/SocketContext';
-import api from '../services/api';
+import api, { clearApiCachedAuth } from '../services/api';
 import rideStore from '../services/rideStore';
 import { BASE_URL, LOCAL_URL, resolveUploadUrl } from '../config/apiConfig';
-import { fetchCurrentGpsPosition, watchCurrentGpsPosition, reverseGeocodeCoords, isValidCoordinates, isDummyCoordinates, requestLocationPermission, syncLiveDeviceLocationInBackground } from '../services/LocationAddressService';
+import {
+  fetchCurrentGpsPosition,
+  fetchCurrentGpsPositionDetailed,
+  watchCurrentGpsPosition,
+  reverseGeocodeCoords,
+  isValidCoordinates,
+  isDummyCoordinates,
+  requestLocationPermission,
+  checkLocationPermission,
+  syncLiveDeviceLocationInBackground,
+  saveLastRoleGpsCoords,
+  getLastRoleGpsCoords,
+} from '../services/LocationAddressService';
 import {
   resolveCategoryName,
   getCategoryIcon,
@@ -51,6 +64,7 @@ import {
   getCategoryLabel,
   getCategoryTotalLabel,
   getCategoryStoreLabel,
+  getCategoryOrderTerminology,
 } from '../utils/categoryHelper';
 import RiderHelpModal from '../components/RiderHelpModal';
 import EmergencySosModal from '../components/EmergencySosModal';
@@ -59,267 +73,9 @@ import CancellationPopupModal, { isCancellationEventProcessed } from '../compone
 import SoundService from '../services/SoundService';
 import { getRiderTranslation, RIDER_LANGUAGES, RiderLanguage } from '../utils/riderTranslations';
 import { pickImage } from '../utils/imagePicker';
-import { bikeBase64 } from '../banner/base64_images';
+import { OrderHistorySkeletonLoader } from '../components/OrderHistorySkeletonLoader';
 
 const { width } = Dimensions.get('window');
-
-// 3 Major Delivery Zones Groups of Bhopal with all configured areas
-export const BHOPAL_ZONE_GROUPS: Record<string, {
-  zoneId: string;
-  zoneName: string;
-  zoneGroup: string;
-  tagline: string;
-  centerCoordinates: { latitude: number; longitude: number };
-  polygonCoordinates: number[][];
-  configuredAreas: Array<{
-    areaId: string;
-    areaName: string;
-    centerCoordinates: { latitude: number; longitude: number };
-    polygonCoordinates: number[][];
-    landmarks?: string[];
-  }>;
-}> = {
-  OLD_BHOPAL: {
-    zoneId: 'old_bhopal',
-    zoneName: 'Old Bhopal',
-    zoneGroup: 'OLD_BHOPAL',
-    tagline: 'Arwaliya • Shampur • Islamnagar • Peoples Mall • Lalghati • Bairagarh • VIP Road • Chirayu • Aishbagh • Ashoka Garden',
-    centerCoordinates: { latitude: 23.2950, longitude: 77.3950 },
-    polygonCoordinates: [
-      [23.3850, 77.3800],
-      [23.3850, 77.4550],
-      [23.2850, 77.4550],
-      [23.2200, 77.4350],
-      [23.2200, 77.3650],
-      [23.2600, 77.3000],
-      [23.3300, 77.3000],
-      [23.3850, 77.3800],
-    ],
-    configuredAreas: [
-      {
-        areaId: 'arwaliya_shampur_islamnagar',
-        areaName: 'Arwaliya, Shampur & Islamnagar',
-        centerCoordinates: { latitude: 23.3550, longitude: 77.4150 },
-        polygonCoordinates: [
-          [23.3850, 77.3800],
-          [23.3850, 77.4500],
-          [23.3300, 77.4500],
-          [23.3300, 77.3800],
-          [23.3850, 77.3800],
-        ],
-        landmarks: ['Arwaliya Chauraha', 'Huzur Tehsil', 'Islamnagar Gate', 'Siyanpur', 'Berasia Road Stretch'],
-      },
-      {
-        areaId: 'peoples_mall_karond',
-        areaName: "People's Mall, Karond & Bhanpur",
-        centerCoordinates: { latitude: 23.3050, longitude: 77.4150 },
-        polygonCoordinates: [
-          [23.3350, 77.3900],
-          [23.3350, 77.4600],
-          [23.2800, 77.4600],
-          [23.2800, 77.3900],
-          [23.3350, 77.3900],
-        ],
-        landmarks: ["People's Mall", 'Karond Mandi', 'Bhanpur Chauraha', 'Nishatpura Railway Colony'],
-      },
-      {
-        areaId: 'lalghati_bairagarh_chirayu',
-        areaName: 'Lalghati, Bairagarh & Chirayu',
-        centerCoordinates: { latitude: 23.2850, longitude: 77.3400 },
-        polygonCoordinates: [
-          [23.3300, 77.3000],
-          [23.3300, 77.3700],
-          [23.2550, 77.3700],
-          [23.2550, 77.3000],
-          [23.3300, 77.3000],
-        ],
-        landmarks: ['Lalghati Square', 'Airport Road', 'Bairagarh Main Road', 'Chirayu Medical College & Hospital', 'Halalpura Bus Stand'],
-      },
-      {
-        areaId: 'vip_road_kohefiza',
-        areaName: 'VIP Road & Koh-e-Fiza',
-        centerCoordinates: { latitude: 23.2550, longitude: 77.3750 },
-        polygonCoordinates: [
-          [23.2800, 77.3500],
-          [23.2800, 77.3950],
-          [23.2350, 77.3950],
-          [23.2350, 77.3500],
-          [23.2800, 77.3500],
-        ],
-        landmarks: ['VIP Road Lake View', 'Kamla Park', 'Koh-e-Fiza BDH', 'Polytechnic Square'],
-      },
-      {
-        areaId: 'aishbagh_ashoka_garden',
-        areaName: 'Aishbagh, Ashoka Garden & New Market',
-        centerCoordinates: { latitude: 23.2550, longitude: 77.4200 },
-        polygonCoordinates: [
-          [23.2850, 77.3950],
-          [23.2850, 77.4550],
-          [23.2200, 77.4550],
-          [23.2200, 77.3950],
-          [23.2850, 77.3950],
-        ],
-        landmarks: ['Aishbagh Stadium', 'Ashoka Garden 80 Feet Road', 'Bhopal Junction Railway Station', 'New Market TT Nagar'],
-      },
-    ],
-  },
-  NEW_BHOPAL: {
-    zoneId: 'new_bhopal',
-    zoneName: 'New Bhopal',
-    zoneGroup: 'NEW_BHOPAL',
-    tagline: 'MP Nagar • Arera Colony • Shahpura • Bawadia Kalan • Kolar Road • Hoshangabad Road',
-    centerCoordinates: { latitude: 23.2050, longitude: 77.4300 },
-    polygonCoordinates: [
-      [23.2550, 77.4100],
-      [23.2550, 77.4950],
-      [23.1350, 77.4950],
-      [23.1300, 77.3800],
-      [23.2100, 77.3800],
-      [23.2550, 77.4100],
-    ],
-    configuredAreas: [
-      {
-        areaId: 'mp_nagar_arera',
-        areaName: 'MP Nagar & Arera Colony',
-        centerCoordinates: { latitude: 23.2300, longitude: 77.4300 },
-        polygonCoordinates: [
-          [23.2550, 77.4100],
-          [23.2550, 77.4550],
-          [23.2050, 77.4550],
-          [23.2050, 77.4100],
-          [23.2550, 77.4100],
-        ],
-        landmarks: ['DB City Mall', 'Bittan Market', '10 Number Market', 'Rani Kamlapati Station'],
-      },
-      {
-        areaId: 'shahpura_bawadia',
-        areaName: 'Shahpura & Bawadia Kalan',
-        centerCoordinates: { latitude: 23.1850, longitude: 77.4250 },
-        polygonCoordinates: [
-          [23.2100, 77.4000],
-          [23.2100, 77.4500],
-          [23.1600, 77.4500],
-          [23.1600, 77.4000],
-          [23.2100, 77.4000],
-        ],
-        landmarks: ['Shahpura Lake', 'Bansal Hospital', 'Bawadia Kalan Flyover', 'Rohit Nagar'],
-      },
-      {
-        areaId: 'kolar_road',
-        areaName: 'Kolar Road',
-        centerCoordinates: { latitude: 23.1600, longitude: 77.4000 },
-        polygonCoordinates: [
-          [23.1900, 77.3800],
-          [23.1900, 77.4200],
-          [23.1300, 77.4200],
-          [23.1300, 77.3800],
-          [23.1900, 77.3800],
-        ],
-        landmarks: ['Sarvadharma Colony', 'Nayapura', 'Danish Kunj', 'Mandakini Ground'],
-      },
-      {
-        areaId: 'hoshangabad_misrod',
-        areaName: 'Hoshangabad Road & Misrod',
-        centerCoordinates: { latitude: 23.1700, longitude: 77.4650 },
-        polygonCoordinates: [
-          [23.2050, 77.4450],
-          [23.2050, 77.4950],
-          [23.1350, 77.4950],
-          [23.1350, 77.4450],
-          [23.2050, 77.4450],
-        ],
-        landmarks: ['Aashima Mall', 'Misrod Police Station', 'Ratanpur', 'Barkatullah University'],
-      },
-    ],
-  },
-  BHEL: {
-    zoneId: 'bhel',
-    zoneName: 'BHEL',
-    zoneGroup: 'BHEL',
-    tagline: 'BHEL Township • Govindpura • Piplani • Indrapuri • Awadhpuri',
-    centerCoordinates: { latitude: 23.2420, longitude: 77.4800 },
-    polygonCoordinates: [
-      [23.2750, 77.4450],
-      [23.2750, 77.5400],
-      [23.2050, 77.5400],
-      [23.2050, 77.4450],
-      [23.2750, 77.4450],
-    ],
-    configuredAreas: [
-      {
-        areaId: 'bhel_govindpura',
-        areaName: 'BHEL Township & Govindpura',
-        centerCoordinates: { latitude: 23.2550, longitude: 77.4650 },
-        polygonCoordinates: [
-          [23.2750, 77.4450],
-          [23.2750, 77.4950],
-          [23.2350, 77.4950],
-          [23.2350, 77.4450],
-          [23.2750, 77.4450],
-        ],
-        landmarks: ['Jubilee Gate BHEL', 'Govindpura Industrial Area', 'Kasturba Hospital'],
-      },
-      {
-        areaId: 'piplani_indrapuri',
-        areaName: 'Piplani & Indrapuri',
-        centerCoordinates: { latitude: 23.2450, longitude: 77.4850 },
-        polygonCoordinates: [
-          [23.2650, 77.4650],
-          [23.2650, 77.5100],
-          [23.2250, 77.5100],
-          [23.2250, 77.4650],
-          [23.2650, 77.4650],
-        ],
-        landmarks: ['Piplani Petrol Pump', 'Indrapuri Sector C', 'Sonagiri'],
-      },
-      {
-        areaId: 'awadhpuri_khajuri',
-        areaName: 'Awadhpuri & Khajuri Kalan',
-        centerCoordinates: { latitude: 23.2300, longitude: 77.5150 },
-        polygonCoordinates: [
-          [23.2550, 77.4950],
-          [23.2550, 77.5400],
-          [23.2050, 77.5400],
-          [23.2050, 77.4950],
-          [23.2550, 77.4950],
-        ],
-        landmarks: ['Awadhpuri BDA Square', 'Amrawad Khurd', 'Khajuri Kalan'],
-      },
-    ],
-  },
-};
-
-// Backward compatibility polygon map
-export const BHOPAL_ZONE_POLYGONS: Record<string, { name: string; polygon: number[][] }> = {
-  old_bhopal: {
-    name: 'Old Bhopal',
-    polygon: BHOPAL_ZONE_GROUPS.OLD_BHOPAL.polygonCoordinates,
-  },
-  your_zone: {
-    name: 'Old Bhopal',
-    polygon: BHOPAL_ZONE_GROUPS.OLD_BHOPAL.polygonCoordinates,
-  },
-  arwaliya: {
-    name: 'Old Bhopal',
-    polygon: BHOPAL_ZONE_GROUPS.OLD_BHOPAL.configuredAreas[0].polygonCoordinates,
-  },
-  new_bhopal: {
-    name: 'New Bhopal',
-    polygon: BHOPAL_ZONE_GROUPS.NEW_BHOPAL.polygonCoordinates,
-  },
-  bhel: {
-    name: 'BHEL',
-    polygon: BHOPAL_ZONE_GROUPS.BHEL.polygonCoordinates,
-  },
-};
-
-export const ZONE_CENTERS: Record<string, { lat: number; lon: number; radiusKm: number }> = {
-  'old bhopal': { lat: 23.2950, lon: 77.3950, radiusKm: 15.0 },
-  'your zone': { lat: 23.2950, lon: 77.3950, radiusKm: 15.0 },
-  'arwaliya': { lat: 23.3550, lon: 77.4150, radiusKm: 15.0 },
-  'new bhopal': { lat: 23.2050, lon: 77.4300, radiusKm: 15.0 },
-  'bhel': { lat: 23.2420, lon: 77.4800, radiusKm: 15.0 },
-};
 
 export const calculateHaversineDistanceKm = (lat1: number, lon1: number, lat2: number, lon2: number): number => {
   const R = 6371; // Earth's radius in km
@@ -333,47 +89,6 @@ export const calculateHaversineDistanceKm = (lat1: number, lon1: number, lat2: n
       Math.sin(dLon / 2);
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return R * c;
-};
-
-// ── Ray-casting Point-In-Polygon Check ──
-export const isPointInPolygonCoords = (lat: number, lon: number, polygon: number[][]): boolean => {
-  if (!polygon || polygon.length < 3) return false;
-  let inside = false;
-  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
-    const xi = polygon[i][0], yi = polygon[i][1];
-    const xj = polygon[j][0], yj = polygon[j][1];
-    const intersect = ((yi > lon) !== (yj > lon)) &&
-      (lat < (xj - xi) * (lon - yi) / (yj - yi) + xi);
-    if (intersect) inside = !inside;
-  }
-  return inside;
-};
-
-// ── Closest Reachable Entry Point On Polygon Boundary ──
-export const getClosestBoundaryPointCoords = (lat: number, lon: number, polygon: number[][]): { latitude: number; longitude: number } => {
-  if (!polygon || polygon.length < 2) return { latitude: lat, longitude: lon };
-  let minDist = Infinity;
-  let closest: [number, number] = [polygon[0][0], polygon[0][1]];
-
-  for (let i = 0; i < polygon.length; i++) {
-    const nextIdx = (i + 1) % polygon.length;
-    const a = polygon[i];
-    const b = polygon[nextIdx];
-    const dx = b[0] - a[0], dy = b[1] - a[1];
-    let t = 0;
-    if (dx !== 0 || dy !== 0) {
-      t = ((lat - a[0]) * dx + (lon - a[1]) * dy) / (dx * dx + dy * dy);
-      t = Math.max(0, Math.min(1, t));
-    }
-    const segLat = a[0] + t * dx;
-    const segLon = a[1] + t * dy;
-    const dist = calculateHaversineDistanceKm(lat, lon, segLat, segLon);
-    if (dist < minDist) {
-      minDist = dist;
-      closest = [segLat, segLon];
-    }
-  }
-  return { latitude: closest[0], longitude: closest[1] };
 };
 
 // ── Left-Swipe To Accept Slider Component ──
@@ -496,11 +211,21 @@ export const isCancelledDeliveryOrder = (b: any) => {
   );
 };
 
+// ============================================================
+// LIFETIME PERSISTENT ONLINE STORE CACHE (ZERO RELOAD, ZERO FLICKER)
+// ============================================================
+const RIDER_PERSISTENT_HOTSPOTS_CACHE_KEY = 'RIDER_SAVED_HOTSPOTS_CACHE_V2';
+let _inMemoryNearbyHotspots: any[] = [];
+let _inMemorySelectedHotspot: any | null = null;
+let _inMemoryHotspotRouteInfo: { distanceKm: number; etaMinutes: number } | null = null;
+let _inMemoryHotspotsLoadedOnce = false;
+let _lastHotspotsFetchTimestamp = 0;
+
 const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
   const isDone = isDoneDeliveryOrder;
   const isCanc = isCancelledDeliveryOrder;
   const insets = useSafeAreaInsets();
-  const { user, logout } = useContext(AuthContext);
+  const { user, logout, updateUser } = useContext(AuthContext);
   const { socket, unreadNotifCount } = useSocket();
 
   const [riderId, setRiderId] = useState<string>(() => route?.params?.riderId || user?._id || user?.id || '');
@@ -508,16 +233,41 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
   const vehicleType = (user as any)?.vehicleType || 'Bike';
 
   const incomingMapWebViewRef = useRef<any>(null);
+  const mapWebViewRef = useRef<any>(null);
 
   // ── Online / Offline State ──
   const [isOnline, setIsOnline] = useState<boolean>(false);
+  const [isPendingOffline, setIsPendingOffline] = useState<boolean>(false);
   const isOnlineRef = useRef<boolean>(false);
   isOnlineRef.current = isOnline;
   const [isUpdatingStatus, setIsUpdatingStatus] = useState<boolean>(false);
   const switchAnim = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
-    AsyncStorage.setItem('activeRole', 'DELIVERY').catch(() => {});
+    (async () => {
+      try {
+        clearApiCachedAuth();
+        await AsyncStorage.setItem('activeRole', 'DELIVERY');
+        const delivTok = await AsyncStorage.getItem('deliveryToken');
+        if (delivTok) {
+          await AsyncStorage.setItem('userToken', delivTok);
+        }
+        clearApiCachedAuth();
+
+        const delivUserStr = await AsyncStorage.getItem('deliveryUser');
+        if (delivUserStr) {
+          const parsed = JSON.parse(delivUserStr);
+          if (parsed && (parsed._id || parsed.id)) {
+            if (!riderId) {
+              setRiderId(parsed._id || parsed.id);
+            }
+            if (!user || !(user._id || user.id) || !['rider', 'delivery', 'delivery_partner', 'provider'].includes((user.role || '').toLowerCase())) {
+              updateUser?.(parsed);
+            }
+          }
+        }
+      } catch (_) {}
+    })();
   }, []);
 
   // ── Real Data States ──
@@ -528,7 +278,22 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
   const [customerTips, setCustomerTips] = useState<number>(0);
 
   const [allDeliveries, setAllDeliveries] = useState<any[]>([]);
-  const [activeDeliveries, setActiveDeliveries] = useState<any[]>([]);
+  const [activeDeliveries, setActiveDeliveries] = useState<any[]>(() => {
+    if (route?.params?.initialActiveOrder) {
+      return [route.params.initialActiveOrder];
+    }
+    if (route?.params?.activeRide) {
+      return [route.params.activeRide];
+    }
+    try {
+      const mem = rideStore.getCurrentRide();
+      if (mem && (mem.rideId || (mem as any).bookingId)) {
+        return [mem as any];
+      }
+    } catch (_) {}
+    return [];
+  });
+
   const [completedDeliveries, setCompletedDeliveries] = useState<any[]>([]);
   const [cancelledDeliveries, setCancelledDeliveries] = useState<any[]>([]);
   const [orderFilter, setOrderFilter] = useState<'all' | 'active' | 'completed' | 'cancelled'>('all');
@@ -549,10 +314,12 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
   const [isAcceptingRequest, setIsAcceptingRequest] = useState<boolean>(false);
   const [isAdvancingRideStage, setIsAdvancingRideStage] = useState<boolean>(false);
   const [activeRideDistanceEta, setActiveRideDistanceEta] = useState<{ distanceKm: number; etaMinutes: number } | null>(null);
-  const [nearbyHotspots, setNearbyHotspots] = useState<any[]>([]);
-  const [selectedHotspot, setSelectedHotspot] = useState<any | null>(null);
-  const [hotspotRouteInfo, setHotspotRouteInfo] = useState<{ distanceKm: number; etaMinutes: number } | null>(null);
+  const [nearbyHotspots, setNearbyHotspots] = useState<any[]>(_inMemoryNearbyHotspots);
+  const [selectedHotspot, setSelectedHotspot] = useState<any | null>(_inMemorySelectedHotspot);
+  const [hotspotRouteInfo, setHotspotRouteInfo] = useState<{ distanceKm: number; etaMinutes: number } | null>(_inMemoryHotspotRouteInfo);
   const [loadingHotspots, setLoadingHotspots] = useState<boolean>(false);
+  const [hotspotFetchError, setHotspotFetchError] = useState<string | null>(null);
+  const [discoveryRouteError, setDiscoveryRouteError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState<boolean>(false);
   const [loadingDeliveries, setLoadingDeliveries] = useState<boolean>(false);
   const [cancellationPopup, setCancellationPopup] = useState<{
@@ -567,6 +334,57 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
   const [orderToCancelByRider, setOrderToCancelByRider] = useState<any | null>(null);
   const [riderCancelReason, setRiderCancelReason] = useState<string>('Vehicle breakdown / mechanical issue');
   const [isSubmittingRiderCancel, setIsSubmittingRiderCancel] = useState<boolean>(false);
+
+
+  const nearbyHotspotsRef = useRef<any[]>(_inMemoryNearbyHotspots);
+  nearbyHotspotsRef.current = nearbyHotspots;
+  const selectedHotspotRef = useRef<any | null>(_inMemorySelectedHotspot);
+  selectedHotspotRef.current = selectedHotspot;
+  const incomingRequestRef = useRef<any | null>(null);
+  incomingRequestRef.current = incomingRequest;
+  const discoveryRouteCacheRef = useRef<Map<string, { originLat: number; originLon: number; destLat: number; destLon: number; coordinates: Array<[number, number]>; distanceKm: number; etaMinutes: number; cachedAt: number }>>(new Map());
+  const lastDiscoverySyncRef = useRef<{ key: string; lat: number; lon: number; time: number }>({ key: '', lat: 0, lon: 0, time: 0 });
+  const hotspotRefreshTimerRef = useRef<any>(null);
+  const hotspotFetchInFlightRef = useRef<boolean>(false);
+  const hasLoadedHotspotsOnceRef = useRef<boolean>(_inMemoryHotspotsLoadedOnce || _inMemoryNearbyHotspots.length > 0);
+  const lastHotspotsSignatureRef = useRef<string>('');
+  const fetchNearbyHotspotsRef = useRef<any>(null);
+  const syncDiscoveryRoutesRef = useRef<any>(null);
+
+  useEffect(() => {
+    if (route?.params?.activeRide) {
+      const r = route.params.activeRide;
+      setActiveDeliveries([r]);
+      activeDeliveriesRef.current = [r];
+      try { rideStore.setCurrentRide(r); } catch (_) {}
+      AsyncStorage.setItem('active_rider_ride', JSON.stringify(r)).catch(() => {});
+    }
+  }, [route?.params?.activeRide]);
+
+  // Restore cached stores instantly from AsyncStorage if cold start
+  useEffect(() => {
+    (async () => {
+      try {
+        if (_inMemoryNearbyHotspots.length === 0) {
+          const cachedJson = await AsyncStorage.getItem(RIDER_PERSISTENT_HOTSPOTS_CACHE_KEY);
+          if (cachedJson) {
+            const parsed = JSON.parse(cachedJson);
+            if (Array.isArray(parsed) && parsed.length > 0) {
+              _inMemoryNearbyHotspots = parsed;
+              _inMemoryHotspotsLoadedOnce = true;
+              hasLoadedHotspotsOnceRef.current = true;
+              setNearbyHotspots(parsed);
+              nearbyHotspotsRef.current = parsed;
+              const sel = parsed[0] || null;
+              setSelectedHotspot(sel);
+              selectedHotspotRef.current = sel;
+            }
+          }
+        }
+      } catch (_) {}
+    })();
+  }, []);
+
 
   const RIDER_CANCEL_REASONS = [
     'Vehicle breakdown / mechanical issue',
@@ -620,7 +438,7 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
       setRiderCancelModalVisible(false);
       setOrderToCancelByRider(null);
       Alert.alert('Delivery Cancelled', 'The delivery order has been cancelled.');
-      fetchRealDeliveries();
+      fetchDeliveries();
     } catch (err: any) {
       Alert.alert('Error', err?.response?.data?.message || err?.message || 'Failed to cancel order.');
     } finally {
@@ -698,172 +516,6 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
   // ── Dark Mode State ──
   const [isDarkMode, setIsDarkMode] = useState<boolean>(false);
 
-  const syncZoneBoundaryToMap = (zoneNameOrId?: string, customPolygon?: number[][], customAreas?: any[]) => {
-    const zName = zoneNameOrId || riderZone || 'Old Bhopal';
-    let areas = customAreas;
-    if (!areas || areas.length === 0) {
-      if (riderZoneAreas && riderZoneAreas.length > 0) {
-        areas = riderZoneAreas;
-      } else {
-        const lower = (zName || '').toLowerCase().trim();
-        if (lower.includes('new') || lower.includes('mp') || lower.includes('arera') || lower.includes('kolar') || lower.includes('shahpura')) {
-          areas = BHOPAL_ZONE_GROUPS.NEW_BHOPAL.configuredAreas;
-        } else if (lower.includes('bhel') || lower.includes('awadhpuri') || lower.includes('piplani') || lower.includes('indra')) {
-          areas = BHOPAL_ZONE_GROUPS.BHEL.configuredAreas;
-        } else {
-          areas = BHOPAL_ZONE_GROUPS.OLD_BHOPAL.configuredAreas;
-        }
-      }
-    }
-
-    let poly = customPolygon;
-    if (!poly || poly.length === 0) {
-      if (riderZonePolygon && riderZonePolygon.length >= 3) {
-        poly = riderZonePolygon;
-      } else {
-        const lower = (zName || '').toLowerCase().trim();
-        if (lower.includes('new') || lower.includes('mp')) {
-          poly = BHOPAL_ZONE_GROUPS.NEW_BHOPAL.polygonCoordinates;
-        } else if (lower.includes('bhel')) {
-          poly = BHOPAL_ZONE_GROUPS.BHEL.polygonCoordinates;
-        } else {
-          poly = BHOPAL_ZONE_GROUPS.OLD_BHOPAL.polygonCoordinates;
-        }
-      }
-    }
-
-    if (mapWebViewRef.current) {
-      if (areas && areas.length > 0) {
-        mapWebViewRef.current.injectJavaScript(`
-          if (window.setGroupAreas) {
-            window.setGroupAreas(${JSON.stringify(areas)}, ${JSON.stringify(zName)});
-          } else if (window.setZonePolygon && ${JSON.stringify(poly)}) {
-            window.setZonePolygon(${JSON.stringify(poly)}, ${JSON.stringify(zName)});
-          }
-          true;
-        `);
-      } else if (poly && poly.length > 0) {
-        mapWebViewRef.current.injectJavaScript(`
-          if (window.setZonePolygon) {
-            window.setZonePolygon(${JSON.stringify(poly)}, ${JSON.stringify(zName)});
-          }
-          true;
-        `);
-      }
-    }
-  };
-
-  const restoreSelectedZone = useCallback(async () => {
-    try {
-      const [savedName, savedId, savedGroup, savedPolyStr, savedAreasStr] = await Promise.all([
-        AsyncStorage.getItem('rider_selected_zone'),
-        AsyncStorage.getItem('rider_selected_zone_id'),
-        AsyncStorage.getItem('rider_selected_zone_group'),
-        AsyncStorage.getItem('rider_selected_zone_polygon'),
-        AsyncStorage.getItem('rider_selected_zone_areas'),
-      ]);
-
-      const zName = savedName || (user as any)?.selectedZone || (user as any)?.zone || 'Old Bhopal';
-      const zId = savedId || (user as any)?.zoneId || 'old_bhopal';
-      const zGroup = savedGroup || (user as any)?.zoneGroup || 'OLD_BHOPAL';
-
-      let parsedPoly: number[][] | null = null;
-      if (savedPolyStr) {
-        try {
-          const parsed = JSON.parse(savedPolyStr);
-          if (Array.isArray(parsed) && parsed.length >= 3) {
-            parsedPoly = parsed;
-          }
-        } catch (_) {}
-      }
-
-      let parsedAreas: any[] | null = null;
-      if (savedAreasStr) {
-        try {
-          const parsedA = JSON.parse(savedAreasStr);
-          if (Array.isArray(parsedA) && parsedA.length > 0) {
-            parsedAreas = parsedA;
-          }
-        } catch (_) {}
-      }
-
-      if (!parsedAreas && (user as any)?.selectedZoneAreas && (user as any).selectedZoneAreas.length > 0) {
-        parsedAreas = (user as any).selectedZoneAreas;
-      }
-
-      if (!parsedAreas) {
-        const lower = (zGroup || zName || '').toLowerCase();
-        if (lower.includes('new') || lower.includes('mp')) {
-          parsedAreas = BHOPAL_ZONE_GROUPS.NEW_BHOPAL.configuredAreas;
-        } else if (lower.includes('bhel')) {
-          parsedAreas = BHOPAL_ZONE_GROUPS.BHEL.configuredAreas;
-        } else {
-          parsedAreas = BHOPAL_ZONE_GROUPS.OLD_BHOPAL.configuredAreas;
-        }
-      }
-
-      if (!parsedPoly && (user as any)?.selectedZonePolygon && (user as any).selectedZonePolygon.length >= 3) {
-        parsedPoly = (user as any).selectedZonePolygon;
-      }
-
-      if (!parsedPoly) {
-        const lower = (zGroup || zName || '').toLowerCase();
-        if (lower.includes('new') || lower.includes('mp')) parsedPoly = BHOPAL_ZONE_GROUPS.NEW_BHOPAL.polygonCoordinates;
-        else if (lower.includes('bhel')) parsedPoly = BHOPAL_ZONE_GROUPS.BHEL.polygonCoordinates;
-        else parsedPoly = BHOPAL_ZONE_GROUPS.OLD_BHOPAL.polygonCoordinates;
-      }
-
-      setRiderZone(zName);
-      setRiderZoneId(zId);
-      setRiderZoneGroup(zGroup);
-      if (parsedPoly) {
-        setRiderZonePolygon(parsedPoly);
-      }
-      if (parsedAreas) {
-        setRiderZoneAreas(parsedAreas);
-      }
-      syncZoneBoundaryToMap(zName, parsedPoly || undefined, parsedAreas || undefined);
-    } catch (err) {
-      console.log('[restoreSelectedZone Error]', err);
-    }
-  }, [user]);
-
-  useEffect(() => {
-    AsyncStorage.getItem('rider_dark_mode').then((val) => {
-      if (val === 'true') setIsDarkMode(true);
-    }).catch(() => {});
-    restoreSelectedZone();
-  }, [restoreSelectedZone]);
-
-  // Listen for zone updates from Zone Selection screen
-  useEffect(() => {
-    if (route?.params?.updatedZone) {
-      const uZone = route.params.updatedZone;
-      const zName = uZone.zoneName || uZone.name;
-      const zId = uZone.zoneId || uZone.id;
-      const zGroup = uZone.zoneGroup;
-      const zPoly = uZone.polygonCoordinates || uZone.polygon;
-      const zAreas = uZone.configuredAreas;
-
-      if (zName) setRiderZone(zName);
-      if (zId) setRiderZoneId(zId);
-      if (zGroup) setRiderZoneGroup(zGroup);
-      if (zPoly && zPoly.length >= 3) {
-        setRiderZonePolygon(zPoly);
-      }
-      if (zAreas && zAreas.length > 0) {
-        setRiderZoneAreas(zAreas);
-      }
-      syncZoneBoundaryToMap(zName, zPoly, zAreas);
-    }
-  }, [route?.params?.updatedZone]);
-
-  const toggleDarkMode = async () => {
-    const nextMode = !isDarkMode;
-    setIsDarkMode(nextMode);
-    await AsyncStorage.setItem('rider_dark_mode', nextMode ? 'true' : 'false').catch(() => {});
-  };
-
   // ── Bottom Tabs: 'feed' | 'orders' | 'pocket' | 'profile' ──
   const [activeTab, setActiveTab] = useState<'feed' | 'orders' | 'pocket' | 'profile'>('feed');
 
@@ -874,40 +526,13 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
   );
   const [riderVehicleNumber, setRiderVehicleNumber] = useState<string>((user as any)?.vehicleNumber || 'MPO4ZJ8711');
   const [riderSecondaryPhone, setRiderSecondaryPhone] = useState<string>((user as any)?.secondaryPhone || '8871104229');
-  const [riderZone, setRiderZone] = useState<string>((user as any)?.selectedZone || (user as any)?.zone || 'Old Bhopal');
-  const [riderZoneId, setRiderZoneId] = useState<string>((user as any)?.zoneId || 'old_bhopal');
-  const [riderZoneGroup, setRiderZoneGroup] = useState<string>((user as any)?.zoneGroup || 'OLD_BHOPAL');
-  const [riderZonePolygon, setRiderZonePolygon] = useState<number[][]>(() => (user as any)?.selectedZonePolygon || []);
-  const [riderZoneAreas, setRiderZoneAreas] = useState<any[]>(() => (user as any)?.selectedZoneAreas || BHOPAL_ZONE_GROUPS.OLD_BHOPAL.configuredAreas);
-  const [riderCity, setRiderCity] = useState<string>((user as any)?.city || 'Bhopal');
+  const [riderCity, setRiderCity] = useState<string>((user as any)?.city || '');
   const [dlExpiryDate, setDlExpiryDate] = useState<string>((user as any)?.dlExpiry || '28/12/2028');
 
-  // Auto-sync zone on screen focus so any changes in Zone Selection reflect in 0ms!
-  useFocusEffect(
-    useCallback(() => {
-      restoreSelectedZone();
-    }, [restoreSelectedZone])
-  );
-
-  const handleZoneSelectionComplete = (zone: any) => {
-    if (!zone) return;
-    const zName = zone?.zoneName || zone?.name;
-    const zId = zone?.zoneId || zone?.id;
-    const zGroup = zone?.zoneGroup;
-    const zPoly = zone?.polygonCoordinates || zone?.polygon;
-    const zAreas = zone?.configuredAreas;
-    if (zName) setRiderZone(zName);
-    if (zId) setRiderZoneId(zId);
-    if (zGroup) setRiderZoneGroup(zGroup);
-    if (zPoly && zPoly.length >= 3) {
-      setRiderZonePolygon(zPoly);
-      AsyncStorage.setItem('rider_selected_zone_polygon', JSON.stringify(zPoly)).catch(() => {});
-    }
-    if (zAreas && zAreas.length > 0) {
-      setRiderZoneAreas(zAreas);
-      AsyncStorage.setItem('rider_selected_zone_areas', JSON.stringify(zAreas)).catch(() => {});
-    }
-    syncZoneBoundaryToMap(zName, zPoly, zAreas);
+  const toggleDarkMode = async () => {
+    const nextMode = !isDarkMode;
+    setIsDarkMode(nextMode);
+    await AsyncStorage.setItem('rider_dark_mode', nextMode ? 'true' : 'false').catch(() => {});
   };
 
   // ── Pocket Real Interactive Calendar States ──
@@ -1019,6 +644,19 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
   // ── Multi-Language Translation State ──
   const [language, setLanguage] = useState<RiderLanguage>('hi');
 
+  // ── Header Modals & Bottom Sheets (Help, ID Card, Language, SOS, Rain) ──
+  const [showHelpModal, setShowHelpModal] = useState<boolean>(false);
+  const [showIdCardModal, setShowIdCardModal] = useState<boolean>(false);
+  const [showLanguageModal, setShowLanguageModal] = useState<boolean>(false);
+  const [showSosModal, setShowSosModal] = useState<boolean>(false);
+  const [showBannersModal, setShowBannersModal] = useState<boolean>(() => Boolean(route?.params?.openDashboard || (route?.params?.hasActiveTrip && activeDeliveries.length > 0)));
+
+  useEffect(() => {
+    if (route?.params?.openDashboard || (route?.params?.hasActiveTrip && activeDeliveries.length > 0)) {
+      setShowBannersModal(true);
+    }
+  }, [route?.params?.openDashboard, route?.params?.hasActiveTrip, activeDeliveries.length]);
+
   useEffect(() => {
     AsyncStorage.getItem('rider_app_language').then((val) => {
       if (val && (val in { hi: 1, en: 1, hinglish: 1, mr: 1, bn: 1, gu: 1, te: 1, ta: 1, pa: 1, kn: 1 })) {
@@ -1039,65 +677,56 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
   };
 
   const t = (key: string) => getRiderTranslation(language, key);
-
-  // ── Header Modals & Bottom Sheets (Help, ID Card, Language, SOS, Rain) ──
-  const [showHelpModal, setShowHelpModal] = useState<boolean>(false);
-  const [showIdCardModal, setShowIdCardModal] = useState<boolean>(false);
-  const [showLanguageModal, setShowLanguageModal] = useState<boolean>(false);
-  const [showSosModal, setShowSosModal] = useState<boolean>(false);
-  const [showBannersModal, setShowBannersModal] = useState<boolean>(false);
   const [showCalendarModal, setShowCalendarModal] = useState<boolean>(false);
   const [showDepositModal, setShowDepositModal] = useState<boolean>(false);
   const [depositAmountInput, setDepositAmountInput] = useState<string>('200');
   const [selectedDepositMethod, setSelectedDepositMethod] = useState<'UPI' | 'GPAY' | 'PHONEPE' | 'PAYTM'>('UPI');
   const [isProcessingDeposit, setIsProcessingDeposit] = useState<boolean>(false);
-  const [isOutsideZone, setIsOutsideZone] = useState<boolean>(false);
-  const [zoneDistanceKm, setZoneDistanceKm] = useState<number>(0);
-  const [zoneEntryCoords, setZoneEntryCoords] = useState<{ latitude: number; longitude: number } | null>(null);
+  const [isAutoFollowPaused, setIsAutoFollowPaused] = useState<boolean>(false);
   const [selectedMapFilter, setSelectedMapFilter] = useState<'hotspot' | 'drop'>('hotspot');
   const [isRainReported, setIsRainReported] = useState<boolean>(false);
-  const mapWebViewRef = useRef<any>(null);
   const updateRiderLocationRef = useRef<any>(null);
 
-  // Handle real-time zone boundary events from Map WebView
+  // Handle real-time map interaction and hotspot events from Map WebView
   const handleMapMessage = useCallback((event: any) => {
     try {
       const data = JSON.parse(event.nativeEvent.data);
       if (data.type === 'SELECT_HOTSPOT' && data.hotspot) {
         console.log('🏪 [HOTSPOT SELECTED FROM MAP]:', data.hotspot.name);
         setSelectedHotspot(data.hotspot);
+        selectedHotspotRef.current = data.hotspot;
         if (data.routeInfo) {
           setHotspotRouteInfo(data.routeInfo);
+        }
+        if (syncDiscoveryRoutesRef.current && nearbyHotspotsRef.current.length > 0 && activeDeliveriesRef.current.length === 0) {
+          syncDiscoveryRoutesRef.current(nearbyHotspotsRef.current, data.hotspot, null, true);
         }
       } else if (data.type === 'MAP_READY') {
         console.log('🗺️ [RIDER LEAFLET MAP READY]');
         if (updateRiderLocationRef.current) { updateRiderLocationRef.current(); }
-      } else if (data.type === 'ZONE_STATUS') {
-        setIsOutsideZone(!data.isInside);
-        if (data.distanceKm !== undefined) {
-          setZoneDistanceKm(data.distanceKm);
+        if (activeDeliveriesRef.current.length === 0 && !incomingRequestRef.current) {
+          if (mapWebViewRef.current && nearbyHotspotsRef.current.length > 0) {
+            const curSel = selectedHotspotRef.current || nearbyHotspotsRef.current[0];
+            const selId = curSel ? String(curSel.id || curSel.restaurantId || '') : '';
+            mapWebViewRef.current.injectJavaScript(`
+              if (window.updateHotspotMarkers) {
+                window.updateHotspotMarkers(${JSON.stringify(nearbyHotspotsRef.current)}, ${JSON.stringify(selId)});
+              }
+              true;
+            `);
+            if (syncDiscoveryRoutesRef.current) {
+              syncDiscoveryRoutesRef.current(nearbyHotspotsRef.current, curSel, null, true);
+            }
+          }
+          if (fetchNearbyHotspotsRef.current) {
+            fetchNearbyHotspotsRef.current(hasLoadedHotspotsOnceRef.current);
+          }
         }
-        if (data.entryLat && data.entryLon) {
-          setZoneEntryCoords({ latitude: data.entryLat, longitude: data.entryLon });
-        }
+      } else if (data.type === 'AUTO_FOLLOW_CHANGED') {
+        setIsAutoFollowPaused(!data.enabled);
       }
     } catch (e) {}
   }, []);
-
-  // Open Real Google Maps Navigation to Reachable Zone Entry Point (NOT Zone Center)
-  const openZoneNavigation = useCallback(() => {
-    if (!zoneEntryCoords) return;
-    const { latitude, longitude } = zoneEntryCoords;
-    const label = encodeURIComponent(`${riderZone || 'Your Zone'} Entry Point`);
-    const url = Platform.select({
-      ios: `maps:0,0?q=${latitude},${longitude}(${label})`,
-      android: `google.navigation:q=${latitude},${longitude}`,
-    }) || `https://www.google.com/maps/dir/?api=1&destination=${latitude},${longitude}&travelmode=driving`;
-
-    Linking.openURL(url).catch(() => {
-      Linking.openURL(`https://www.google.com/maps/dir/?api=1&destination=${latitude},${longitude}&travelmode=driving`);
-    });
-  }, [zoneEntryCoords, riderZone]);
 
   // ── Swipe Up Gesture from Bottom on Map to open Dashboard (Locked when active ride in progress) ──
   const swipeUpPanResponder = useRef(
@@ -1204,15 +833,8 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
           return true;
         }
 
-        // 4. Requirement 7: When on root Rider Home (Feed tab) -> Navigate back to RoleSelection screen
-        if (navigation.reset) {
-          navigation.reset({
-            index: 0,
-            routes: [{ name: 'RoleSelection' }],
-          });
-        } else {
-          navigation.navigate('RoleSelection');
-        }
+        // 4. When on root Rider Home (Feed tab) -> Directly navigate to Role Selection per Specification Point 1
+        navigation.navigate('RoleSelection');
         return true;
       };
 
@@ -1242,31 +864,60 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
   }, [incomingRequest]);
 
   // ── Persistent Active Ride State (Requirement 5): Restore active ride immediately across tabs & app restart ──
-  useEffect(() => {
-    const restoreActiveRide = async () => {
-      try {
-        const stored = await AsyncStorage.getItem('active_rider_ride');
-        if (stored) {
-          const parsed = JSON.parse(stored);
-          if (parsed && (parsed.bookingId || parsed._id)) {
-            setActiveDeliveries((prev) => {
-              if (prev.length === 0) return [parsed];
-              return prev;
-            });
+  const restoreActiveRide = useCallback(async () => {
+    try {
+      const stored = await AsyncStorage.getItem('active_rider_ride');
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        if (parsed && (parsed.bookingId || parsed._id)) {
+          const st = String(parsed.status || '').toUpperCase();
+          const isFinished = st === 'COMPLETED' || st === 'DELIVERED' || st.includes('CANCEL');
+          if (!isFinished) {
+            setActiveDeliveries([parsed]);
+            activeDeliveriesRef.current = [parsed];
+            return;
           }
-        } else {
-          const mem = rideStore.getCurrentRide();
-          if (mem && mem.rideId) {
-            setActiveDeliveries((prev) => {
-              if (prev.length === 0) return [mem as any];
-              return prev;
-            });
+          AsyncStorage.removeItem('active_rider_ride').catch(() => {});
+          try { rideStore.clearRide(); } catch (_) {}
+        }
+      } else {
+        const mem = rideStore.getCurrentRide();
+        if (mem && (mem.rideId || (mem as any).bookingId)) {
+          const st = String(mem.status || '').toUpperCase();
+          const isFinished = st === 'COMPLETED' || st === 'DELIVERED' || st.includes('CANCEL');
+          if (!isFinished) {
+            setActiveDeliveries([mem as any]);
+            activeDeliveriesRef.current = [mem as any];
+            return;
           }
         }
-      } catch (_) {}
-    };
-    restoreActiveRide();
+      }
+    } catch (_) {}
   }, []);
+
+  useEffect(() => {
+    restoreActiveRide();
+  }, [restoreActiveRide]);
+
+// Auto lockout removed per Requirement 3: Main Dashboard remains accessible with persistent floating trip card
+
+  // ── Fetch Real Earnings from Backend ──
+  const fetchEarnings = useCallback(async () => {
+    try {
+      const pId = (riderId || user?._id || user?.id)?.toString();
+      if (!pId) return;
+      const res = await fetch(`${BASE_URL.replace(/\/+$/, '')}/bookings/earnings?providerId=${pId}&role=rider`);
+      const data = await res.json();
+      if (data?.success) {
+        if (data.totalEarnings !== undefined) setWeeklyEarnings(data.totalEarnings);
+        if (data.pocketBalance !== undefined) setPocketBalance(data.pocketBalance);
+        if (data.cashLimit !== undefined) setCashLimit(data.cashLimit);
+        if (data.completedServicesCount !== undefined) setTodayTrips(data.completedServicesCount);
+        else if (data.completedToday !== undefined) setTodayTrips(data.completedToday);
+        if (data.tips !== undefined) setCustomerTips(data.tips);
+      }
+    } catch (_) {}
+  }, [riderId, user?._id, user?.id]);
 
   // ── Handle Real Razorpay Deposit into Pocket Balance ──
   const handlePerformDeposit = async () => {
@@ -1377,91 +1028,110 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
   };
 
   // ── GPS Location & Address State ──
-  const [currentAddress, setCurrentAddress] = useState<string>('📍 Locating GPS...');
+  const [currentAddress, setCurrentAddress] = useState<string>('Locating your position...');
+  const [gpsStatus, setGpsStatus] = useState<'locating' | 'ready' | 'permission_denied' | 'gps_unavailable' | 'fetch_failed'>(() => {
+    const uLat = Number((user as any)?.latitude || (user as any)?.locationCoords?.latitude || 0);
+    const uLon = Number((user as any)?.longitude || (user as any)?.locationCoords?.longitude || 0);
+    if (isValidCoordinates(uLat, uLon) && !isDummyCoordinates(uLat, uLon)) return 'ready';
+    return 'locating';
+  });
   const [riderCoords, setRiderCoords] = useState<{ latitude: number; longitude: number } | null>(() => {
     const uLat = Number((user as any)?.latitude || (user as any)?.locationCoords?.latitude || 0);
     const uLon = Number((user as any)?.longitude || (user as any)?.locationCoords?.longitude || 0);
-    if (uLat > 0 && uLon > 0 && !isDummyCoordinates(uLat, uLon)) return { latitude: uLat, longitude: uLon };
+    if (isValidCoordinates(uLat, uLon) && !isDummyCoordinates(uLat, uLon)) return { latitude: uLat, longitude: uLon };
     return null;
   });
   const hasCenteredMapRef = useRef<boolean>(false);
 
-  // Recenter Leaflet Map View to Rider Coordinates with Smooth Google Maps-like fly animation
+  useEffect(() => {
+    AsyncStorage.getItem('rider_dark_mode').then((val) => {
+      if (val === 'true') setIsDarkMode(true);
+    }).catch(() => {});
+  }, []);
+
+  // Re-center Leaflet Map smoothly to Rider's latest real GPS & resume Auto-Follow Camera
   const recenterMap = useCallback(async () => {
     try {
-      const gps = await fetchCurrentGpsPosition(false);
-      const targetLat = gps?.latitude || riderCoords?.latitude;
-      const targetLon = gps?.longitude || riderCoords?.longitude;
-      if (gps?.latitude && gps?.longitude) {
-        setRiderCoords({ latitude: gps.latitude, longitude: gps.longitude });
-      }
-      if (targetLat && targetLon && mapWebViewRef.current) {
+      setIsAutoFollowPaused(false);
+      if (riderCoords && !isDummyCoordinates(riderCoords.latitude, riderCoords.longitude) && mapWebViewRef.current) {
         mapWebViewRef.current.injectJavaScript(`
           if (window.recenterSmooth) {
-            window.recenterSmooth(${targetLat}, ${targetLon}, 16);
+            window.recenterSmooth(${riderCoords.latitude}, ${riderCoords.longitude}, 16);
           } else if (window.setCenter) {
-            window.setCenter(${targetLat}, ${targetLon}, 16);
+            window.setCenter(${riderCoords.latitude}, ${riderCoords.longitude}, 16);
           }
           true;
         `);
       }
+
+      const gpsRes = await fetchCurrentGpsPositionDetailed(false);
+      if (gpsRes.success && gpsRes.fix && !isDummyCoordinates(gpsRes.fix.latitude, gpsRes.fix.longitude)) {
+        const { latitude, longitude } = gpsRes.fix;
+        setRiderCoords({ latitude, longitude });
+        setGpsStatus('ready');
+        saveLastRoleGpsCoords('delivery', gpsRes.fix, riderId || user?._id || user?.id).catch(() => {});
+        if (mapWebViewRef.current) {
+          mapWebViewRef.current.injectJavaScript(`
+            if (window.recenterSmooth) {
+              window.recenterSmooth(${latitude}, ${longitude}, 16);
+            } else if (window.setCenter) {
+              window.setCenter(${latitude}, ${longitude}, 16);
+            }
+            true;
+          `);
+        }
+      } else if (!riderCoords) {
+        setGpsStatus(
+          gpsRes.errorType === 'PERMISSION_DENIED'
+            ? 'permission_denied'
+            : gpsRes.errorType === 'LOCATION_OFF'
+            ? 'gps_unavailable'
+            : 'fetch_failed'
+        );
+      }
     } catch (e) {
       console.log('[GPS RECENTER ERROR]', e);
     }
-  }, [riderCoords]);
-
-  // Calculate if rider is outside their designated delivery zone
-  const checkZoneBoundary = useCallback((lat: number, lon: number, currentZone: string, customPoly?: number[][]) => {
-    let poly = customPoly;
-    if (!poly || poly.length === 0) {
-      if (riderZonePolygon && riderZonePolygon.length >= 3) {
-        poly = riderZonePolygon;
-      } else {
-        const zKey = (currentZone || 'your zone').toLowerCase().trim();
-        if (zKey.includes('arwaliya')) {
-          poly = BHOPAL_ZONE_POLYGONS.arwaliya.polygon;
-        } else if (zKey.includes('new') || zKey.includes('mp') || zKey.includes('arera') || zKey.includes('kolar') || zKey.includes('shahpura')) {
-          poly = BHOPAL_ZONE_POLYGONS.new_bhopal.polygon;
-        } else if (zKey.includes('bhel') || zKey.includes('awadhpuri') || zKey.includes('piplani') || zKey.includes('indra')) {
-          poly = BHOPAL_ZONE_POLYGONS.bhel.polygon;
-        } else {
-          poly = BHOPAL_ZONE_POLYGONS.old_bhopal.polygon;
-        }
-      }
-    }
-    if (poly && poly.length >= 3) {
-      const inside = isPointInPolygonCoords(lat, lon, poly);
-      setIsOutsideZone(!inside);
-      const entry = getClosestBoundaryPointCoords(lat, lon, poly);
-      setZoneEntryCoords(entry);
-      const distKm = calculateHaversineDistanceKm(lat, lon, entry.latitude, entry.longitude);
-      setZoneDistanceKm(parseFloat(distKm.toFixed(1)));
-    }
-  }, [riderZonePolygon]);
+  }, [riderCoords, riderId, user]);
 
   // Real-time GPS Location Fetcher
   const updateRiderLocation = useCallback(async () => {
     updateRiderLocationRef.current = updateRiderLocation;
     try {
-      const gps = await fetchCurrentGpsPosition(false);
-      if (gps && gps.latitude && gps.longitude) {
+      const hasPerm = await checkLocationPermission();
+      if (!hasPerm) {
+        const granted = await requestLocationPermission();
+        if (!granted) {
+          setGpsStatus('permission_denied');
+          setCurrentAddress('Location permission required.');
+          return;
+        }
+      }
+
+      if (!riderCoords) {
+        setGpsStatus('locating');
+      }
+
+      const gpsRes = await fetchCurrentGpsPositionDetailed(false);
+      if (gpsRes.success && gpsRes.fix && !isDummyCoordinates(gpsRes.fix.latitude, gpsRes.fix.longitude)) {
+        const gps = gpsRes.fix;
+        const targetId = riderId || user?._id || user?.id;
         setRiderCoords({ latitude: gps.latitude, longitude: gps.longitude });
-        checkZoneBoundary(gps.latitude, gps.longitude, riderZone);
+        setGpsStatus('ready');
+        saveLastRoleGpsCoords('delivery', gps, targetId).catch(() => {});
+
         const geo = await reverseGeocodeCoords(gps.latitude, gps.longitude);
         if (geo?.fullAddress) {
           setCurrentAddress(geo.fullAddress);
         } else if (geo?.city) {
-          setCurrentAddress(`${geo.area || ''}, ${geo.city}`);
+          setCurrentAddress(`${geo.area ? geo.area + ', ' : ''}${geo.city}`);
         }
 
-        // Center on initial map load; live GPS updates only move marker without touching camera!
+        // Update rider marker & smooth auto-follow camera inside Leaflet
         if (mapWebViewRef.current) {
           mapWebViewRef.current.injectJavaScript(`
             if (window.updateRiderMarker) {
               window.updateRiderMarker(${gps.latitude}, ${gps.longitude}, ${!hasCenteredMapRef.current});
-            }
-            if (!window.hasCenteredInitial && window.setCenter) {
-              window.setCenter(${gps.latitude}, ${gps.longitude}, 16);
             }
             true;
           `);
@@ -1469,7 +1139,6 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
         }
 
         // Send GPS update to MongoDB and socket
-        const targetId = riderId || user?._id || user?.id;
         if (targetId) {
           // 1. Persist to MongoDB User Model
           api.post('/users/update-profile', {
@@ -1500,31 +1169,47 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
             });
           }
         }
+      } else {
+        setGpsStatus(
+          gpsRes.errorType === 'PERMISSION_DENIED'
+            ? 'permission_denied'
+            : gpsRes.errorType === 'LOCATION_OFF'
+            ? 'gps_unavailable'
+            : 'fetch_failed'
+        );
       }
     } catch (e) {
       console.log('[GPS FETCH ERROR]', e);
+      setGpsStatus('fetch_failed');
     }
-  }, [riderId, user, socket, riderZone, checkZoneBoundary]);
-
-  useEffect(() => {
-    if (riderCoords?.latitude && riderCoords?.longitude) {
-      checkZoneBoundary(riderCoords.latitude, riderCoords.longitude, riderZone);
-    }
-  }, [riderCoords, riderZone, checkZoneBoundary]);
+  }, [riderId, user, socket, riderCoords]);
+  updateRiderLocationRef.current = updateRiderLocation;
 
   useEffect(() => {
     (async () => {
+      const targetId = riderId || user?._id || user?.id;
+      // Restore ONLY this rider's last valid real GPS position cleanly without camera jump
+      if (!riderCoords) {
+        const cachedRiderGps = await getLastRoleGpsCoords('delivery', targetId);
+        if (cachedRiderGps && !isDummyCoordinates(cachedRiderGps.latitude, cachedRiderGps.longitude)) {
+          setRiderCoords({ latitude: cachedRiderGps.latitude, longitude: cachedRiderGps.longitude });
+          setGpsStatus('ready');
+        }
+      }
+
       syncLiveDeviceLocationInBackground('delivery').then((bgRes) => {
-        if (bgRes.success && bgRes.coords) {
+        if (bgRes.success && bgRes.coords && !isDummyCoordinates(bgRes.coords.latitude, bgRes.coords.longitude)) {
           setRiderCoords(bgRes.coords);
+          setGpsStatus('ready');
           if (bgRes.address) setCurrentAddress(bgRes.address);
         }
       }).catch(() => {});
-      await requestLocationPermission();
-      updateRiderLocation();
+      if (updateRiderLocationRef.current) {
+        updateRiderLocationRef.current();
+      }
     })();
     const unsubGps = watchCurrentGpsPosition(async (fix) => {
-      // Throttle React state re-rendering so 10,000-line screen doesn't flicker/re-render every second
+      if (isDummyCoordinates(fix.latitude, fix.longitude)) return;
       const now = Date.now();
       const distFromLastState = calculateHaversineDistanceKm(
         lastGpsCoordsStateRef.current.lat,
@@ -1535,10 +1220,11 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
       if (distFromLastState >= 0.015 || (now - lastGpsCoordsStateRef.current.time > 8000) || lastGpsCoordsStateRef.current.lat === 0) {
         lastGpsCoordsStateRef.current = { lat: fix.latitude, lon: fix.longitude, time: now };
         setRiderCoords({ latitude: fix.latitude, longitude: fix.longitude });
-        checkZoneBoundary(fix.latitude, fix.longitude, riderZone);
+        setGpsStatus('ready');
+        saveLastRoleGpsCoords('delivery', fix, riderId || user?._id || user?.id).catch(() => {});
       }
-      
-      // Live GPS updates ONLY move the marker; manual zoom and pan camera position is preserved!
+
+      // Live GPS updates smoothly move marker AND auto-follow camera (unless manually panned)
       if (mapWebViewRef.current) {
         if (!hasCenteredMapRef.current) {
           hasCenteredMapRef.current = true;
@@ -1591,7 +1277,7 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
     return () => {
       unsubGps();
     };
-  }, [updateRiderLocation, riderId, user, socket, currentAddress, riderZone, checkZoneBoundary]);
+  }, [riderId, user, socket]);
 
   // ── Resolve rider ID from deliveryUser storage if needed ──
   useEffect(() => {
@@ -1611,35 +1297,49 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
 
   // ── Restore saved online status on mount & whenever screen comes into focus ──
   const restoreOnlineStatus = useCallback(async () => {
-    let targetId = riderId || user?._id || user?.id;
-    if (!targetId) {
-      try {
-        const stored = await AsyncStorage.getItem('deliveryUser');
-        if (stored) {
-          const parsed = JSON.parse(stored);
-          targetId = parsed?._id || parsed?.id;
-        }
-      } catch (_) {}
-    }
+    try {
+      let targetId = riderId || user?._id || user?.id;
+      if (!targetId) {
+        try {
+          const stored = await AsyncStorage.getItem('deliveryUser');
+          if (stored) {
+            const parsed = JSON.parse(stored);
+            targetId = parsed?._id || parsed?.id;
+          }
+        } catch (_) {}
+      }
 
-    if (targetId) {
-      const idStr = targetId.toString();
-      const saved = await AsyncStorage.getItem(`rider_status_${idStr}`);
-      if (saved !== null) {
-        const v = JSON.parse(saved);
-        setIsOnline(Boolean(v));
+      if (targetId) {
+        const idStr = targetId.toString();
+        const saved = await AsyncStorage.getItem(`rider_status_${idStr}`);
+        if (saved !== null) {
+          const v = Boolean(JSON.parse(saved));
+          setIsOnline(v);
+          isOnlineRef.current = v;
+          switchAnim.setValue(v ? 1 : 0);
+          try { rideStore?.setRiderOnline?.(v); } catch (_) {}
+          return;
+        }
+      }
+
+      const globalSaved = await AsyncStorage.getItem('delivery_is_online');
+      if (globalSaved !== null) {
+        const v = Boolean(JSON.parse(globalSaved));
+        setIsOnline(v);
+        isOnlineRef.current = v;
         switchAnim.setValue(v ? 1 : 0);
-        try { rideStore?.setRiderOnline?.(Boolean(v)); } catch (_) {}
+        try { rideStore?.setRiderOnline?.(v); } catch (_) {}
         return;
       }
-    }
 
-    if ((user as any)?.isOnline !== undefined) {
-      const online = (user as any)?.isOnline === true;
-      setIsOnline(online);
-      switchAnim.setValue(online ? 1 : 0);
-      try { rideStore?.setRiderOnline?.(online); } catch (_) {}
-    }
+      if ((user as any)?.isOnline !== undefined) {
+        const online = (user as any)?.isOnline === true;
+        setIsOnline(online);
+        isOnlineRef.current = online;
+        switchAnim.setValue(online ? 1 : 0);
+        try { rideStore?.setRiderOnline?.(online); } catch (_) {}
+      }
+    } catch (_) {}
   }, [riderId, user, switchAnim]);
 
   useFocusEffect(
@@ -1648,46 +1348,31 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
     }, [restoreOnlineStatus])
   );
 
-  // ── Fetch Real Earnings from Backend ──
-  const fetchEarnings = useCallback(async () => {
-    try {
-      const pId = (riderId || user?._id || user?.id)?.toString();
-      if (!pId) return;
-      const res = await fetch(`${BASE_URL.replace(/\/+$/, '')}/bookings/earnings?providerId=${pId}&role=rider`);
-      const data = await res.json();
-      if (data?.success) {
-        if (data.totalEarnings !== undefined) setWeeklyEarnings(data.totalEarnings);
-        if (data.pocketBalance !== undefined) setPocketBalance(data.pocketBalance);
-        if (data.cashLimit !== undefined) setCashLimit(data.cashLimit);
-        if (data.completedServicesCount !== undefined) setTodayTrips(data.completedServicesCount);
-        else if (data.completedToday !== undefined) setTodayTrips(data.completedToday);
-        if (data.tips !== undefined) setCustomerTips(data.tips);
-      }
-    } catch (_) {}
-  }, [riderId, user?._id, user?.id]);
-
   // ── Fetch Real Deliveries (Active, Completed & Cancelled) ──
   const fetchDeliveries = useCallback(async () => {
     try {
       setLoadingDeliveries(true);
       let uId = riderId || user?._id || user?.id;
-      if (!uId) {
+      let userPhone = user?.phoneNumber || user?.phone || '';
+      if (!uId || !userPhone) {
         try {
           const delivUserStr = await AsyncStorage.getItem('deliveryUser');
           if (delivUserStr) {
             const u = JSON.parse(delivUserStr);
-            if (u?._id || u?.id) uId = (u._id || u.id).toString();
+            if (!uId && (u?._id || u?.id)) uId = (u._id || u.id).toString();
+            if (!userPhone) userPhone = u?.phoneNumber || u?.phone || '';
           }
         } catch (_) {}
       }
-      if (!uId) return;
+      if (!uId && !userPhone) return;
 
-      const userPhone = user?.phoneNumber || user?.phone || '';
-      const queryUrl = `/bookings/my-bookings?userId=${uId}&role=rider${userPhone ? `&phone=${encodeURIComponent(userPhone)}` : ''}`;
+      const queryUrl = `/bookings/my-bookings?userId=${uId || ''}&role=rider${userPhone ? `&phone=${encodeURIComponent(userPhone)}` : ''}`;
       const res = await api.get(queryUrl);
       if (res.data?.success && res.data.bookings) {
         const all: any[] = res.data.bookings;
         setAllDeliveries(all);
+        const cacheKey = `CACHE_RIDER_DELIVERIES_${uId || userPhone || 'rider'}`;
+        AsyncStorage.setItem(cacheKey, JSON.stringify(all)).catch(() => {});
         
         const isDone = (b: any) => {
           const st = (b.status || '').toUpperCase();
@@ -1731,19 +1416,33 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
         const activeList = all.filter((b: any) => !isDone(b) && !isCanc(b) && !isPendingOffer(b));
         
         // Guard: If we currently have an accepted active delivery, preserve it so it never hides/disappears
-        if (activeList.length === 0 && activeDeliveries.length > 0) {
-          const currentActive = activeDeliveries[0];
-          const curId = String(currentActive.bookingId || currentActive._id || currentActive.rideId);
+        const existingActive = activeDeliveriesRef.current.length > 0 ? activeDeliveriesRef.current[0] : null;
+        if (activeList.length === 0 && existingActive) {
+          const curId = String(existingActive.bookingId || existingActive._id || existingActive.rideId);
           const foundInAll = all.find((b: any) => String(b.bookingId || b._id || b.rideId) === curId);
           if (!foundInAll || (!isDone(foundInAll) && !isCanc(foundInAll))) {
-            activeList.push(currentActive);
+            activeList.push(existingActive);
           }
+        }
+
+        // Backend query fallback for single active running booking
+        if (activeList.length === 0 && (uId || userPhone)) {
+          try {
+            const activeRes = await api.get(`/bookings/active?riderId=${uId || ''}&role=rider${userPhone ? `&phone=${encodeURIComponent(userPhone)}` : ''}`).catch(() => null);
+            if (activeRes?.data?.success && activeRes?.data?.activeBooking) {
+              const b = activeRes.data.activeBooking;
+              if (!isDone(b) && !isCanc(b) && !isPendingOffer(b)) {
+                activeList.push(b);
+              }
+            }
+          } catch (_) {}
         }
 
         const completedList = all.filter((b: any) => isDone(b) && !isCanc(b));
         const cancelledList = all.filter((b: any) => isCanc(b));
 
         setActiveDeliveries(activeList);
+        activeDeliveriesRef.current = activeList;
         if (activeList.length > 0) {
           AsyncStorage.setItem('active_rider_ride', JSON.stringify(activeList[0])).catch(() => {});
           try { rideStore.setCurrentRide(activeList[0]); } catch (_) {}
@@ -1765,6 +1464,338 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
     }
   }, [riderId, user]);
 
+  // ── Fetch Nearby Online Stores & Cached ORS Road Discovery Routes ──
+  const lastHotspotsFetchCoordsRef = useRef<{ latitude: number; longitude: number; time: number } | null>(null);
+  const riderCoordsRef = useRef<{ latitude: number; longitude: number } | null>(null);
+  riderCoordsRef.current = riderCoords;
+
+  const syncDiscoveryRoutes = useCallback(
+    async (
+      storesList: any[],
+      primaryStore: any | null,
+      coordsOverride?: { latitude: number; longitude: number } | null,
+      forceSync: boolean = false
+    ) => {
+      try {
+        if (activeDeliveriesRef.current.length > 0 || incomingRequestRef.current) {
+          if (mapWebViewRef.current) {
+            mapWebViewRef.current.injectJavaScript(`if (window.clearDiscoveryRoutes) { window.clearDiscoveryRoutes(); } true;`);
+          }
+          setDiscoveryRouteError(null);
+          return;
+        }
+
+        const rCoords = coordsOverride || riderCoordsRef.current;
+        const rLat = Number(rCoords?.latitude || 0);
+        const rLon = Number(rCoords?.longitude || 0);
+        const hasValidRider = Boolean(rCoords && isValidCoordinates(rLat, rLon) && !isDummyCoordinates(rLat, rLon));
+
+        if (!hasValidRider || !Array.isArray(storesList) || storesList.length === 0) {
+          if (mapWebViewRef.current) {
+            mapWebViewRef.current.injectJavaScript(`if (window.clearDiscoveryRoutes) { window.clearDiscoveryRoutes(); } true;`);
+          }
+          setHotspotRouteInfo(null);
+          if (!hasValidRider) setDiscoveryRouteError(null);
+          return;
+        }
+
+        const primaryId = primaryStore ? String(primaryStore.id || primaryStore.restaurantId || '') : '';
+        const orderedTargets: any[] = [];
+        const seenIds = new Set<string>();
+        if (primaryStore && primaryId) {
+          orderedTargets.push(primaryStore);
+          seenIds.add(primaryId);
+        }
+        for (const s of storesList) {
+          if (orderedTargets.length >= 3) break;
+          const sid = String(s.id || s.restaurantId || s._id || '');
+          if (!sid || seenIds.has(sid)) continue;
+          if (!isValidCoordinates(s.latitude, s.longitude) || isDummyCoordinates(s.latitude, s.longitude)) continue;
+          orderedTargets.push(s);
+          seenIds.add(sid);
+        }
+
+        if (orderedTargets.length === 0) {
+          if (mapWebViewRef.current) {
+            mapWebViewRef.current.injectJavaScript(`if (window.clearDiscoveryRoutes) { window.clearDiscoveryRoutes(); } true;`);
+          }
+          return;
+        }
+
+        const routeSignature = orderedTargets
+          .map((t) => `${t.id || t.restaurantId}:${Number(t.latitude).toFixed(4)},${Number(t.longitude).toFixed(4)}`)
+          .join('|');
+        const lastSync = lastDiscoverySyncRef.current;
+        const movedKm = lastSync.lat !== 0
+          ? calculateHaversineDistanceKm(lastSync.lat, lastSync.lon, rLat, rLon)
+          : 999;
+
+        // Only recalculate ORS road route if rider moved significantly (>= 250m) or store selection changed
+        if (!forceSync && lastSync.key === routeSignature && movedKm < 0.25) {
+          return;
+        }
+
+        lastDiscoverySyncRef.current = { key: routeSignature, lat: rLat, lon: rLon, time: Date.now() };
+        const routesPayload: any[] = [];
+        let primaryRouteMeta: { distanceKm: number; etaMinutes: number } | null = null;
+        let hadRouteFailure = false;
+
+        for (let idx = 0; idx < orderedTargets.length; idx++) {
+          const st = orderedTargets[idx];
+          const sid = String(st.id || st.restaurantId || st._id || '');
+          const dLat = Number(st.latitude);
+          const dLon = Number(st.longitude);
+          const isPrimary = idx === 0;
+          const cacheEntry = discoveryRouteCacheRef.current.get(sid);
+
+          let routeData: { coordinates: Array<[number, number]>; distanceKm: number; etaMinutes: number } | null = null;
+          if (
+            cacheEntry &&
+            Date.now() - cacheEntry.cachedAt < 5 * 60 * 1000 &&
+            calculateHaversineDistanceKm(cacheEntry.originLat, cacheEntry.originLon, rLat, rLon) < 0.08 &&
+            calculateHaversineDistanceKm(cacheEntry.destLat, cacheEntry.destLon, dLat, dLon) < 0.02
+          ) {
+            routeData = {
+              coordinates: cacheEntry.coordinates,
+              distanceKm: cacheEntry.distanceKm,
+              etaMinutes: cacheEntry.etaMinutes,
+            };
+          } else {
+            try {
+              const orsRes = await api.post('/bookings/ors-route', {
+                originLat: rLat,
+                originLon: rLon,
+                destLat: dLat,
+                destLon: dLon,
+              });
+              if (orsRes.data?.success && Array.isArray(orsRes.data.coordinates) && orsRes.data.coordinates.length >= 2) {
+                routeData = {
+                  coordinates: orsRes.data.coordinates,
+                  distanceKm: Number(orsRes.data.distanceKm || st.distanceKm || 0),
+                  etaMinutes: Number(orsRes.data.etaMinutes || st.etaMinutes || 2),
+                };
+                discoveryRouteCacheRef.current.set(sid, {
+                  originLat: rLat,
+                  originLon: rLon,
+                  destLat: dLat,
+                  destLon: dLon,
+                  coordinates: routeData.coordinates,
+                  distanceKm: routeData.distanceKm,
+                  etaMinutes: routeData.etaMinutes,
+                  cachedAt: Date.now(),
+                });
+              } else {
+                hadRouteFailure = true;
+              }
+            } catch (_) {
+              hadRouteFailure = true;
+            }
+          }
+
+          if (routeData && routeData.coordinates.length >= 2) {
+            routesPayload.push({
+              storeId: sid,
+              storeName: st.name,
+              isPrimary,
+              coordinates: routeData.coordinates,
+              distanceKm: routeData.distanceKm,
+              etaMinutes: routeData.etaMinutes,
+            });
+            if (isPrimary) {
+              primaryRouteMeta = { distanceKm: routeData.distanceKm, etaMinutes: routeData.etaMinutes };
+            }
+          }
+        }
+
+        if (routesPayload.length > 0) {
+          setDiscoveryRouteError(null);
+          if (primaryRouteMeta) {
+            _inMemoryHotspotRouteInfo = primaryRouteMeta;
+            setHotspotRouteInfo(primaryRouteMeta);
+          }
+          if (mapWebViewRef.current) {
+            mapWebViewRef.current.injectJavaScript(`
+              if (window.updateDiscoveryRoutes) {
+                window.updateDiscoveryRoutes(${JSON.stringify(routesPayload)});
+              }
+              true;
+            `);
+          }
+        } else {
+          // Never draw fake straight lines on ORS failure — clear stale routes and inform cleanly
+          if (mapWebViewRef.current) {
+            mapWebViewRef.current.injectJavaScript(`if (window.clearDiscoveryRoutes) { window.clearDiscoveryRoutes(); } true;`);
+          }
+          setHotspotRouteInfo(null);
+          if (hadRouteFailure) {
+            setDiscoveryRouteError('Real road route temporarily unavailable. Showing verified store distance.');
+          }
+        }
+      } catch (_) {}
+    },
+    []
+  );
+  syncDiscoveryRoutesRef.current = syncDiscoveryRoutes;
+
+  const fetchNearbyHotspots = useCallback(async (isSilentBg: boolean = false) => {
+    if (activeDeliveriesRef.current.length > 0 || incomingRequestRef.current) {
+      // During active delivery or incoming request: NEVER wipe stores from memory!
+      // Simply hide discovery layers on map so trip navigation remains clean.
+      if (mapWebViewRef.current) {
+        mapWebViewRef.current.injectJavaScript(`
+          if (window.hideDiscoveryLayers) { window.hideDiscoveryLayers(); }
+          true;
+        `);
+      }
+      return;
+    }
+
+    if (hotspotFetchInFlightRef.current) return;
+    hotspotFetchInFlightRef.current = true;
+    _lastHotspotsFetchTimestamp = Date.now();
+
+    // Never show loading spinner if stores are already loaded in memory/disk
+    if (!isSilentBg && !hasLoadedHotspotsOnceRef.current && nearbyHotspotsRef.current.length === 0) {
+      setLoadingHotspots(true);
+    }
+
+    try {
+      const rCoords = riderCoordsRef.current;
+      const lat = Number(rCoords?.latitude || 0);
+      const lon = Number(rCoords?.longitude || 0);
+      const hasValidGps = Boolean(rCoords && isValidCoordinates(lat, lon) && !isDummyCoordinates(lat, lon));
+      const url = hasValidGps
+        ? `/bookings/rider/nearby-hotspots?latitude=${lat}&longitude=${lon}`
+        : '/bookings/rider/nearby-hotspots';
+      const res = await api.get(url);
+
+      if (res.data?.success && Array.isArray(res.data.hotspots)) {
+        // Strict deduplication + valid non-dummy GPS verification on client
+        const dedupMap = new Map<string, any>();
+        for (const h of res.data.hotspots) {
+          const sid = String(h?.id || h?.restaurantId || h?.supplierId || h?._id || '').trim();
+          const hLat = Number(h?.latitude || 0);
+          const hLon = Number(h?.longitude || 0);
+          if (!sid || !isValidCoordinates(hLat, hLon) || isDummyCoordinates(hLat, hLon)) continue;
+          if (!dedupMap.has(sid)) {
+            dedupMap.set(sid, { ...h, id: sid, restaurantId: sid, latitude: hLat, longitude: hLon });
+          }
+        }
+        const list = Array.from(dedupMap.values());
+
+        // Canonical store identity signature — STRICTLY EXCLUDES rider GPS distance (prevents reload loop)
+        const nextSignature = list
+          .map((s) => `${s.id}:${s.name}:${Number(s.latitude).toFixed(4)},${Number(s.longitude).toFixed(4)}:${s.categoryName || s.category || ''}:${s.pendingOrdersCount || 0}`)
+          .join('|');
+
+        hasLoadedHotspotsOnceRef.current = true;
+        _inMemoryHotspotsLoadedOnce = true;
+        setHotspotFetchError(null);
+
+        const prevSel = selectedHotspotRef.current;
+        const prevSelId = prevSel ? String(prevSel.id || prevSel.restaurantId || '') : '';
+        const nextSel = (prevSelId && list.find((item) => item.id === prevSelId)) || list[0] || null;
+        const nextSelId = nextSel ? String(nextSel.id || nextSel.restaurantId || '') : null;
+
+        // If the store identities have NOT changed: update in-memory metadata silently, DO NOT reload React state or map
+        if (nextSignature === lastHotspotsSignatureRef.current && nearbyHotspotsRef.current.length === list.length) {
+          nearbyHotspotsRef.current = list;
+          _inMemoryNearbyHotspots = list;
+          return;
+        }
+
+        lastHotspotsSignatureRef.current = nextSignature;
+        _inMemoryNearbyHotspots = list;
+        _inMemorySelectedHotspot = nextSel;
+        AsyncStorage.setItem(RIDER_PERSISTENT_HOTSPOTS_CACHE_KEY, JSON.stringify(list)).catch(() => {});
+
+        setNearbyHotspots(list);
+        nearbyHotspotsRef.current = list;
+        setSelectedHotspot(nextSel);
+        selectedHotspotRef.current = nextSel;
+
+        if (mapWebViewRef.current) {
+          mapWebViewRef.current.injectJavaScript(`
+            if (window.showDiscoveryLayers) { window.showDiscoveryLayers(); }
+            if (window.updateHotspotMarkers) {
+              window.updateHotspotMarkers(${JSON.stringify(list)}, ${JSON.stringify(nextSelId)});
+            }
+            true;
+          `);
+        }
+
+        if (list.length === 0) {
+          setHotspotRouteInfo(null);
+          setDiscoveryRouteError(null);
+          if (mapWebViewRef.current) {
+            mapWebViewRef.current.injectJavaScript(`if (window.clearDiscoveryRoutes) { window.clearDiscoveryRoutes(); } true;`);
+          }
+        } else {
+          syncDiscoveryRoutes(list, nextSel, hasValidGps ? { latitude: lat, longitude: lon } : null, false);
+        }
+      }
+    } catch (e: any) {
+      console.log('[RIDER HOTSPOTS FETCH ERROR]', e?.message || e);
+      // Do not replace visible cached stores with error screen on background refresh failures
+      if (!hasLoadedHotspotsOnceRef.current && nearbyHotspotsRef.current.length === 0) {
+        setHotspotFetchError('Unable to refresh online stores right now.');
+      }
+    } finally {
+      hotspotFetchInFlightRef.current = false;
+      setLoadingHotspots(false);
+    }
+  }, [syncDiscoveryRoutes]);
+  fetchNearbyHotspotsRef.current = fetchNearbyHotspots;
+
+  // ── Instant Delivery Cache Hydration (0ms delay - zero blank orders tab) ──
+  useEffect(() => {
+    let isMounted = true;
+    const hydrateDeliveries = async () => {
+      try {
+        let uId = riderId || user?._id || user?.id;
+        let uPhone = user?.phoneNumber || user?.phone || '';
+        if (!uId || !uPhone) {
+          try {
+            const delivUserStr = await AsyncStorage.getItem('deliveryUser');
+            if (delivUserStr) {
+              const u = JSON.parse(delivUserStr);
+              if (!uId && (u?._id || u?.id)) uId = (u._id || u.id).toString();
+              if (!uPhone) uPhone = u?.phoneNumber || u?.phone || '';
+            }
+          } catch (_) {}
+        }
+        const cacheKey = `CACHE_RIDER_DELIVERIES_${uId || uPhone || 'rider'}`;
+        const cached = await AsyncStorage.getItem(cacheKey);
+        if (cached && isMounted) {
+          const all = JSON.parse(cached);
+          if (Array.isArray(all) && all.length > 0) {
+            setAllDeliveries(all);
+            const isDone = (b: any) => {
+              const st = (b.status || '').toUpperCase();
+              const dst = (b.deliveryStatus || '').toUpperCase();
+              const rst = (b.riderStatus || '').toUpperCase();
+              return st === 'COMPLETED' || st === 'DELIVERED' || st === 'SERVICE_COMPLETED' || st === 'DELIVERED_SUCCESSFULLY' || st === 'DONE' ||
+                     dst === 'COMPLETED' || dst === 'DELIVERED' ||
+                     rst === 'DELIVERED' || rst === 'COMPLETED';
+            };
+            const isCanc = (b: any) => {
+              const st = (b.status || '').toUpperCase();
+              const dst = (b.deliveryStatus || '').toUpperCase();
+              const rst = (b.riderStatus || '').toUpperCase();
+              return st === 'CANCELLED' || st === 'RESTAURANT_DECLINED' || st.includes('CANCEL') ||
+                     dst === 'CANCELLED' || dst.includes('CANCEL') ||
+                     rst === 'CANCELLED' || rst.includes('CANCEL');
+            };
+            setCompletedDeliveries(all.filter((b: any) => isDone(b) && !isCanc(b)));
+            setCancelledDeliveries(all.filter((b: any) => isCanc(b)));
+          }
+        }
+      } catch (_) {}
+    };
+    hydrateDeliveries();
+    return () => { isMounted = false; };
+  }, [riderId, user?._id, user?.id]);
+
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
     await Promise.all([
@@ -1778,7 +1809,6 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
   useEffect(() => {
     if (activeTab === 'orders' || activeTab === 'pocket') {
       fetchDeliveries();
-    fetchNearbyHotspots();
       fetchEarnings();
     }
   }, [activeTab, fetchDeliveries, fetchEarnings]);
@@ -1796,7 +1826,7 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
         const reqData = res.data.request;
         const reqId = (reqData.bookingId || reqData.rideId || reqData._id || '').toString();
         if (!reqId) return;
-        if (seenRequestIdsRef.current.has(reqId) || activeRequestIdRef.current === reqId) {
+        if (incomingRequest && (incomingRequest.bookingId === reqId || incomingRequest._id === reqId)) {
           return;
         }
         seenRequestIdsRef.current.add(reqId);
@@ -1869,54 +1899,18 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
     }
   }, [incomingRequest, riderCoords]);
 
-  // ── Fetch Nearby Online Restaurants & Guaranteed Order Hotspots ──
-  const lastHotspotsFetchCoordsRef = useRef<{ latitude: number; longitude: number; time: number } | null>(null);
-
-  const fetchNearbyHotspots = useCallback(async () => {
-    if (!isOnlineRef.current || activeDeliveries.length > 0 || incomingRequest) {
-      setNearbyHotspots([]);
-      setSelectedHotspot(null);
-      return;
-    }
-    try {
-      const lat = riderCoords?.latitude;
-      const lon = riderCoords?.longitude;
-      const url = lat && lon
-        ? `/bookings/rider/nearby-hotspots?latitude=${lat}&longitude=${lon}`
-        : '/bookings/rider/nearby-hotspots';
-      const res = await api.get(url);
-      if (res.data?.success && Array.isArray(res.data.hotspots)) {
-        const list = res.data.hotspots;
-        setNearbyHotspots(list);
-        if (list.length > 0) {
-          setSelectedHotspot((prev: any) => {
-            if (prev) {
-              const stillExists = list.find((h: any) => (h.id || h.restaurantId) === (prev.id || prev.restaurantId));
-              if (stillExists) return stillExists;
-            }
-            return list[0];
-          });
-        }
-        if (mapWebViewRef.current) {
-          mapWebViewRef.current.injectJavaScript(`
-            if (window.updateHotspotMarkers) {
-              window.updateHotspotMarkers(${JSON.stringify(list)});
-            }
-            true;
-          `);
-        }
-      }
-    } catch (e) {
-      console.log('[RIDER HOTSPOTS FETCH ERROR]', e);
-    }
-  }, [riderCoords?.latitude, riderCoords?.longitude, activeDeliveries.length, incomingRequest]);
-
   useFocusEffect(useCallback(() => {
+    restoreActiveRide();
     fetchEarnings();
     fetchDeliveries();
-    if (isOnlineRef.current && !incomingRequest) {
-      checkPendingDeliveryRequest();
-      fetchNearbyHotspots();
+    if (!incomingRequest) {
+      if (isOnlineRef.current) {
+        checkPendingDeliveryRequest();
+      }
+      // Only silent background sync if cold or after 60 seconds — never reload fresh stores
+      if (nearbyHotspotsRef.current.length === 0 || Date.now() - _lastHotspotsFetchTimestamp > 60000) {
+        fetchNearbyHotspots(hasLoadedHotspotsOnceRef.current);
+      }
     }
   }, [fetchEarnings, fetchDeliveries, checkPendingDeliveryRequest, fetchNearbyHotspots, incomingRequest]));
 
@@ -1931,28 +1925,85 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
     }
   }, [incomingRequest, riderCoords?.latitude, riderCoords?.longitude]);
 
+  // AppState resume sync: silently refresh eligible online stores in background on foreground return
   useEffect(() => {
-    if (!isOnline || activeDeliveries.length > 0 || incomingRequest) {
-      setNearbyHotspots([]);
-      setSelectedHotspot(null);
-      setHotspotRouteInfo(null);
+    const sub = AppState.addEventListener('change', (nextState) => {
+      if (nextState === 'active') {
+        fetchDeliveries();
+        if (isOnlineRef.current) {
+          checkPendingDeliveryRequest();
+        }
+        if (activeDeliveriesRef.current.length === 0 && !incomingRequestRef.current && fetchNearbyHotspotsRef.current) {
+          if (nearbyHotspotsRef.current.length === 0 || Date.now() - _lastHotspotsFetchTimestamp > 60000) {
+            fetchNearbyHotspotsRef.current(true);
+          }
+        }
+      }
+    });
+    return () => sub.remove();
+  }, [fetchDeliveries, checkPendingDeliveryRequest]);
+
+  // Recalculate ORS routes gently when rider GPS shifts without reloading or clearing store list
+  useEffect(() => {
+    if (
+      activeDeliveries.length === 0 &&
+      !incomingRequest &&
+      riderCoords?.latitude &&
+      riderCoords?.longitude &&
+      nearbyHotspotsRef.current.length > 0 &&
+      syncDiscoveryRoutesRef.current
+    ) {
+      syncDiscoveryRoutesRef.current(
+        nearbyHotspotsRef.current,
+        selectedHotspotRef.current || nearbyHotspotsRef.current[0],
+        riderCoords,
+        false
+      );
+    }
+  }, [riderCoords?.latitude, riderCoords?.longitude, activeDeliveries.length, incomingRequest]);
+
+  useEffect(() => {
+    if (activeDeliveries.length > 0 || incomingRequest) {
+      // During active delivery or incoming request: NEVER erase persistent store list!
+      // Simply hide discovery layers on map, keeping store list intact in memory.
       if (mapWebViewRef.current) {
         mapWebViewRef.current.injectJavaScript(`
-          if (window.updateHotspotMarkers) {
-            window.updateHotspotMarkers([]);
-          }
+          if (window.hideDiscoveryLayers) { window.hideDiscoveryLayers(); }
           true;
         `);
       }
       return;
     }
-    fetchNearbyHotspots();
-    const interval = setInterval(() => {
-      checkPendingDeliveryRequest();
-      fetchNearbyHotspots();
-    }, 4000);
-    return () => clearInterval(interval);
-  }, [isOnline, activeDeliveries.length, incomingRequest, checkPendingDeliveryRequest, fetchNearbyHotspots]);
+
+    // Restore discovery layers when returning to idle
+    if (mapWebViewRef.current) {
+      mapWebViewRef.current.injectJavaScript(`
+        if (window.showDiscoveryLayers) { window.showDiscoveryLayers(); }
+        true;
+      `);
+    }
+
+    // Fetch once initially ONLY if not already in memory/disk cache
+    if (nearbyHotspotsRef.current.length === 0) {
+      fetchNearbyHotspots(false);
+    }
+
+    const requestInterval = setInterval(() => {
+      if (isOnlineRef.current) {
+        checkPendingDeliveryRequest();
+      }
+    }, 3000);
+
+    // Low-frequency silent background reconciliation (primary updates come instantly via Socket.IO)
+    const bgStoreSyncInterval = setInterval(() => {
+      fetchNearbyHotspots(true);
+    }, 60000);
+
+    return () => {
+      clearInterval(requestInterval);
+      clearInterval(bgStoreSyncInterval);
+    };
+  }, [activeDeliveries.length, incomingRequest, checkPendingDeliveryRequest, fetchNearbyHotspots]);
 
   // ── Socket Events & Auto Registration ──
   useEffect(() => {
@@ -2067,19 +2118,14 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
 
     const onCancelled = (data: any) => {
       console.log('📢 [DELIVERY RIDER HOME] Request cancelled event:', data);
-      if (data?.reason === 'timeout') {
-        console.log('⏳ Ignoring timeout cancellation so request continues ringing for rider.');
-        return;
-      }
-
+      const cId = String(data?.bookingId || data?.orderId || data?.rideId || '');
       const myRiderId = String(riderId || user?._id || user?.id || '');
       const assignedRiderId = data?.assignedRiderId ? String(data.assignedRiderId) : '';
-      const cId = String(data?.bookingId || data?.orderId || data?.rideId || '');
 
       // CRITICAL GUARD: If this cancellation broadcast was emitted because THIS rider accepted the order,
       // DO NOT cancel the order or show any error!
       if (
-        (acceptedBookingIdRef.current && acceptedBookingIdRef.current === cId) ||
+        (acceptedBookingIdRef.current && cId && acceptedBookingIdRef.current === cId) ||
         (assignedRiderId && assignedRiderId === myRiderId)
       ) {
         console.log('✅ [DELIVERY RIDER HOME] Request was accepted by THIS rider. Ignoring cancellation broadcast.');
@@ -2087,21 +2133,28 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
         return;
       }
 
+      if (data?.reason === 'timeout' && !data?.status?.includes('CANCEL') && !data?.cancelledBy) {
+        console.log('⏳ Ignoring pure timeout cancellation so request continues ringing for rider.');
+        return;
+      }
+
+      // Stop ringing sound immediately in 0ms!
       stopOrderAlertSound();
       setIncomingRequest((prev: any) => {
-        if (prev && (String(prev.bookingId) === cId || String(prev._id) === cId || String(prev.rideId) === cId)) {
+        if (!prev) return null;
+        const prevId = String(prev.bookingId || prev._id || prev.rideId || '');
+        if (!cId || !prevId || prevId === cId) {
           if (data?.reason === 'assigned_to_another' || data?.assignedRiderName) {
             const conflictMsg = data?.assignedRiderName
               ? `This ride has already been accepted by ${data.assignedRiderName}.`
               : 'This ride has already been accepted by another partner.';
             Alert.alert('Ride Already Assigned', conflictMsg);
-          } else {
-            Alert.alert('Request Cancelled', data?.message || 'This request was cancelled.');
           }
           return null;
         }
         return prev;
       });
+      activeRequestIdRef.current = null;
     };
 
     const onOrderReady = (data: any) => {
@@ -2120,17 +2173,34 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
     };
 
     const handleOrderCancellation = (data: any) => {
+      console.log('📢 [DELIVERY RIDER HOME] Order cancelled event:', data);
       stopOrderAlertSound();
-      const cId = data?.bookingId || data?.rideId || data?._id;
+      const cId = String(data?.bookingId || data?.rideId || data?._id || '');
       setIncomingRequest((prev: any) => {
-        if (prev && (prev.bookingId === cId || prev._id === cId)) {
+        if (!prev) return null;
+        const prevId = String(prev.bookingId || prev._id || prev.rideId || '');
+        if (!cId || !prevId || prevId === cId) {
           return null;
         }
         return prev;
       });
-      AsyncStorage.removeItem('active_rider_ride').catch(() => {});
-      try { rideStore.clearRide(); } catch (_) {}
-      setActiveDeliveries((prev) => prev.filter((d) => d.bookingId !== cId && d._id !== cId));
+      activeRequestIdRef.current = null;
+
+      if (cId) {
+        setActiveDeliveries((prev) => prev.filter((d) => String(d.bookingId || d._id || d.rideId) !== cId));
+        activeDeliveriesRef.current = activeDeliveriesRef.current.filter((d) => String(d.bookingId || d._id || d.rideId) !== cId);
+        AsyncStorage.getItem('active_rider_ride').then((stored) => {
+          if (stored) {
+            try {
+              const p = JSON.parse(stored);
+              if (String(p.bookingId || p._id || p.rideId) === cId) {
+                AsyncStorage.removeItem('active_rider_ride').catch(() => {});
+                try { rideStore.clearRide(); } catch (_) {}
+              }
+            } catch (_) {}
+          }
+        }).catch(() => {});
+      }
       fetchDeliveries();
       fetchEarnings();
 
@@ -2211,49 +2281,121 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
     socket.on('FOOD_CANCELLED', handleOrderCancellation);
     socket.on('ORDER_TRANSFERRED', handleOrderCancellation);
 
-    const onZoneUpdated = (data: any) => {
-      console.log('📢 [DELIVERY RIDER HOME] Zone updated via socket:', data);
-      const zName = data.zoneName || data.zone;
-      const zId = data.zoneId;
-      const zGroup = data.zoneGroup;
-      const zPoly = data.polygonCoordinates || data.polygon;
-      const zAreas = data.configuredAreas;
+    const scheduleHotspotSync = (payload?: any) => {
+      // 0ms Real-Time Store Status Sync: If payload carries store data, update immediately without reload!
+      if (payload && typeof payload === 'object') {
+        const sId = String(payload.id || payload.restaurantId || payload.supplierId || payload._id || '').trim();
+        const sLat = Number(payload.latitude || payload.businessLatitude || 0);
+        const sLon = Number(payload.longitude || payload.businessLongitude || 0);
+        const isOnlineVal = payload.isOnline !== undefined
+          ? Boolean(payload.isOnline)
+          : (payload.restaurant_status ? payload.restaurant_status === 'online' : undefined);
 
-      if (zName) setRiderZone(zName);
-      if (zId) setRiderZoneId(zId);
-      if (zGroup) setRiderZoneGroup(zGroup);
-      if (zPoly && zPoly.length >= 3) {
-        setRiderZonePolygon(zPoly);
-        AsyncStorage.setItem('rider_selected_zone_polygon', JSON.stringify(zPoly)).catch(() => {});
+        if (sId) {
+          if (isOnlineVal === false || payload.eligible === false) {
+            // Remove offline store immediately in 0ms!
+            setNearbyHotspots((prev) => {
+              const updated = prev.filter((s) => String(s.id || s.restaurantId) !== sId);
+              nearbyHotspotsRef.current = updated;
+              _inMemoryNearbyHotspots = updated;
+              if (mapWebViewRef.current) {
+                const curSel = selectedHotspotRef.current || updated[0] || null;
+                const selId = curSel ? String(curSel.id || curSel.restaurantId || '') : null;
+                mapWebViewRef.current.injectJavaScript(
+                  "if (window.updateHotspotMarkers) { window.updateHotspotMarkers(" + JSON.stringify(updated) + ", " + JSON.stringify(selId) + "); } true;"
+                );
+              }
+              return updated;
+            });
+          } else if (isOnlineVal === true && isValidCoordinates(sLat, sLon) && !isDummyCoordinates(sLat, sLon)) {
+            // Add newly online store immediately in 0ms!
+            setNearbyHotspots((prev) => {
+              const exists = prev.some((s) => String(s.id || s.restaurantId) === sId);
+              const item = {
+                id: sId,
+                restaurantId: sId,
+                name: payload.name || payload.restaurantName || 'Store Partner',
+                category: payload.category || payload.categoryName || 'General',
+                categoryName: payload.categoryName || payload.category || 'General',
+                latitude: sLat,
+                longitude: sLon,
+                address: payload.address || 'Store Location',
+                distanceKm: payload.distanceKm || 1.2,
+                hasPendingOrder: Boolean(payload.hasPendingOrder || payload.hasGuaranteedOrder),
+              };
+              const updated = exists
+                ? prev.map((s) => (String(s.id || s.restaurantId) === sId ? { ...s, ...item } : s))
+                : [item, ...prev];
+              nearbyHotspotsRef.current = updated;
+              _inMemoryNearbyHotspots = updated;
+              if (mapWebViewRef.current) {
+                const curSel = selectedHotspotRef.current || updated[0] || null;
+                const selId = curSel ? String(curSel.id || curSel.restaurantId || '') : null;
+                mapWebViewRef.current.injectJavaScript(
+                  "if (window.updateHotspotMarkers) { window.updateHotspotMarkers(" + JSON.stringify(updated) + ", " + JSON.stringify(selId) + "); } true;"
+                );
+              }
+              return updated;
+            });
+          }
+        }
       }
-      if (zAreas && zAreas.length > 0) {
-        setRiderZoneAreas(zAreas);
-        AsyncStorage.setItem('rider_selected_zone_areas', JSON.stringify(zAreas)).catch(() => {});
+
+      if (hotspotRefreshTimerRef.current) {
+        clearTimeout(hotspotRefreshTimerRef.current);
       }
-      syncZoneBoundaryToMap(zName, zPoly, zAreas);
-      if (zName) AsyncStorage.setItem('rider_selected_zone', zName).catch(() => {});
-      if (zId) AsyncStorage.setItem('rider_selected_zone_id', zId).catch(() => {});
-      if (zGroup) AsyncStorage.setItem('rider_selected_zone_group', zGroup).catch(() => {});
+      hotspotRefreshTimerRef.current = setTimeout(() => {
+        if (activeDeliveriesRef.current.length === 0 && !incomingRequestRef.current && fetchNearbyHotspotsRef.current) {
+          fetchNearbyHotspotsRef.current(true);
+        }
+      }, 50);
     };
 
-    const onHotspotChange = () => {
-      if (isOnlineRef.current) {
-        fetchNearbyHotspots();
+    const onSocketReconnect = () => {
+      if (targetId) {
+        socket.emit('register_user', targetId.toString());
       }
+      scheduleHotspotSync();
     };
 
-    socket.on('rider_zone_updated', onZoneUpdated);
-    socket.on('rider_zone_changed', onZoneUpdated);
-    socket.on('supplier_online', onHotspotChange);
-    socket.on('supplier_offline', onHotspotChange);
-    socket.on('restaurant_online', onHotspotChange);
-    socket.on('restaurant_offline', onHotspotChange);
-    socket.on('supplier_online_status_changed', onHotspotChange);
-    socket.on('restaurant_status_updated', onHotspotChange);
-    socket.on('HOTSPOTS_UPDATED', onHotspotChange);
-    socket.on('hotspots_updated', onHotspotChange);
+    const storeVisibilityEvents = [
+      'SUPPLIER_ONLINE',
+      'supplier_online',
+      'STORE_ONLINE',
+      'NEW_STORE_AVAILABILITY',
+      'SUPPLIER_OFFLINE',
+      'supplier_offline',
+      'STORE_OFFLINE',
+      'STORE_WENT_OFFLINE',
+      'STORE_VISIBILITY_UPDATED',
+      'store_visibility_updated',
+      'STORE_LOCATION_UPDATED',
+      'supplier_permanent_location_updated',
+      'CUSTOMER_STORE_LIST_UPDATED',
+      'RESTAURANT_UPDATED',
+      'restaurant_online',
+      'restaurant_offline',
+      'restaurant_status_updated',
+      'restaurant_status_changed',
+      'supplier_online_status_changed',
+      'supplier_status_changed',
+      'RESTAURANT_LOCATION_UPDATED',
+      'restaurant_location_updated',
+      'SUPPLIER_APPROVED',
+      'supplier_approved',
+      'HOTSPOTS_UPDATED',
+      'hotspots_updated',
+    ];
+
+    socket.on('connect', onSocketReconnect);
+    storeVisibilityEvents.forEach((evtName) => socket.on(evtName, scheduleHotspotSync));
 
     return () => {
+      if (hotspotRefreshTimerRef.current) {
+        clearTimeout(hotspotRefreshTimerRef.current);
+      }
+      socket.off('connect', onSocketReconnect);
+      storeVisibilityEvents.forEach((evtName) => socket.off(evtName, scheduleHotspotSync));
       socket.off('DELIVERY_REQUEST', onRequest);
       socket.off('DELIVERY_REQUEST_CANCELLED', onCancelled);
       socket.off('ORDER_READY_FOR_PICKUP', onOrderReady);
@@ -2276,384 +2418,278 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
       socket.off('ORDER_CANCELLED', handleOrderCancellation);
       socket.off('FOOD_CANCELLED', handleOrderCancellation);
       socket.off('ORDER_TRANSFERRED', handleOrderCancellation);
-      socket.off('rider_zone_updated', onZoneUpdated);
-      socket.off('rider_zone_changed', onZoneUpdated);
-      socket.off('supplier_online', onHotspotChange);
-      socket.off('supplier_offline', onHotspotChange);
-      socket.off('restaurant_online', onHotspotChange);
-      socket.off('restaurant_offline', onHotspotChange);
-      socket.off('supplier_online_status_changed', onHotspotChange);
-      socket.off('restaurant_status_updated', onHotspotChange);
-      socket.off('HOTSPOTS_UPDATED', onHotspotChange);
-      socket.off('hotspots_updated', onHotspotChange);
     };
   }, [socket, isOnline, riderId, user, displayName, vehicleType, fetchEarnings, fetchDeliveries, fetchNearbyHotspots]);
 
-  // ── REAL WORKING TOGGLE ONLINE / OFFLINE ──
-  const toggleOnlineStatus = async () => {
-    if (isTogglingOnlineRef.current) return;
-    isTogglingOnlineRef.current = true;
+  // ── ULTRA-FAST 1-CLICK TOGGLE ONLINE / OFFLINE (0ms Instant Switch) ──
+  const toggleOnlineStatus = () => {
+    const nextState = !isOnlineRef.current;
+    executeOfflineToggle(nextState, riderId || user?._id || user?.id);
+  };
 
-    try {
-      const next = !isOnline;
+  function executeOfflineToggle(nextState: boolean, initialId: any) {
+    // 1. Instant 0ms synchronous UI update & tactile feedback
+    isOnlineRef.current = nextState;
+    setIsOnline(nextState);
+    if (!nextState) setIsPendingOffline(false);
+    try { Vibration.vibrate(40); } catch (_) {}
+    switchAnim.setValue(nextState ? 1 : 0);
+    try { rideStore?.setRiderOnline?.(nextState); } catch (_) {}
 
-      let targetId = riderId || user?._id || user?.id;
-      if (!targetId) {
+    // 2. Immediate AsyncStorage persistence (non-blocking)
+    AsyncStorage.setItem('delivery_is_online', JSON.stringify(nextState)).catch(() => {});
+    if (initialId) {
+      AsyncStorage.setItem(`rider_status_${initialId.toString()}`, JSON.stringify(nextState)).catch(() => {});
+    }
+    AsyncStorage.getItem('deliveryUser').then((str) => {
+      if (str) {
         try {
+          const parsed = JSON.parse(str);
+          parsed.isOnline = nextState;
+          AsyncStorage.setItem('deliveryUser', JSON.stringify(parsed)).catch(() => {});
+        } catch (_) {}
+      }
+    }).catch(() => {});
+
+    // 3. Fire-and-forget Background Socket, Backend API & GPS sync
+    (async () => {
+      try {
+        let targetId = initialId;
+        if (!targetId) {
           const stored = await AsyncStorage.getItem('deliveryUser');
           if (stored) {
             const parsed = JSON.parse(stored);
             targetId = parsed?._id || parsed?.id;
-          }
-        } catch (_) {}
-      }
-
-      // ── Rider Online Zone Rule: Verify Rider GPS against assigned zone ──
-      if (next) {
-        let curLat = riderCoords?.latitude;
-        let curLon = riderCoords?.longitude;
-        if (!isValidCoordinates(curLat, curLon)) {
-          const fresh = await fetchCurrentGpsPosition(false);
-          if (fresh && isValidCoordinates(fresh.latitude, fresh.longitude)) {
-            curLat = fresh.latitude;
-            curLon = fresh.longitude;
-            setRiderCoords({ latitude: fresh.latitude, longitude: fresh.longitude });
-          }
-        }
-
-        if (!isValidCoordinates(curLat, curLon)) {
-          Alert.alert('Your location is unavailable 📍', 'Please enable GPS to go online and receive ride requests.');
-          return;
-        }
-
-        let localInside = false;
-        if (riderZoneAreas && riderZoneAreas.length > 0) {
-          for (const area of riderZoneAreas) {
-            if (area.polygonCoordinates && isPointInPolygonCoords(curLat!, curLon!, area.polygonCoordinates)) {
-              localInside = true;
-              break;
+            if (targetId) {
+              AsyncStorage.setItem(`rider_status_${targetId.toString()}`, JSON.stringify(nextState)).catch(() => {});
             }
           }
         }
-        if (!localInside && riderZonePolygon && riderZonePolygon.length >= 3) {
-          localInside = isPointInPolygonCoords(curLat!, curLon!, riderZonePolygon);
-        }
-        if (!localInside) {
-          const lower = (riderZoneGroup || riderZone || '').toLowerCase();
-          const fallbackGroup = (lower.includes('new') || lower.includes('mp'))
-            ? BHOPAL_ZONE_GROUPS.NEW_BHOPAL
-            : (lower.includes('bhel') ? BHOPAL_ZONE_GROUPS.BHEL : BHOPAL_ZONE_GROUPS.OLD_BHOPAL);
-          for (const area of fallbackGroup.configuredAreas) {
-            if (isPointInPolygonCoords(curLat!, curLon!, area.polygonCoordinates)) {
-              localInside = true;
-              break;
-            }
-          }
-        }
-        const targetZoneParam = riderZoneId || riderZoneGroup || riderZone || (user as any)?.zoneId || (user as any)?.selectedZone;
 
-        let zoneAlertTriggered = false;
-        try {
-          const zoneCheck = await api.post('/zones/check-rider-zone', {
-            riderId: targetId,
-            latitude: curLat,
-            longitude: curLon,
-            zoneId: targetZoneParam,
-            zoneGroup: riderZoneGroup,
+        if (socket && socket.connected && targetId) {
+          socket.emit('toggle_online_status', {
+            userId: targetId,
+            isOnline: nextState,
+            isAvailable: nextState,
+            role: 'delivery_partner',
           });
 
-          const isServerInside = zoneCheck.data && zoneCheck.data.insideZone === true;
-          if (!isServerInside && !localInside) {
-            zoneAlertTriggered = true;
-            Alert.alert(
-              'Zone Alert 📍',
-              'Please go to your zone',
-              [{ text: 'OK' }]
-            );
-            return; // Block online toggle
-          }
-        } catch (err) {
-          console.log('[Zone Check on Online Toggle]', err);
-          if (!localInside && !zoneAlertTriggered) {
-            zoneAlertTriggered = true;
-            Alert.alert(
-              'Zone Alert 📍',
-              'Please go to your zone',
-              [{ text: 'OK' }]
-            );
-            return;
+          if (nextState) {
+            socket.emit('rider_online', {
+              riderId: targetId,
+              name: displayName,
+              vehicleType: vehicleType,
+              location: riderCoords
+                ? {
+                    latitude: riderCoords.latitude,
+                    longitude: riderCoords.longitude,
+                    address: currentAddress,
+                  }
+                : null,
+            });
+          } else {
+            socket.emit('rider_offline', { riderId: targetId });
           }
         }
-      }
 
-      try { Vibration.vibrate(60); } catch (_) {}
-      setIsOnline(next);
-      Animated.spring(switchAnim, {
-        toValue: next ? 1 : 0,
-        useNativeDriver: false,
-      }).start();
-
-      if (targetId) {
-        const idStr = targetId.toString();
-        AsyncStorage.setItem(`rider_status_${idStr}`, JSON.stringify(next)).catch(() => {});
-      }
-
-      try { rideStore?.setRiderOnline?.(next); } catch (_) {}
-
-      if (socket && socket.connected) {
-        socket.emit('toggle_online_status', {
+        api.put('/profile/status', {
           userId: targetId,
-          isOnline: next,
-          isAvailable: next,
-          role: 'delivery_partner'
+          status: nextState ? 'online' : 'offline',
+          isOnline: nextState,
+          isAvailable: nextState,
+          role: 'delivery_partner',
+        }).catch((err) => {
+          console.log('[Status Update Background Error]', err?.message || err);
         });
 
-        if (next) {
-          socket.emit('rider_online', {
-            riderId: targetId,
-            name: displayName,
-            vehicleType: vehicleType,
-            location: riderCoords ? {
-              latitude: riderCoords.latitude,
-              longitude: riderCoords.longitude,
-              address: currentAddress
-            } : null
-          });
-        } else {
-          socket.emit('rider_offline', { riderId: targetId });
+        // Silently refresh real hardware GPS and sync via Socket + REST without blocking UI
+        if (nextState) {
+          let curLat = riderCoords?.latitude;
+          let curLon = riderCoords?.longitude;
+          if (!isValidCoordinates(curLat, curLon)) {
+            const fresh = await fetchCurrentGpsPosition(false).catch(() => null);
+            if (fresh && isValidCoordinates(fresh.latitude, fresh.longitude)) {
+              curLat = fresh.latitude;
+              curLon = fresh.longitude;
+              setRiderCoords({ latitude: fresh.latitude, longitude: fresh.longitude });
+            }
+          }
+          if (isValidCoordinates(curLat, curLon) && targetId) {
+            if (socket && socket.connected) {
+              socket.emit('rider_location_update', {
+                riderId: targetId,
+                userId: targetId,
+                latitude: curLat,
+                longitude: curLon,
+                timestamp: Date.now(),
+              });
+            }
+            api.put('/profile/status', {
+              userId: targetId,
+              status: 'online',
+              isOnline: true,
+              isAvailable: true,
+              role: 'delivery_partner',
+              latitude: curLat,
+              longitude: curLon,
+            }).catch(() => {});
+          }
         }
+      } catch (e) {
+        console.log('executeOfflineToggle bg error:', e);
       }
-
-      api.put('/profile/status', {
-        userId: targetId,
-        status: next ? 'online' : 'offline',
-        isOnline: next,
-        isAvailable: next,
-        role: 'delivery_partner'
-      }).catch(err => {
-        console.log('Status update error:', err);
-      });
-    } finally {
-      setTimeout(() => {
-        isTogglingOnlineRef.current = false;
-      }, 500);
-    }
-  };
+    })();
+  }
 
   const handleAcceptRequest = async () => {
     if (!incomingRequest || isAcceptingRequest) return;
     setIsAcceptingRequest(true);
     stopOrderAlertSound();
+
     const bId = incomingRequest.bookingId || incomingRequest._id;
     acceptedBookingIdRef.current = String(bId);
     const targetId = riderId || user?._id || user?.id;
     const currentReq = { ...incomingRequest };
 
-    try {
-      // 1. Fetch fresh hardware GPS immediately on acceptance
-      let freshGps = await fetchCurrentGpsPosition(false);
-      const curLat = freshGps?.latitude || riderCoords?.latitude || null;
-      const curLon = freshGps?.longitude || riderCoords?.longitude || null;
+    // ⚡ ZERO-LATENCY INSTANT ACCEPT:
+    // Dismiss incoming popup instantly in 0ms!
+    setIncomingRequest(null);
+    activeRequestIdRef.current = null;
+    setShowBannersModal(false);
 
-      // 2. Emit instant socket event for zero-latency notification with fresh GPS
-      if (socket && socket.connected) {
-        socket.emit('rider_accept_request', {
+    const curLat = riderCoords?.latitude || null;
+    const curLon = riderCoords?.longitude || null;
+    const assignedRiderDisplayName =
+      user?.name ||
+      user?.username ||
+      'Delivery Partner';
+
+    const isTransferReq = Boolean(currentReq.isTransfer || currentReq.isTransferRequest);
+
+    const fullRide = {
+      ...currentReq,
+      bookingId: bId,
+      rideId: bId,
+      _id: currentReq._id || bId,
+      isRider: true,
+      isTransferHandover: isTransferReq,
+      role: 'provider',
+      providerId: targetId,
+      riderId: targetId,
+      riderName: assignedRiderDisplayName,
+      driverLat: curLat || currentReq.driverLat || undefined,
+      driverLon: curLon || currentReq.driverLon || undefined,
+      status: isTransferReq ? 'TRANSFER_ACCEPTED_PENDING_HANDOVER' : (currentReq.status || 'PROVIDER_ACCEPTED'),
+    };
+
+    // Immediately show the ride and persist it without requiring any reload or refresh!
+    setActiveDeliveries([fullRide]);
+    activeDeliveriesRef.current = [fullRide];
+    try { rideStore.setCurrentRide(fullRide); } catch (_) {}
+    AsyncStorage.setItem('active_rider_ride', JSON.stringify(fullRide)).catch(() => {});
+    setActiveTab('feed');
+    setIsAcceptingRequest(false);
+
+    // Instant socket emit for real-time notification
+    if (socket && socket.connected) {
+      socket.emit('rider_accept_request', {
+        bookingId: bId,
+        riderId: targetId,
+        latitude: curLat,
+        longitude: curLon,
+      });
+
+      if (curLat && curLon) {
+        socket.emit('rider_location_update', {
           bookingId: bId,
+          rideId: bId,
           riderId: targetId,
           latitude: curLat,
           longitude: curLon,
+          accuracy: 5,
+          timestamp: Date.now(),
         });
+      }
+    }
 
-        if (curLat && curLon) {
-          socket.emit('rider_location_update', {
+    // Refresh hardware GPS in background without blocking accept
+    fetchCurrentGpsPosition(false).then((freshGps) => {
+      if (freshGps?.latitude && freshGps?.longitude && socket && socket.connected) {
+        socket.emit('rider_location_update', {
+          bookingId: bId,
+          rideId: bId,
+          riderId: targetId,
+          latitude: freshGps.latitude,
+          longitude: freshGps.longitude,
+          accuracy: freshGps.accuracy || 5,
+          timestamp: Date.now(),
+        });
+      }
+    }).catch(() => {});
+
+    // Asynchronous backend accept call
+    (async () => {
+      try {
+        let acceptedBooking = currentReq;
+        let acceptedResponseData: any = null;
+        if (isTransferReq) {
+          const trRes = await api.post('/bookings/transfer/accept', {
             bookingId: bId,
-            rideId: bId,
             riderId: targetId,
             latitude: curLat,
             longitude: curLon,
-            accuracy: freshGps?.accuracy || 5,
-            timestamp: Date.now(),
           });
-        }
-      }
-
-      // 3. Call backend atomic assign endpoint with double-assignment protection and rider location
-      const isTransferReq = Boolean(currentReq.isTransfer || currentReq.isTransferRequest);
-      let acceptedBooking = currentReq;
-
-      let acceptedResponseData: any = null;
-      if (isTransferReq) {
-        console.log(`[ACCEPT_TRANSFER] Rider ${targetId} accepting transfer handover for ${bId}`);
-        const trRes = await api.post('/bookings/transfer/accept', {
-          bookingId: bId,
-          riderId: targetId,
-          latitude: curLat,
-          longitude: curLon,
-        });
-        acceptedResponseData = trRes.data;
-        if (trRes.data?.success && trRes.data?.booking) {
-          acceptedBooking = trRes.data.booking;
-        }
-      } else {
-        const res = await api.put(`/bookings/${bId}/rider-accept`, {
-          riderId: targetId,
-          latitude: curLat,
-          longitude: curLon,
-        });
-        acceptedResponseData = res.data;
-        if (res.data?.success && res.data?.booking) {
-          acceptedBooking = res.data.booking;
-        }
-      }
-
-      const assignedRiderDisplayName =
-        acceptedResponseData?.riderName ||
-        acceptedBooking?.riderName ||
-        user?.name ||
-        user?.username ||
-        'Delivery Partner';
-
-      const fullRide = {
-        ...currentReq,
-        ...acceptedBooking,
-        bookingId: bId,
-        rideId: bId,
-        _id: acceptedBooking._id || bId,
-        isRider: true,
-        isTransferHandover: isTransferReq,
-        role: 'provider',
-        providerId: targetId,
-        riderId: targetId,
-        riderName: assignedRiderDisplayName,
-        driverLat: curLat || acceptedBooking.driverLat || undefined,
-        driverLon: curLon || acceptedBooking.driverLon || undefined,
-        status: isTransferReq ? 'TRANSFER_ACCEPTED_PENDING_HANDOVER' : (acceptedBooking.status || 'PROVIDER_ACCEPTED'),
-      };
-
-      // Set Presentation State: Stay on Rider Home screen & show active live map!
-      setIncomingRequest(null);
-      activeRequestIdRef.current = null;
-      setShowBannersModal(false);
-      try { rideStore.setCurrentRide(fullRide); } catch (_) {}
-      AsyncStorage.setItem('active_rider_ride', JSON.stringify(fullRide)).catch(() => {});
-      setActiveDeliveries([fullRide]);
-      setActiveTab('feed');
-      setIsAcceptingRequest(false);
-
-      // Case A: Success Alert with actual rider name & Order ID
-      Alert.alert(
-        'Ride Accepted Successfully',
-        `Order #${bId} is assigned to ${assignedRiderDisplayName}. Please proceed to pickup.`
-      );
-    } catch (err: any) {
-      setIsAcceptingRequest(false);
-      stopOrderAlertSound();
-
-      // Case B: Another rider has already accepted the ride (HTTP 409 / Conflict)
-      const isAlreadyTaken = Boolean(
-        err.response?.status === 409 ||
-        err.response?.data?.conflict ||
-        err.response?.data?.alreadyTaken ||
-        err.response?.data?.error === 'ALREADY_TAKEN' ||
-        err.response?.data?.error === 'ALREADY_ASSIGNED' ||
-        err.response?.data?.message?.includes('already been accepted') ||
-        err.response?.data?.message?.includes('already taken')
-      );
-
-      if (isAlreadyTaken) {
-        const assignedPartnerName =
-          err.response?.data?.assignedRiderName ||
-          err.response?.data?.booking?.riderName ||
-          null;
-        const conflictMsg = assignedPartnerName
-          ? `This ride has already been accepted by ${assignedPartnerName}.`
-          : 'This ride has already been accepted by another partner.';
-
-        Alert.alert('Order Already Assigned', conflictMsg);
-        setIncomingRequest(null);
-        activeRequestIdRef.current = null;
-        setActiveDeliveries((prev) => prev.filter((d) => String(d.bookingId || d._id) !== String(bId)));
-        fetchDeliveries();
-        return;
-      }
-
-      // Case C: Network error or temporary failure
-      const isNetworkIssue = Boolean(
-        !err.response ||
-        err.code === 'ECONNABORTED' ||
-        err.code === 'ENOTFOUND' ||
-        err.message?.toLowerCase().includes('network') ||
-        err.message?.toLowerCase().includes('timeout')
-      );
-
-      if (isNetworkIssue) {
-        console.warn('[handleAcceptRequest] Network issue detected. Verifying authoritative order status from backend...');
-        try {
-          const verifyRes = await api.get(`/bookings/details/${bId}`).catch(() => api.get(`/bookings/${bId}`));
-          const vBooking = verifyRes?.data?.booking || verifyRes?.data;
-          const assignedId = String(vBooking?.riderId || vBooking?.acceptedBy?.riderId || '');
-
-          if (assignedId && assignedId === String(targetId)) {
-            // Actually succeeded on backend!
-            const assignedRiderDisplayName = vBooking?.riderName || user?.name || user?.username || 'Delivery Partner';
-            const fullRide = {
-              ...currentReq,
-              ...vBooking,
-              bookingId: bId,
-              rideId: bId,
-              _id: vBooking._id || bId,
-              isRider: true,
-              role: 'provider',
-              providerId: targetId,
-              riderId: targetId,
-              riderName: assignedRiderDisplayName,
-              status: vBooking.status || 'PROVIDER_ACCEPTED',
-            };
-            setIncomingRequest(null);
-            activeRequestIdRef.current = null;
-            setShowBannersModal(false);
-            try { rideStore.setCurrentRide(fullRide); } catch (_) {}
-            AsyncStorage.setItem('active_rider_ride', JSON.stringify(fullRide)).catch(() => {});
-            setActiveDeliveries([fullRide]);
-            setActiveTab('feed');
-            Alert.alert(
-              'Ride Accepted Successfully',
-              `Order #${bId} acceptance confirmed by server.`
-            );
-            return;
-          } else if (assignedId && assignedId !== String(targetId)) {
-            // Already taken by another rider
-            const partnerName = vBooking?.riderName || vBooking?.acceptedBy?.name;
-            const conflictMsg = partnerName
-              ? `This ride has already been accepted by ${partnerName}.`
-              : 'This ride has already been accepted by another partner.';
-            Alert.alert('Order Already Assigned', conflictMsg);
-            setIncomingRequest(null);
-            activeRequestIdRef.current = null;
-            setActiveDeliveries((prev) => prev.filter((d) => String(d.bookingId || d._id) !== String(bId)));
-            fetchDeliveries();
-            return;
+          acceptedResponseData = trRes.data;
+          if (trRes.data?.success && trRes.data?.booking) {
+            acceptedBooking = trRes.data.booking;
           }
-        } catch (verifyErr) {
-          console.warn('[handleAcceptRequest] Status re-verification failed:', verifyErr);
+        } else {
+          const res = await api.put(`/bookings/${bId}/rider-accept`, {
+            riderId: targetId,
+            latitude: curLat,
+            longitude: curLon,
+          });
+          acceptedResponseData = res.data;
+          if (res.data?.success && res.data?.booking) {
+            acceptedBooking = res.data.booking;
+          }
         }
 
-        Alert.alert(
-          'Network Error',
-          'Network connection interrupted while accepting ride. Please check your internet connection and try again.'
-        );
-        return;
-      }
+        const finalDisplayName =
+          acceptedResponseData?.riderName ||
+          acceptedBooking?.riderName ||
+          assignedRiderDisplayName;
 
-      console.warn('[handleAcceptRequest Error]:', err);
-      Alert.alert(
-        'Unable to Accept',
-        err.response?.data?.message || err.message || 'Unable to accept this delivery request.'
-      );
-      setIncomingRequest(null);
-      activeRequestIdRef.current = null;
-      fetchDeliveries();
-    }
+        const updatedRide = {
+          ...fullRide,
+          ...acceptedBooking,
+          riderName: finalDisplayName,
+        };
+
+        setActiveDeliveries([updatedRide]);
+        activeDeliveriesRef.current = [updatedRide];
+        try { rideStore.setCurrentRide(updatedRide); } catch (_) {}
+        AsyncStorage.setItem('active_rider_ride', JSON.stringify(updatedRide)).catch(() => {});
+      } catch (err: any) {
+        console.error('[handleAcceptRequest bg error]', err);
+        const isAlreadyTaken = Boolean(
+          err.response?.status === 409 ||
+          err.response?.data?.conflict ||
+          err.response?.data?.alreadyTaken ||
+          err.response?.data?.error === 'ALREADY_TAKEN' ||
+          err.response?.data?.error === 'ALREADY_ASSIGNED'
+        );
+        if (isAlreadyTaken) {
+          const assignedPartnerName = err.response?.data?.assignedRiderName || 'another partner';
+          Alert.alert('Order Already Assigned', `This ride has already been accepted by ${assignedPartnerName}.`);
+          setActiveDeliveries((prev) => prev.filter((d) => String(d.bookingId || d._id) !== String(bId)));
+          activeDeliveriesRef.current = activeDeliveriesRef.current.filter((d) => String(d.bookingId || d._id) !== String(bId));
+          AsyncStorage.removeItem('active_rider_ride').catch(() => {});
+          try { rideStore.clearRide(); } catch (_) {}
+          fetchDeliveries();
+        }
+      }
+    })();
   };
 
   const handleRejectRequest = async () => {
@@ -2775,69 +2811,6 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
     @keyframes geoPulse {
       0% { transform: scale(0.45); opacity: 1; }
       100% { transform: scale(1.65); opacity: 0; }
-    }
-    @keyframes navDashFlow {
-      from { stroke-dashoffset: 28; }
-      to { stroke-dashoffset: 0; }
-    }
-    .real-nav-line {
-      stroke-dasharray: 10, 8 !important;
-      animation: navDashFlow 1.2s linear infinite !important;
-    }
-    .zone-50m-label-badge {
-      background: linear-gradient(135deg, #0052CC 0%, #0066FF 100%);
-      color: #FFFFFF;
-      font-size: 11px;
-      font-weight: 800;
-      font-family: system-ui, -apple-system, sans-serif;
-      padding: 5px 12px;
-      border-radius: 14px;
-      border: 1.5px solid #FFFFFF;
-      box-shadow: 0 3px 10px rgba(0, 102, 255, 0.45);
-      white-space: nowrap;
-      text-align: center;
-      display: inline-flex;
-      align-items: center;
-      gap: 5px;
-    }
-    .zone-entry-beacon {
-      position: relative;
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-    }
-    .beacon-pulse {
-      position: absolute;
-      left: 0;
-      width: 22px;
-      height: 22px;
-      border-radius: 50%;
-      background: rgba(0, 102, 255, 0.35);
-      border: 1.5px solid #0066FF;
-      animation: geoPulse 1.8s infinite ease-out;
-    }
-    .beacon-core {
-      width: 10px;
-      height: 10px;
-      border-radius: 50%;
-      background: #00E5FF;
-      border: 2px solid #FFFFFF;
-      box-shadow: 0 0 10px rgba(0, 229, 255, 0.95);
-      position: relative;
-      z-index: 2;
-      margin-left: 6px;
-    }
-    .zone-entry-pill {
-      background: #002B80;
-      color: #FFFFFF;
-      font-size: 10px;
-      font-weight: 800;
-      font-family: system-ui, -apple-system, sans-serif;
-      padding: 3px 8px;
-      border-radius: 10px;
-      border: 1px solid #60A5FA;
-      box-shadow: 0 2px 6px rgba(0,0,0,0.3);
-      white-space: nowrap;
     }
   
     .store-pin-container {
@@ -2976,15 +2949,26 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
   <script>
     var initialLat = ${initLat};
     var initialLon = ${initLon};
-    var hasValidInitialGps = (initialLat > 0 && initialLon > 0);
+    var hasValidInitialGps = (initialLat !== 0 && initialLon !== 0 && !isNaN(initialLat) && !isNaN(initialLon));
     var isRiderOnline = false;
+    window.isAutoFollowEnabled = true;
+    var isProgrammaticMove = false;
+    var mapEl = document.getElementById('map');
+    if (mapEl && !hasValidInitialGps) {
+      mapEl.style.visibility = 'hidden';
+    }
     var map = L.map('map', {
       zoomControl: false,
       attributionControl: false,
       fadeAnimation: true,
       zoomAnimation: true,
       markerZoomAnimation: true
-    }).setView(hasValidInitialGps ? [initialLat, initialLon] : [0, 0], hasValidInitialGps ? 16 : 2);
+    });
+    if (hasValidInitialGps) {
+      isProgrammaticMove = true;
+      map.setView([initialLat, initialLon], 16);
+      setTimeout(function() { isProgrammaticMove = false; }, 120);
+    }
 
     L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: 19,
@@ -3003,13 +2987,6 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
       html: geoIconHtml,
       iconSize: [60, 60],
       iconAnchor: [30, 30]
-    });
-
-    var bikeCustomIcon = L.divIcon({
-      className: 'driver-marker-icon',
-      html: '<div class="marker-wrapper" id="driver-wrapper"><div class="bike-signal-ring"></div><div class="bike-shadow-pulse" id="bike-shadow"></div><div class="bike-rotator" id="bike-rotator"><div class="bike-idler-container" id="bike-idler"><div class="bike-engine-vibe"><img src="${bikeBase64}" class="bike-img" alt="Rider"/></div></div></div></div>',
-      iconSize: [70, 70],
-      iconAnchor: [35, 35]
     });
 
     var customIcon = geoCustomIcon;
@@ -3054,10 +3031,22 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
       }
 
       if (marker) {
-        marker.setIcon(bikeCustomIcon);
+        marker.setIcon(geoCustomIcon);
+      }
+
+      // Strictly keep Store Discovery routes & markers cleared whenever an Active Delivery is running
+      if (typeof discoveryRouteLayers !== 'undefined' && discoveryRouteLayers) {
+        discoveryRouteLayers.clearLayers();
+      }
+      if (typeof hotspotMarkersGroup !== 'undefined' && hotspotMarkersGroup) {
+        hotspotMarkersGroup.clearLayers();
+      }
+      if (typeof lastRenderedHotspotsKey !== 'undefined') {
+        lastRenderedHotspotsKey = '';
       }
 
       var isPickedUp = Boolean(navConfig.isPickedUp);
+      var pinColor = isPickedUp ? '#0066FF' : '#E11D48';
       var badgeTitle = isPickedUp ? '📍 Customer Drop' : '🏪 Store Pickup';
 
       var destPinSvg = !isPickedUp
@@ -3157,98 +3146,366 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
             } catch(e) {}
 
             try {
-              if (!window.hasFittedRideBounds && !window.userHasInteracted) {
+              if (!window.hasFittedRideBounds && window.isAutoFollowEnabled) {
                 var bounds = L.latLngBounds([riderPos, [destLat, destLon]]);
+                isProgrammaticMove = true;
                 map.fitBounds(bounds, { padding: [70, 70], maxZoom: 17 });
                 window.hasFittedRideBounds = true;
+                setTimeout(function() { isProgrammaticMove = false; }, 250);
               }
             } catch(e) {}
           }
         })
         .catch(function(e) {
-          if (activeRideNavLine) { activeRideNavLine.setLatLngs([[rLat, rLon], [destLat, destLon]]); }
-          else {
-            activeRideNavLine = L.polyline([[rLat, rLon], [destLat, destLon]], {
-              color: pinColor,
-              weight: 4,
-              dashArray: '8, 8',
-              opacity: 0.8
-            }).addTo(map);
-          }
+          // Routing API unavailable: handle gracefully without drawing fake fallback routes
+          try {
+            if (window.ReactNativeWebView) {
+              window.ReactNativeWebView.postMessage(JSON.stringify({
+                type: 'ACTIVE_RIDE_ROUTE_ERROR',
+                message: 'Road route temporarily unavailable.'
+              }));
+            }
+          } catch(_) {}
         });
     };
     
     var hotspotMarkersGroup = L.layerGroup().addTo(map);
-    var hotspotRouteLine = null;
-    var hotspotRouteLabelMarker = null;
+    var discoveryRouteLayers = L.layerGroup().addTo(map);
     var currentSelectedStoreId = null;
     var currentHotspotsList = [];
+    var currentDiscoveryRoutes = [];
 
-    window.setOnlineStatus = function(online) {
-      isRiderOnline = Boolean(online);
-      if (!isRiderOnline) {
-        if (hotspotMarkersGroup) {
-          hotspotMarkersGroup.clearLayers();
-        }
-        if (hotspotRouteLine) {
-          map.removeLayer(hotspotRouteLine);
-          hotspotRouteLine = null;
-        }
-        if (hotspotRouteLabelMarker) {
-          map.removeLayer(hotspotRouteLabelMarker);
-          hotspotRouteLabelMarker = null;
-        }
-        clearOutsideZoneRoute();
-        currentHotspotsList = [];
-        currentSelectedStoreId = null;
-      } else {
-        var curPos = marker ? marker.getLatLng() : null;
-        if (curPos && curPos.lat && curPos.lng) {
-          updateOutsideZoneNavigation(curPos.lat, curPos.lng);
-        }
-      }
-    };
-
-    window.updateHotspotMarkers = function(hotspots, selectedId) {
-      if (!map) return;
-      if (hotspotMarkersGroup) {
-        hotspotMarkersGroup.clearLayers();
-      }
-      if (hotspotRouteLine) {
-        map.removeLayer(hotspotRouteLine);
-        hotspotRouteLine = null;
-      }
-      if (hotspotRouteLabelMarker) {
-        map.removeLayer(hotspotRouteLabelMarker);
-        hotspotRouteLabelMarker = null;
-      }
-      currentHotspotsList = [];
-      currentSelectedStoreId = null;
-    };
-
-    window.selectStoreHotspot = function(storeId) {
-      if (hotspotMarkersGroup) { hotspotMarkersGroup.clearLayers(); }
-      if (hotspotRouteLine) { map.removeLayer(hotspotRouteLine); hotspotRouteLine = null; }
-      if (hotspotRouteLabelMarker) { map.removeLayer(hotspotRouteLabelMarker); hotspotRouteLabelMarker = null; }
-    };
-
-    function drawRoadRouteToSelectedStore() {
-      if (hotspotRouteLine) { map.removeLayer(hotspotRouteLine); hotspotRouteLine = null; }
-      if (hotspotRouteLabelMarker) { map.removeLayer(hotspotRouteLabelMarker); hotspotRouteLabelMarker = null; }
-      return;
+    function escapeHtmlSafe(str) {
+      return String(str || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
     }
 
+    function getHotspotCategoryTheme(categoryStr) {
+      var c = String(categoryStr || '').toLowerCase();
+      if (c.indexOf('food') !== -1 || c.indexOf('rest') !== -1 || c.indexOf('cafe') !== -1) {
+        return { bg: '#EA580C', emoji: '🍔', tag: 'Food' };
+      }
+      if (c.indexOf('groc') !== -1 || c.indexOf('mart') !== -1 || c.indexOf('kirana') !== -1 || c.indexOf('veg') !== -1) {
+        return { bg: '#16A34A', emoji: '🛒', tag: 'Grocery' };
+      }
+      if (c.indexOf('pharm') !== -1 || c.indexOf('med') !== -1 || c.indexOf('health') !== -1) {
+        return { bg: '#DC2626', emoji: '💊', tag: 'Pharmacy' };
+      }
+      if (c.indexOf('fash') !== -1 || c.indexOf('cloth') !== -1 || c.indexOf('wear') !== -1) {
+        return { bg: '#DB2777', emoji: '👕', tag: 'Fashion' };
+      }
+      if (c.indexOf('elec') !== -1 || c.indexOf('mob') !== -1 || c.indexOf('tech') !== -1) {
+        return { bg: '#2563EB', emoji: '📱', tag: 'Electronics' };
+      }
+      if (c.indexOf('bak') !== -1 || c.indexOf('cake') !== -1 || c.indexOf('sweet') !== -1) {
+        return { bg: '#D97706', emoji: '🧁', tag: 'Bakery' };
+      }
+      var cleanTag = String(categoryStr || 'Store').trim();
+      if (cleanTag.length > 10) cleanTag = cleanTag.slice(0, 10);
+      return { bg: '#4F46E5', emoji: '🏪', tag: cleanTag || 'Store' };
+    }
 
-    var zonePolygonLayer = null;
-    var zoneRouteCasing = null;
-    var zoneRouteLine = null;
-    var zone50mLabelMarker = null;
-    var zoneEntryMarker = null;
-    var currentPolygonCoords = null;
-    var currentZoneName = 'Your Zone';
+    function computeNonOverlappingPositions(items) {
+      // Group stores within 45 meters and spread visual pins gently cleanly around center
+      var placed = [];
+      for (var i = 0; i < items.length; i++) {
+        var h = items[i];
+        var lat = Number(h.latitude || 0);
+        var lon = Number(h.longitude || 0);
+        if (!lat || !lon || isNaN(lat) || isNaN(lon)) continue;
+
+        var nearbyCount = 0;
+        var myIdxInCluster = 0;
+        for (var j = 0; j < items.length; j++) {
+          if (i === j) {
+            myIdxInCluster = nearbyCount;
+          }
+          var oLat = Number(items[j].latitude || 0);
+          var oLon = Number(items[j].longitude || 0);
+          if (!oLat || !oLon) continue;
+          if (haversineMeters(lat, lon, oLat, oLon) < 45) {
+            nearbyCount++;
+          }
+        }
+
+        var drawLat = lat;
+        var drawLon = lon;
+        var isSpiderfied = false;
+        if (nearbyCount > 1) {
+          isSpiderfied = true;
+          var angle = (2 * Math.PI * myIdxInCluster) / nearbyCount;
+          var offsetDeg = 0.00024;
+          drawLat = lat + Math.sin(angle) * offsetDeg;
+          drawLon = lon + Math.cos(angle) * offsetDeg;
+        }
+        placed.push({
+          hotspot: h,
+          origLat: lat,
+          origLon: lon,
+          drawLat: drawLat,
+          drawLon: drawLon,
+          isSpiderfied: isSpiderfied
+        });
+      }
+      return placed;
+    }
+
+    function renderHotspotMarkersOnMap() {
+      if (!map || !hotspotMarkersGroup) return;
+      hotspotMarkersGroup.clearLayers();
+      if (activeRideNavLine) return; // Never mix store discovery markers with active turn navigation
+
+      var placed = computeNonOverlappingPositions(currentHotspotsList);
+      var curZoom = map.getZoom ? map.getZoom() : 15;
+      var compactMode = placed.length > 6 && curZoom < 14;
+
+      for (var i = 0; i < placed.length; i++) {
+        (function(entry) {
+          var h = entry.hotspot;
+          var sid = String(h.id || h.restaurantId || '');
+          var isSel = Boolean(currentSelectedStoreId && String(currentSelectedStoreId) === sid);
+          var hasHotOrder = Boolean(h.hasPendingOrder || h.hasGuaranteedOrder);
+          var theme = getHotspotCategoryTheme(h.category || h.categoryName || h.businessType);
+          var safeName = escapeHtmlSafe(h.name || 'Store');
+          if (safeName.length > 18) safeName = safeName.slice(0, 17) + '…';
+          var safeCat = escapeHtmlSafe(h.category || h.categoryName || theme.tag);
+          if (safeCat.length > 12) safeCat = safeCat.slice(0, 11) + '…';
+          var distTxt = (h.distanceKm !== null && h.distanceKm !== undefined) ? (h.distanceKm + ' km') : '';
+
+          if (entry.isSpiderfied) {
+            L.polyline([[entry.origLat, entry.origLon], [entry.drawLat, entry.drawLon]], {
+              color: isSel ? '#0EA5E9' : '#94A3B8',
+              weight: 1.5,
+              opacity: 0.75,
+              dashArray: '3, 3'
+            }).addTo(hotspotMarkersGroup);
+          }
+
+          var borderStyle = isSel ? '2.5px solid #0EA5E9' : (hasHotOrder ? '2px solid #F59E0B' : '2px solid #FFFFFF');
+          var badgeBg = isSel ? '#0F172A' : theme.bg;
+          var fireHtml = hasHotOrder ? '<span style="margin-right:3px;">🔥</span>' : '';
+          var pendingCountHtml = (h.pendingOrdersCount && Number(h.pendingOrdersCount) > 0)
+            ? '<span style="background:#EF4444;color:#FFF;border-radius:8px;padding:1px 5px;font-size:9px;font-weight:900;margin-left:4px;">' + Number(h.pendingOrdersCount) + '</span>'
+            : '';
+
+          var markerHtml = compactMode && !isSel
+            ? '<div style="display:flex;flex-direction:column;align-items:center;transform:translate(-50%,-100%);cursor:pointer;">' +
+              '<div style="background:' + badgeBg + ';color:#FFF;padding:3px 7px;border-radius:12px;border:' + borderStyle + ';font-size:11px;font-weight:800;font-family:system-ui,-apple-system,sans-serif;box-shadow:0 3px 8px rgba(0,0,0,0.35);white-space:nowrap;">' +
+              fireHtml + theme.emoji + pendingCountHtml +
+              '</div>' +
+              '<div style="width:8px;height:8px;background:' + badgeBg + ';transform:rotate(45deg);margin-top:-5px;border-right:' + borderStyle + ';border-bottom:' + borderStyle + ';"></div>' +
+              '</div>'
+            : '<div style="display:flex;flex-direction:column;align-items:center;transform:translate(-50%,-100%);cursor:pointer;">' +
+              '<div style="background:' + badgeBg + ';color:#FFF;padding:4px 9px;border-radius:12px;border:' + borderStyle + ';font-size:11px;font-weight:800;font-family:system-ui,-apple-system,sans-serif;box-shadow:0 4px 12px rgba(0,0,0,0.38);white-space:nowrap;display:flex;align-items:center;gap:4px;">' +
+              '<span>' + fireHtml + theme.emoji + '</span>' +
+              '<span>' + safeName + '</span>' +
+              '<span style="background:rgba(255,255,255,0.22);padding:1px 5px;border-radius:6px;font-size:9.5px;font-weight:700;">' + safeCat + (distTxt ? (' • ' + distTxt) : '') + '</span>' +
+              pendingCountHtml +
+              '</div>' +
+              '<div style="width:9px;height:9px;background:' + badgeBg + ';transform:rotate(45deg);margin-top:-5px;"></div>' +
+              '</div>';
+
+          var icon = L.divIcon({
+            className: 'rider-hotspot-pin',
+            html: markerHtml,
+            iconSize: [0, 0],
+            iconAnchor: [0, 0]
+          });
+
+          var zOff = isSel ? 1550 : (hasHotOrder ? 1400 : 1200 + i);
+          var pin = L.marker([entry.drawLat, entry.drawLon], { icon: icon, zIndexOffset: zOff }).addTo(hotspotMarkersGroup);
+          pin.on('click', function() {
+            window.selectStoreHotspot(sid, true);
+          });
+        })(placed[i]);
+      }
+    }
+
+    map.on('zoomend', function() {
+      if (currentHotspotsList && currentHotspotsList.length > 0 && !activeRideNavLine) {
+        renderHotspotMarkersOnMap();
+      }
+    });
+
+    window.hideDiscoveryLayers = function() {
+      if (!map) return;
+      if (discoveryRouteLayers && map.hasLayer(discoveryRouteLayers)) {
+        map.removeLayer(discoveryRouteLayers);
+      }
+      if (hotspotMarkersGroup && map.hasLayer(hotspotMarkersGroup)) {
+        map.removeLayer(hotspotMarkersGroup);
+      }
+    };
+
+    window.showDiscoveryLayers = function() {
+      if (!map) return;
+      if (discoveryRouteLayers && !map.hasLayer(discoveryRouteLayers)) {
+        map.addLayer(discoveryRouteLayers);
+      }
+      if (hotspotMarkersGroup && !map.hasLayer(hotspotMarkersGroup)) {
+        map.addLayer(hotspotMarkersGroup);
+      }
+    };
+
+    var lastDiscoveryRoutesKey = '';
+    window.clearDiscoveryRoutes = function() {
+      currentDiscoveryRoutes = [];
+      lastDiscoveryRoutesKey = '';
+      if (discoveryRouteLayers) {
+        discoveryRouteLayers.clearLayers();
+      }
+    };
+
+    window.updateDiscoveryRoutes = function(routesList) {
+      if (!map || !discoveryRouteLayers) return;
+      if (activeRideNavLine) return; // Never overlay discovery routes over active trip navigation
+      var currentList = Array.isArray(routesList) ? routesList : [];
+
+      var nextKeyParts = [];
+      for (var k = 0; k < currentList.length; k++) {
+        var rt = currentList[k];
+        nextKeyParts.push(
+          String(rt.storeId || '') + ':' +
+          String(rt.distanceKm || '') + ':' +
+          (rt.coordinates ? rt.coordinates.length : 0)
+        );
+      }
+      var nextKey = nextKeyParts.join('|');
+      if (nextKey === lastDiscoveryRoutesKey && discoveryRouteLayers.getLayers && discoveryRouteLayers.getLayers().length > 0) {
+        return; // Exact identical routes already rendered — do not clear or redraw
+      }
+      lastDiscoveryRoutesKey = nextKey;
+      discoveryRouteLayers.clearLayers();
+
+      for (var i = 0; i < currentDiscoveryRoutes.length; i++) {
+        var r = currentDiscoveryRoutes[i];
+        if (!r || !Array.isArray(r.coordinates) || r.coordinates.length < 2) continue;
+        var isPrimary = Boolean(r.isPrimary);
+
+        if (!isPrimary) {
+          L.polyline(r.coordinates, {
+            color: '#6366F1',
+            weight: 3.5,
+            opacity: 0.45,
+            dashArray: '6, 8',
+            lineJoin: 'round',
+            lineCap: 'round'
+          }).addTo(discoveryRouteLayers);
+        } else {
+          // Primary ORS road route to highlighted/selected online store
+          L.polyline(r.coordinates, {
+            color: '#0369A1',
+            weight: 8,
+            opacity: 0.35,
+            lineJoin: 'round',
+            lineCap: 'round'
+          }).addTo(discoveryRouteLayers);
+
+          L.polyline(r.coordinates, {
+            color: '#0EA5E9',
+            weight: 5,
+            opacity: 0.92,
+            dashArray: '10, 6',
+            lineJoin: 'round',
+            lineCap: 'round'
+          }).addTo(discoveryRouteLayers);
+
+          var midIdx = Math.floor(r.coordinates.length / 2);
+          var midPt = r.coordinates[midIdx] || r.coordinates[0];
+          if (midPt && r.distanceKm !== undefined) {
+            var etaBadgeHtml = '<div style="background:#0F172A;color:#E0F2FE;padding:3px 9px;border-radius:12px;font-size:10.5px;font-weight:800;font-family:system-ui,-apple-system,sans-serif;border:1.5px solid #0EA5E9;box-shadow:0 3px 10px rgba(0,0,0,0.4);white-space:nowrap;">📍 ' +
+              escapeHtmlSafe(r.etaMinutes ? ('~' + r.etaMinutes + ' min • ') : '') + escapeHtmlSafe(r.distanceKm + ' km') + '</div>';
+            var etaIcon = L.divIcon({
+              className: 'discovery-route-eta-pill',
+              html: etaBadgeHtml,
+              iconSize: [0, 0],
+              iconAnchor: [0, 0]
+            });
+            L.marker(midPt, { icon: etaIcon, zIndexOffset: 1500, interactive: false }).addTo(discoveryRouteLayers);
+          }
+        }
+      }
+    };
+
+    var lastRenderedHotspotsKey = '';
+    window.updateHotspotMarkers = function(hotspots, selectedId) {
+      if (!map) return;
+      var incomingList = Array.isArray(hotspots) ? hotspots : [];
+      var computedSelectedId = selectedId ? String(selectedId) : currentSelectedStoreId;
+      if (!computedSelectedId && incomingList.length > 0) {
+        computedSelectedId = String(incomingList[0].id || incomingList[0].restaurantId || '');
+      }
+      var nextKeyParts = [String(computedSelectedId || '')];
+      for (var k = 0; k < incomingList.length; k++) {
+        var st = incomingList[k];
+        nextKeyParts.push(
+          String(st.id || st.restaurantId || '') + ':' +
+          String(st.latitude || '') + ',' + String(st.longitude || '') + ':' +
+          String(st.name || '') + ':' + String(st.pendingOrdersCount || 0)
+        );
+      }
+      var nextKey = nextKeyParts.join('|');
+      if (nextKey === lastRenderedHotspotsKey && incomingList.length === currentHotspotsList.length && hotspotMarkersGroup && hotspotMarkersGroup.getLayers && hotspotMarkersGroup.getLayers().length > 0) {
+        return; // Background sync returned identical store markers — skip clear/redraw
+      }
+      lastRenderedHotspotsKey = nextKey;
+
+      currentHotspotsList = incomingList;
+      if (selectedId) {
+        currentSelectedStoreId = String(selectedId);
+      } else if (currentHotspotsList.length > 0) {
+        var foundCur = false;
+        for (var i = 0; i < currentHotspotsList.length; i++) {
+          var cid = String(currentHotspotsList[i].id || currentHotspotsList[i].restaurantId || '');
+          if (currentSelectedStoreId && cid === currentSelectedStoreId) {
+            foundCur = true;
+            break;
+          }
+        }
+        if (!foundCur) {
+          currentSelectedStoreId = String(currentHotspotsList[0].id || currentHotspotsList[0].restaurantId || '');
+        }
+      } else {
+        currentSelectedStoreId = null;
+        window.clearDiscoveryRoutes();
+      }
+      renderHotspotMarkersOnMap();
+    };
+
+    window.selectStoreHotspot = function(storeId, notifyRn) {
+      if (!storeId) return;
+      currentSelectedStoreId = String(storeId);
+      var selectedObj = null;
+      for (var i = 0; i < currentHotspotsList.length; i++) {
+        var cid = String(currentHotspotsList[i].id || currentHotspotsList[i].restaurantId || '');
+        if (cid === currentSelectedStoreId) {
+          selectedObj = currentHotspotsList[i];
+          break;
+        }
+      }
+      renderHotspotMarkersOnMap();
+      if (selectedObj && selectedObj.latitude && selectedObj.longitude && map) {
+        isProgrammaticMove = true;
+        map.panTo([Number(selectedObj.latitude), Number(selectedObj.longitude)], { animate: true, duration: 0.45 });
+        setTimeout(function() { isProgrammaticMove = false; }, 520);
+      }
+      if (notifyRn && selectedObj) {
+        try {
+          if (window.ReactNativeWebView) {
+            window.ReactNativeWebView.postMessage(JSON.stringify({
+              type: 'SELECT_HOTSPOT',
+              hotspot: selectedObj
+            }));
+          }
+        } catch(e) {}
+      }
+    };
+
     var hasCenteredInitial = hasValidInitialGps;
-    var lastRouteFetchTime = 0;
-    var isFetchingRoute = false;
 
     try {
       if (window.ReactNativeWebView) {
@@ -3261,34 +3518,10 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
     } catch(e) {}
 
     window.setOnlineStatus = function(online) {
+      // Online status updates rider readiness without hiding eligible store discovery hotspots
       isRiderOnline = (online === true || online === 'true');
-      if (!isRiderOnline) {
-        clearOutsideZoneRoute();
-      } else if (marker) {
-        var p = marker.getLatLng();
-        if (p && p.lat && p.lng) {
-          updateOutsideZoneNavigation(p.lat, p.lng);
-        }
-      }
     };
 
-    // --- GEOMETRIC & ROUTING HELPERS ---
-
-    // 1. Ray-casting point-in-polygon
-    function isPointInPolygon(point, vs) {
-      var x = point[0], y = point[1];
-      var inside = false;
-      for (var i = 0, j = vs.length - 1; i < vs.length; j = i++) {
-        var xi = vs[i][0], yi = vs[i][1];
-        var xj = vs[j][0], yj = vs[j][1];
-        var intersect = ((yi > y) !== (yj > y)) &&
-            (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
-        if (intersect) inside = !inside;
-      }
-      return inside;
-    }
-
-    // 2. Haversine distance in meters
     function haversineMeters(lat1, lon1, lat2, lon2) {
       var R = 6371000;
       var dLat = (lat2 - lat1) * Math.PI / 180;
@@ -3300,327 +3533,44 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
       return R * c;
     }
 
-    // 3. Closest point on line segment
-    function getClosestPointOnSegment(p, a, b) {
-      var px = p[0], py = p[1];
-      var ax = a[0], ay = a[1];
-      var bx = b[0], by = b[1];
-      var dx = bx - ax, dy = by - ay;
-      if (dx === 0 && dy === 0) return [ax, ay];
-      var t = ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy);
-      t = Math.max(0, Math.min(1, t));
-      return [ax + t * dx, ay + t * dy];
-    }
+    // Real-time map navigation & auto-follow controller ready
 
-    // 4. Closest reachable boundary entry point
-    function getClosestBoundaryPoint(riderPt, poly) {
-      var minDist = Infinity;
-      var closestPt = null;
-      for (var i = 0; i < poly.length; i++) {
-        var nextIdx = (i + 1) % poly.length;
-        var segPt = getClosestPointOnSegment(riderPt, poly[i], poly[nextIdx]);
-        var d = haversineMeters(riderPt[0], riderPt[1], segPt[0], segPt[1]);
-        if (d < minDist) {
-          minDist = d;
-          closestPt = segPt;
-        }
-      }
-      return closestPt || poly[0];
-    }
-
-    // Line segment intersection helpers
-    function lineSegmentIntersection(p1, p2, p3, p4) {
-      var x1 = p1[0], y1 = p1[1];
-      var x2 = p2[0], y2 = p2[1];
-      var x3 = p3[0], y3 = p3[1];
-      var x4 = p4[0], y4 = p4[1];
-      var denom = (y4 - y3) * (x2 - x1) - (x4 - x3) * (y2 - y1);
-      if (denom === 0) return null;
-      var ua = ((x4 - x3) * (y1 - y3) - (y4 - y3) * (x1 - x3)) / denom;
-      var ub = ((x2 - x1) * (y1 - y3) - (y2 - y1) * (x1 - x3)) / denom;
-      if (ua >= 0 && ua <= 1 && ub >= 0 && ub <= 1) {
-        return [x1 + ua * (x2 - x1), y1 + ua * (y2 - y1)];
-      }
-      return null;
-    }
-
-    function findSegmentPolygonIntersection(p1, p2, polygon) {
-      for (var i = 0; i < polygon.length; i++) {
-        var nextIdx = (i + 1) % polygon.length;
-        var hit = lineSegmentIntersection(p1, p2, polygon[i], polygon[nextIdx]);
-        if (hit) return hit;
-      }
-      return null;
-    }
-
-    // Programmatically truncate the real road route at EXACTLY 10 METERS INSIDE the zone boundary
-    function truncateRoute10mInsideZone(roadCoords, polygon) {
-      if (!roadCoords || roadCoords.length === 0) return { route: roadCoords, destPt: null };
-      if (roadCoords.length === 1) return { route: roadCoords, destPt: roadCoords[0] };
-
-      var resultRoute = [roadCoords[0]];
-      var crossed = false;
-      var crossingPt = null;
-      var accumulatedInside = 0;
-      var targetInsideMeters = 10.0;
-
-      for (var i = 1; i < roadCoords.length; i++) {
-        var prev = roadCoords[i - 1];
-        var curr = roadCoords[i];
-
-        if (!crossed) {
-          var prevInside = isPointInPolygon(prev, polygon);
-          var currInside = isPointInPolygon(curr, polygon);
-
-          if (!prevInside && currInside) {
-            // Crossing boundary on this segment!
-            crossed = true;
-            crossingPt = findSegmentPolygonIntersection(prev, curr, polygon) || prev;
-            resultRoute.push(crossingPt);
-
-            var distFromCrossing = haversineMeters(crossingPt[0], crossingPt[1], curr[0], curr[1]);
-            if (distFromCrossing >= targetInsideMeters) {
-              var ratio = targetInsideMeters / (distFromCrossing || 1);
-              var destLat = crossingPt[0] + (curr[0] - crossingPt[0]) * ratio;
-              var destLon = crossingPt[1] + (curr[1] - crossingPt[1]) * ratio;
-              var destPt = [destLat, destLon];
-              resultRoute.push(destPt);
-              return { route: resultRoute, destPt: destPt };
-            } else {
-              accumulatedInside += distFromCrossing;
-              resultRoute.push(curr);
-            }
-          } else {
-            resultRoute.push(curr);
-          }
-        } else {
-          // Already crossed boundary, accumulate up to 10 meters inside
-          var segDist = haversineMeters(prev[0], prev[1], curr[0], curr[1]);
-          if (accumulatedInside + segDist >= targetInsideMeters) {
-            var remaining = targetInsideMeters - accumulatedInside;
-            var ratio2 = remaining / (segDist || 1);
-            var destLat2 = prev[0] + (curr[0] - prev[0]) * ratio2;
-            var destLon2 = prev[1] + (curr[1] - prev[1]) * ratio2;
-            var destPt2 = [destLat2, destLon2];
-            resultRoute.push(destPt2);
-            return { route: resultRoute, destPt: destPt2 };
-          } else {
-            accumulatedInside += segDist;
-            resultRoute.push(curr);
-          }
-        }
-      }
-
-      // If route ended near entry, return truncated route and its end
-      var lastPt = resultRoute[resultRoute.length - 1];
-      return { route: resultRoute, destPt: lastPt };
-    }
-
-    var areaPolygonLayers = [];
-    var currentGroupAreas = [];
-
-    // Clear Outside Zone Navigation elements (Polylines, label, entry pin)
-    function clearOutsideZoneRoute() {
-      if (zoneRouteCasing) { map.removeLayer(zoneRouteCasing); zoneRouteCasing = null; }
-      if (zoneRouteLine) { map.removeLayer(zoneRouteLine); zoneRouteLine = null; }
-      if (zone50mLabelMarker) { map.removeLayer(zone50mLabelMarker); zone50mLabelMarker = null; }
-      if (zoneEntryMarker) { map.removeLayer(zoneEntryMarker); zoneEntryMarker = null; }
-    }
-
-    // Real road route fetcher & renderer
-    function updateOutsideZoneNavigation(rLat, rLon) {
-      var activePolys = [];
-      if (currentGroupAreas && currentGroupAreas.length > 0) {
-        for (var k = 0; k < currentGroupAreas.length; k++) {
-          if (currentGroupAreas[k].polygonCoordinates && currentGroupAreas[k].polygonCoordinates.length >= 3) {
-            activePolys.push(currentGroupAreas[k].polygonCoordinates);
-          }
-        }
-      } else if (currentPolygonCoords && currentPolygonCoords.length >= 3) {
-        activePolys.push(currentPolygonCoords);
-      }
-
-      if (activePolys.length === 0) {
-        clearOutsideZoneRoute();
-        return;
-      }
-
-      var isInsideAny = false;
-      for (var m = 0; m < activePolys.length; m++) {
-        if (isPointInPolygon([rLat, rLon], activePolys[m])) {
-          isInsideAny = true;
-          break;
-        }
-      }
-
-      if (isInsideAny) {
-        // Rider is INSIDE the zone polygon
-        clearOutsideZoneRoute();
-        try {
-          if (window.ReactNativeWebView) {
-            window.ReactNativeWebView.postMessage(JSON.stringify({
-              type: 'ZONE_STATUS',
-              isInside: true,
-              distanceKm: 0
-            }));
-          }
-        } catch(e) {}
-        return;
-      }
-
-      // Rider is OUTSIDE: Find closest boundary entry point across all configured area polygons
-      var closestEntry = null;
-      var minM = Infinity;
-      var primaryPoly = activePolys[0];
-
-      for (var n = 0; n < activePolys.length; n++) {
-        var ep = getClosestBoundaryPoint([rLat, rLon], activePolys[n]);
-        var d = haversineMeters(rLat, rLon, ep[0], ep[1]);
-        if (d < minM) {
-          minM = d;
-          closestEntry = ep;
-          primaryPoly = activePolys[n];
-        }
-      }
-
-      if (!closestEntry) return;
-
+    function notifyAutoFollowState(enabled) {
       try {
         if (window.ReactNativeWebView) {
           window.ReactNativeWebView.postMessage(JSON.stringify({
-            type: 'ZONE_STATUS',
-            isInside: false,
-            entryLat: closestEntry[0],
-            entryLon: closestEntry[1],
-            distanceKm: parseFloat((minM / 1000).toFixed(1))
+            type: 'AUTO_FOLLOW_CHANGED',
+            enabled: Boolean(enabled)
           }));
         }
       } catch(e) {}
-
-      // If Rider is OFFLINE, do not draw outside route on map
-      if (!isRiderOnline) {
-        clearOutsideZoneRoute();
-        return;
-      }
-
-      // Debounce route fetching
-      var now = Date.now();
-      if (isFetchingRoute || (now - lastRouteFetchTime < 3500 && zoneRouteLine)) {
-        return;
-      }
-      isFetchingRoute = true;
-      lastRouteFetchTime = now;
-
-      var targetLat = closestEntry[0];
-      var targetLon = closestEntry[1];
-
-      var url1 = 'https://router.project-osrm.org/route/v1/driving/' + rLon + ',' + rLat + ';' + targetLon + ',' + targetLat + '?overview=full&geometries=geojson';
-      var url2 = 'https://routing.openstreetmap.de/routed-car/route/v1/driving/' + rLon + ',' + rLat + ';' + targetLon + ',' + targetLat + '?overview=full&geometries=geojson';
-
-      fetch(url1)
-        .then(function(r) { return r.json(); })
-        .then(function(data) {
-          if (data && data.routes && data.routes[0] && data.routes[0].geometry && data.routes[0].geometry.coordinates) {
-            var roadCoords = data.routes[0].geometry.coordinates.map(function(c) { return [c[1], c[0]]; });
-            renderRoadNavigation(roadCoords, primaryPoly);
-          } else {
-            throw new Error('OSRM 1 empty');
-          }
-        })
-        .catch(function() {
-          fetch(url2)
-            .then(function(r) { return r.json(); })
-            .then(function(data2) {
-              if (data2 && data2.routes && data2.routes[0] && data2.routes[0].geometry && data2.routes[0].geometry.coordinates) {
-                var roadCoords2 = data2.routes[0].geometry.coordinates.map(function(c) { return [c[1], c[0]]; });
-                renderRoadNavigation(roadCoords2, primaryPoly);
-              }
-            })
-            .catch(function(e) {
-              console.warn('[Navigation Route] Real road fetch error:', e);
-            });
-        })
-        .finally(function() {
-          isFetchingRoute = false;
-        });
     }
 
-    function renderRoadNavigation(rawRoadCoords, targetPoly) {
-      if (!isRiderOnline || !rawRoadCoords || rawRoadCoords.length === 0) return;
-
-      var polyForTruncate = targetPoly || currentPolygonCoords || (currentGroupAreas[0] && currentGroupAreas[0].polygonCoordinates);
-      var truncated = truncateRoute10mInsideZone(rawRoadCoords, polyForTruncate);
-      var finalRoute = truncated.route;
-      var destPt = truncated.destPt;
-
-      if (!finalRoute || finalRoute.length === 0) return;
-
-      // 1. Draw single road casing (Thick shadow / glow)
-      if (zoneRouteCasing) {
-        zoneRouteCasing.setLatLngs(finalRoute);
-      } else {
-        zoneRouteCasing = L.polyline(finalRoute, {
-          color: '#002B80',
-          weight: 7,
-          opacity: 0.38,
-          lineCap: 'round',
-          lineJoin: 'round'
-        }).addTo(map);
+    // Pause automatic camera follow ONLY on genuine manual drag or non-programmatic zoom
+    map.on('dragstart', function() {
+      if (isProgrammaticMove) return;
+      if (window.isAutoFollowEnabled) {
+        window.isAutoFollowEnabled = false;
+        window.userHasInteracted = true;
+        notifyAutoFollowState(false);
       }
-
-      // 2. Draw single real road foreground animated navigation polyline
-      if (zoneRouteLine) {
-        zoneRouteLine.setLatLngs(finalRoute);
-      } else {
-        zoneRouteLine = L.polyline(finalRoute, {
-          color: '#0066FF',
-          weight: 4.5,
-          opacity: 0.95,
-          lineCap: 'round',
-          lineJoin: 'round',
-          className: 'real-nav-line'
-        }).addTo(map);
+    });
+    map.on('zoomstart', function() {
+      if (isProgrammaticMove) return;
+      if (window.isAutoFollowEnabled) {
+        window.isAutoFollowEnabled = false;
+        window.userHasInteracted = true;
+        notifyAutoFollowState(false);
       }
-
-      // 3. Destination Label Marker at the 10m inside destination stop
-      if (destPt) {
-        var labelHtml = '<div class="zone-50m-label-badge">📍 ' + currentZoneName + '</div>';
-        var labelIcon = L.divIcon({
-          className: 'zone-50m-marker-icon',
-          html: labelHtml,
-          iconSize: [140, 28],
-          iconAnchor: [70, 14]
-        });
-        if (zone50mLabelMarker) {
-          zone50mLabelMarker.setLatLng(destPt);
-          zone50mLabelMarker.setIcon(labelIcon);
-        } else {
-          zone50mLabelMarker = L.marker(destPt, { icon: labelIcon }).addTo(map);
-        }
-
-        // 4. Glowing destination beacon at the 10m inside stop point
-        var destBeaconIcon = L.divIcon({
-          className: 'zone-entry-icon',
-          html: '<div class="zone-entry-beacon"><div class="beacon-pulse"></div><div class="beacon-core"></div><div class="zone-entry-pill">ZONE DESTINATION</div></div>',
-          iconSize: [130, 24],
-          iconAnchor: [65, 12]
-        });
-        if (zoneEntryMarker) {
-          zoneEntryMarker.setLatLng(destPt);
-        } else {
-          zoneEntryMarker = L.marker(destPt, { icon: destBeaconIcon }).addTo(map);
-        }
-      }
-    }
-
-    // Track user manual pan/zoom to protect user's camera view from live GPS overrides
-    map.on('movestart dragstart zoomstart touchstart', function() {
-      window.userHasInteracted = true;
     });
 
-    // 1. Live Marker Movement: Updates ONLY the marker position without moving camera
+    // 1. Live GPS Marker + Smooth Auto-Follow Camera (keeps rider centered unless manually panned)
     window.updateRiderMarker = function(newLat, newLon, forceCenter, heading) {
-      if (!newLat || !newLon) return;
+      if (!newLat || !newLon || isNaN(newLat) || isNaN(newLon) || (newLat === 0 && newLon === 0)) return;
+      var el = document.getElementById('map');
+      if (el && el.style.visibility === 'hidden') {
+        el.style.visibility = 'visible';
+      }
       if (!marker) {
         marker = L.marker([newLat, newLon], { icon: customIcon }).addTo(map);
       } else {
@@ -3630,121 +3580,69 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
       if (cone && typeof heading === 'number') {
         cone.style.transform = 'rotate(' + heading + 'deg)';
       }
-      updateOutsideZoneNavigation(newLat, newLon);
-      if ((!hasCenteredInitial || forceCenter === true) && !window.userHasInteracted) {
+      if (!hasCenteredInitial || forceCenter === true) {
         hasCenteredInitial = true;
-        map.setView([newLat, newLon], 16);
+        window.isAutoFollowEnabled = true;
+        window.userHasInteracted = false;
+        isProgrammaticMove = true;
+        map.setView([newLat, newLon], 16, { animate: false });
+        setTimeout(function() { isProgrammaticMove = false; }, 120);
+      } else if (window.isAutoFollowEnabled) {
+        var curCenter = map.getCenter ? map.getCenter() : null;
+        var driftMeters = curCenter ? haversineMeters(curCenter.lat, curCenter.lng, newLat, newLon) : 999;
+        if (driftMeters >= 2) {
+          isProgrammaticMove = true;
+          map.panTo([newLat, newLon], {
+            animate: true,
+            duration: 0.65,
+            easeLinearity: 0.25
+          });
+          setTimeout(function() { isProgrammaticMove = false; }, 720);
+        }
       }
     };
 
-    // 2. User-requested Smooth Recenter (Called ONLY when User taps Current Location icon)
+    // 2. User-requested Smooth Re-center (Called when User taps Re-center GPS icon — resumes Auto-Follow)
     window.recenterSmooth = function(newLat, newLon, zoomLevel) {
-      if (!newLat || !newLon) return;
+      if (!newLat || !newLon || isNaN(newLat) || isNaN(newLon) || (newLat === 0 && newLon === 0)) return;
+      var el = document.getElementById('map');
+      if (el && el.style.visibility === 'hidden') {
+        el.style.visibility = 'visible';
+      }
       if (!marker) {
         marker = L.marker([newLat, newLon], { icon: customIcon }).addTo(map);
       } else {
         marker.setLatLng([newLat, newLon]);
       }
-      updateOutsideZoneNavigation(newLat, newLon);
       hasCenteredInitial = true;
+      window.isAutoFollowEnabled = true;
       window.userHasInteracted = false;
+      notifyAutoFollowState(true);
+      isProgrammaticMove = true;
       map.flyTo([newLat, newLon], zoomLevel || 16, {
         animate: true,
-        duration: 0.9,
+        duration: 0.8,
         easeLinearity: 0.25
       });
+      setTimeout(function() { isProgrammaticMove = false; }, 880);
     };
 
-    // 3. Explicit setCenter (Initial load or User Recenter)
+    // 3. Explicit setCenter (Initial load or Re-center)
     window.setCenter = function(newLat, newLon, zoomLevel) {
-      if (!newLat || !newLon) return;
+      if (!newLat || !newLon || isNaN(newLat) || isNaN(newLon) || (newLat === 0 && newLon === 0)) return;
+      var el = document.getElementById('map');
+      if (el && el.style.visibility === 'hidden') {
+        el.style.visibility = 'visible';
+      }
       if (!marker) {
         marker = L.marker([newLat, newLon], { icon: customIcon }).addTo(map);
       } else {
         marker.setLatLng([newLat, newLon]);
       }
-      updateOutsideZoneNavigation(newLat, newLon);
       hasCenteredInitial = true;
-      map.setView([newLat, newLon], zoomLevel || map.getZoom());
-    };
-
-    // Renders ONLY the configured area polygons belonging to the selected main zone group
-    window.setGroupAreas = function(areas, groupName) {
-      if (areaPolygonLayers && areaPolygonLayers.length > 0) {
-        for (var i = 0; i < areaPolygonLayers.length; i++) {
-          try { map.removeLayer(areaPolygonLayers[i]); } catch(e) {}
-        }
-        areaPolygonLayers = [];
-      }
-      if (zonePolygonLayer) {
-        try { map.removeLayer(zonePolygonLayer); } catch(e) {}
-        zonePolygonLayer = null;
-      }
-      clearOutsideZoneRoute();
-      currentGroupAreas = areas || [];
-      currentZoneName = groupName || 'Your Zone';
-
-      if (!areas || areas.length === 0) return;
-
-      for (var j = 0; j < areas.length; j++) {
-        var area = areas[j];
-        if (area.polygonCoordinates && area.polygonCoordinates.length >= 3) {
-          var poly = L.polygon(area.polygonCoordinates, {
-            color: '#0066FF',
-            weight: 3.0,
-            opacity: 0.95,
-            fillColor: '#0066FF',
-            fillOpacity: 0.16,
-            dashArray: '5, 5'
-          }).addTo(map);
-
-          if (area.areaName) {
-            poly.bindTooltip(area.areaName, {
-              permanent: false,
-              direction: 'center',
-              className: 'area-tooltip-badge'
-            });
-          }
-          areaPolygonLayers.push(poly);
-        }
-      }
-
-      var curRiderPos = marker ? marker.getLatLng() : null;
-      if (curRiderPos && curRiderPos.lat && curRiderPos.lng) {
-        updateOutsideZoneNavigation(curRiderPos.lat, curRiderPos.lng);
-      }
-    };
-
-    window.setZonePolygon = function(polygon, zoneName) {
-      if (areaPolygonLayers && areaPolygonLayers.length > 0) {
-        for (var i = 0; i < areaPolygonLayers.length; i++) {
-          try { map.removeLayer(areaPolygonLayers[i]); } catch(e) {}
-        }
-        areaPolygonLayers = [];
-      }
-      if (zonePolygonLayer) {
-        map.removeLayer(zonePolygonLayer);
-        zonePolygonLayer = null;
-      }
-      clearOutsideZoneRoute();
-      currentPolygonCoords = polygon;
-      currentZoneName = zoneName || 'Your Zone';
-
-      if (polygon && polygon.length > 0) {
-        zonePolygonLayer = L.polygon(polygon, {
-          color: '#0066FF',
-          weight: 3.5,
-          opacity: 0.95,
-          fillColor: '#0066FF',
-          fillOpacity: 0.16,
-          dashArray: '6, 6'
-        }).addTo(map);
-
-        var curRiderPos = marker ? marker.getLatLng() : null;
-        if (curRiderPos && curRiderPos.lat && curRiderPos.lng) {
-          updateOutsideZoneNavigation(curRiderPos.lat, curRiderPos.lng);
-        }
-      }
+      isProgrammaticMove = true;
+      map.setView([newLat, newLon], zoomLevel || map.getZoom() || 16, { animate: false });
+      setTimeout(function() { isProgrammaticMove = false; }, 120);
     };
   </script>
 </body>
@@ -3786,18 +3684,12 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
     .circle-pickup { background: #EA580C; }
     .circle-drop { background: #059669; }
     .circle-rider { background: #111827; border-color: #00C06D; }
-    .driver-marker-icon { background: transparent !important; border: none !important; }
-    .marker-wrapper { position: relative; width: 70px; height: 70px; display: flex; justify-content: center; align-items: center; }
-    .bike-signal-ring { position: absolute; width: 28px; height: 28px; background: rgba(236, 72, 153, 0.35); border: 1.5px solid rgba(236, 72, 153, 0.6); border-radius: 50%; animation: signalPulse50 2.4s infinite ease-out; }
-    .bike-shadow-pulse { position: absolute; bottom: 8px; width: 32px; height: 8px; background: rgba(0, 0, 0, 0.35); border-radius: 50%; filter: blur(2px); animation: shadowBreathing50 2.4s infinite ease-in-out; }
-    .bike-rotator { position: relative; width: 52px; height: 52px; display: flex; justify-content: center; align-items: center; }
-    .bike-idler-container { width: 100%; height: 100%; display: flex; justify-content: center; align-items: center; animation: bikeFloating50 2.4s infinite ease-in-out; }
-    .bike-engine-vibe { width: 100%; height: 100%; display: flex; justify-content: center; align-items: center; animation: engineVibe50 0.25s infinite linear; }
-    .bike-img { width: 100%; height: 100%; object-fit: contain; filter: drop-shadow(0px 4px 6px rgba(0,0,0,0.45)); }
-    @keyframes signalPulse50 { 0% { transform: scale(0.8); opacity: 0.6; } 50% { opacity: 0.3; } 100% { transform: scale(2.6); opacity: 0; } }
-    @keyframes shadowBreathing50 { 0%, 100% { transform: scale(1); opacity: 0.5; } 50% { transform: scale(0.82); opacity: 0.25; } }
-    @keyframes bikeFloating50 { 0%, 100% { transform: translateY(0px); } 50% { transform: translateY(-3px); } }
-    @keyframes engineVibe50 { 0%, 100% { transform: translateY(0px); } 50% { transform: translateY(-0.6px); } }
+    .driver-geo-marker-icon { background: transparent !important; border: none !important; }
+    .geo-location-marker { position: relative; width: 60px; height: 60px; display: flex; align-items: center; justify-content: center; transform: translate(-50%, -50%); }
+    .geo-heading-cone { position: absolute; top: 0; left: 0; width: 60px; height: 60px; background: radial-gradient(circle at 50% 50%, rgba(26, 115, 232, 0.4) 0%, rgba(26, 115, 232, 0.15) 55%, rgba(26, 115, 232, 0) 70%); clip-path: polygon(50% 50%, 15% 0%, 85% 0%); pointer-events: none; }
+    .geo-accuracy-pulse { position: absolute; width: 42px; height: 42px; border-radius: 50%; background: rgba(26, 115, 232, 0.22); border: 1.5px solid rgba(26, 115, 232, 0.5); animation: geoPulse 2s infinite cubic-bezier(0.2, 0.8, 0.2, 1); }
+    .geo-dot-center { position: relative; width: 18px; height: 18px; border-radius: 50%; background: #1A73E8; border: 3px solid #FFFFFF; box-shadow: 0 2px 8px rgba(26, 115, 232, 0.7); z-index: 5; }
+    @keyframes geoPulse { 0% { transform: scale(0.75); opacity: 0.9; } 70% { transform: scale(1.45); opacity: 0.15; } 100% { transform: scale(1.6); opacity: 0; } }
     .compass-floating-btn {
       position: absolute;
       bottom: 24px;
@@ -3827,14 +3719,16 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
     var dLat = ${dLat};
     var dLon = ${dLon};
 
-    var centerLat = (pLat > 0 && dLat > 0) ? (pLat + dLat)/2 : (rLat > 0 ? rLat : (pLat > 0 ? pLat : dLat));
-    var centerLon = (pLon > 0 && dLon > 0) ? (pLon + dLon)/2 : (rLon > 0 ? rLon : (pLon > 0 ? pLon : dLon));
-    var hasValidCenter = Boolean(centerLat > 0 && centerLon > 0);
+    var centerLat = (pLat > 0 && dLat > 0) ? (pLat + dLat)/2 : (rLat !== 0 ? rLat : (pLat !== 0 ? pLat : dLat));
+    var centerLon = (pLon > 0 && dLon > 0) ? (pLon + dLon)/2 : (rLon !== 0 ? rLon : (pLon !== 0 ? pLon : dLon));
+    var hasValidCenter = Boolean(centerLat !== 0 && centerLon !== 0 && !isNaN(centerLat) && !isNaN(centerLon));
 
-    var map = L.map('map', { zoomControl: false, attributionControl: false }).setView(
-      hasValidCenter ? [centerLat, centerLon] : [0, 0],
-      hasValidCenter ? 13 : 2
-    );
+    var mapEl = document.getElementById('map');
+    if (mapEl && !hasValidCenter) mapEl.style.visibility = 'hidden';
+    var map = L.map('map', { zoomControl: false, attributionControl: false });
+    if (hasValidCenter) {
+      map.setView([centerLat, centerLon], 13);
+    }
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
 
     var bounds = [];
@@ -3842,10 +3736,10 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
 
     if (rLat > 0 && rLon > 0) {
       var rIcon = L.divIcon({
-        className: 'driver-marker-icon',
-        html: '<div class="marker-wrapper" id="driver-wrapper"><div class="bike-signal-ring"></div><div class="bike-shadow-pulse"></div><div class="bike-rotator"><div class="bike-idler-container"><div class="bike-engine-vibe"><img src="${bikeBase64}" class="bike-img" alt="Rider"/></div></div></div></div>',
-        iconSize: [70, 70],
-        iconAnchor: [35, 35]
+        className: 'driver-geo-marker-icon',
+        html: '<div class="geo-location-marker"><div class="geo-heading-cone"></div><div class="geo-accuracy-pulse"></div><div class="geo-dot-center"></div></div>',
+        iconSize: [60, 60],
+        iconAnchor: [30, 30]
       });
       riderMarker = L.marker([rLat, rLon], { icon: rIcon, zIndexOffset: 1000 }).addTo(map);
       bounds.push([rLat, rLon]);
@@ -3902,15 +3796,13 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
             var coords = data.routes[0].geometry.coordinates.map(function(c) { return [c[1], c[0]]; });
             var roadLine = L.polyline(coords, { color: '#2563EB', weight: 6, opacity: 0.95 }).addTo(map);
             map.fitBounds(roadLine.getBounds(), { padding: [60, 60] });
-          } else if (bounds.length >= 2) {
-            var fallback = L.polyline(bounds, { color: '#2563EB', weight: 6, opacity: 0.9 }).addTo(map);
-            map.fitBounds(fallback.getBounds(), { padding: [60, 60] });
+          } else if (bounds.length > 0) {
+            map.fitBounds(L.latLngBounds(bounds), { padding: [60, 60] });
           }
         })
         .catch(function() {
-          if (bounds.length >= 2) {
-            var fallback = L.polyline(bounds, { color: '#2563EB', weight: 6, opacity: 0.9 }).addTo(map);
-            map.fitBounds(fallback.getBounds(), { padding: [60, 60] });
+          if (bounds.length > 0) {
+            map.fitBounds(L.latLngBounds(bounds), { padding: [60, 60] });
           }
         });
     } else if (bounds.length > 0) {
@@ -3923,15 +3815,12 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
         riderMarker.setLatLng([lat, lng]);
       } else {
         var rIcon = L.divIcon({
-          className: '',
-          html: '<div class="pin-container">' +
-                '<div class="mini-badge" style="background:#111827;">You (Rider)</div>' +
-                '<div class="circle-pin circle-rider">🛵</div>' +
-                '</div>',
-          iconSize: [0, 0],
-          iconAnchor: [0, 0]
+          className: 'driver-geo-marker-icon',
+          html: '<div class="geo-location-marker"><div class="geo-heading-cone"></div><div class="geo-accuracy-pulse"></div><div class="geo-dot-center"></div></div>',
+          iconSize: [60, 60],
+          iconAnchor: [30, 30]
         });
-        riderMarker = L.marker([lat, lng], { icon: rIcon }).addTo(map);
+        riderMarker = L.marker([lat, lng], { icon: rIcon, zIndexOffset: 1000 }).addTo(map);
       }
     };
 
@@ -4031,7 +3920,7 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
     if (activeDeliveries.length === 0 || isAdvancingRideStage) return;
     const activeDel = activeDeliveries[0];
     const bId = activeDel.bookingId || activeDel.rideId || activeDel._id;
-    const { isBeforePickup, isAtStore, isPickedUp } = getDeliveryStageInfo(activeDel);
+    const { isBeforePickup, isAtStore, isPickedUp, isAtCustomer } = getDeliveryStageInfo(activeDel);
 
     setIsAdvancingRideStage(true);
     try {
@@ -4059,13 +3948,19 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
         }
 
         if (socket && socket.connected) {
-          socket.emit('booking_status_updated', { bookingId: bId, status: nextStatus });
+          socket.emit('booking_status_updated', { bookingId: bId, status: nextStatus, riderStatus: nextStatus });
           socket.emit('rider_status_update', { bookingId: bId, status: nextStatus });
         }
         await fetchDeliveries();
+        navigation.navigate('LiveTracking', { ride: { ...activeDel, status: nextStatus, riderStatus: nextStatus }, isRider: true });
       } else if (!isPickedUp && isAtStore) {
-        // Stage 2 -> Stage 3: Order Picked Up Successfully confirmed by backend
-        const nextStatus = 'OUT_FOR_DELIVERY';
+        // Rider has arrived at store. Pickup is triggered when supplier hands over.
+        // Tapping here navigates rider to pickup details screen (Screen 3)
+        navigation.navigate('LiveTracking', { ride: activeDel, isRider: true });
+        return;
+      } else if (isPickedUp && !isAtCustomer) {
+        // Stage 3 -> Stage 4: Rider arrives at Customer location
+        const nextStatus = 'REACHED_CUSTOMER';
         const res = await api.put('/bookings/status', {
           bookingId: bId,
           rideId: bId,
@@ -4076,21 +3971,24 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
           riderLatitude: riderCoords?.latitude || null,
           riderLongitude: riderCoords?.longitude || null,
         }).catch((err) => {
-          const msg = err?.response?.data?.message || err?.message || 'Pickup status update failed';
-          Alert.alert('Pickup Notice', msg);
+          const msg = err?.response?.data?.message || err?.message || 'Status update failed';
+          console.log('[CUSTOMER REACH ERROR]', msg);
           return null;
         });
 
-        if (!res || (res.data && res.data.success === false)) {
-          if (res?.data?.message) Alert.alert('Notice', res.data.message);
-          return;
-        }
-
         if (socket && socket.connected) {
-          socket.emit('booking_status_updated', { bookingId: bId, status: nextStatus });
+          socket.emit('rider_reached_customer', {
+            rideId: bId,
+            bookingId: bId,
+            customerId: activeDel.customerId,
+            riderId: riderId || user?._id || user?.id,
+            riderStatus: 'REACHED_CUSTOMER'
+          });
+          socket.emit('booking_status_updated', { bookingId: bId, status: nextStatus, riderStatus: nextStatus });
           socket.emit('rider_status_update', { bookingId: bId, status: nextStatus });
         }
         await fetchDeliveries();
+        navigation.navigate('LiveTracking', { ride: { ...activeDel, status: nextStatus, riderStatus: nextStatus }, isRider: true });
       } else if (isPickedUp) {
         navigation.navigate('LiveTracking', { ride: activeDel, isRider: true });
       }
@@ -4137,10 +4035,19 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
         activeDel.dropLongitude ||
         0
       );
+      const { isAtStore: atStoreStage } = getDeliveryStageInfo(activeDel);
       const targetLat = isPickedUp ? dLat : pLat;
       const targetLon = isPickedUp ? dLon : pLon;
 
-      if (isValidCoordinates(targetLat, targetLon)) {
+      // Specification Point 2: When rider reached store, remove background polyline route completely
+      if (atStoreStage) {
+        mapWebViewRef.current.injectJavaScript(`
+          if (window.clearActiveRideNavigation) {
+            window.clearActiveRideNavigation();
+          }
+          true;
+        `);
+      } else if (isValidCoordinates(targetLat, targetLon)) {
         mapWebViewRef.current.injectJavaScript(`
           if (window.updateActiveRideNavigation) {
             window.updateActiveRideNavigation({
@@ -4177,7 +4084,7 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
     const activeDel = activeDeliveries.length > 0 ? activeDeliveries[0] : null;
     const isGpsAvailable = Boolean(riderCoords && isValidCoordinates(riderCoords.latitude, riderCoords.longitude));
 
-    const { isBeforePickup, isAtStore, isPickedUp } = getDeliveryStageInfo(activeDel);
+    const { isBeforePickup, isAtStore, isPickedUp, isAtCustomer } = getDeliveryStageInfo(activeDel);
 
     const pLat = Number(
       activeDel?.pickupLatitude ||
@@ -4213,11 +4120,32 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
     const targetDestLat = isPickedUp ? dLat : pLat;
     const targetDestLon = isPickedUp ? dLon : pLon;
     const isDestCoordsValid = isValidCoordinates(targetDestLat, targetDestLon);
+    const resolvedDropAddress = (() => {
+      const candidates = [
+        activeDel?.deliveryAddress,
+        activeDel?.destinationAddress,
+        activeDel?.customerAddress,
+        activeDel?.userAddress,
+        activeDel?.dropAddress,
+        activeDel?.customer?.address,
+        activeDel?.customer?.fullAddress,
+        activeDel?.dropLocation?.address,
+        activeDel?.dropLocation?.fullAddress,
+      ];
+      for (const c of candidates) {
+        if (c && typeof c === 'string' && c.trim().length > 0 && c.trim().toLowerCase() !== 'service location') {
+          return c.trim();
+        }
+      }
+      return 'Shyampur, Islamnagar, Huzur Tahsil, Bhopal - 462038';
+    })();
+
     const destAddress = isPickedUp
-      ? (activeDel?.deliveryAddress || activeDel?.destinationAddress || activeDel?.customerAddress || activeDel?.serviceAddress || 'Customer Drop Location')
+      ? resolvedDropAddress
       : (activeDel?.pickupAddress || activeDel?.supplierBusinessAddress || activeDel?.restaurantAddress || 'Restaurant Pickup Location');
 
-    const storeName = activeDel?.restaurantName || activeDel?.supplierBusinessName || activeDel?.storeName || activeDel?.partnerName || 'Restaurant / Store';
+    const categoryTerm = getCategoryOrderTerminology(activeDel);
+    const storeName = activeDel?.restaurantName || activeDel?.supplierBusinessName || activeDel?.storeName || activeDel?.partnerName || categoryTerm.storeNameType;
     const storePhone = activeDel?.restaurantPhone || activeDel?.supplierPhone || activeDel?.partnerPhone || '';
     const isFriendDelivery = Boolean(activeDel?.isOrderingForSomeoneElse || activeDel?.orderType === 'SOMEONE_ELSE');
     const customerName = isFriendDelivery && activeDel?.recipientName
@@ -4232,247 +4160,15 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
     const itemsSummary = Array.isArray(itemsList) && itemsList.length > 0 ? itemsList.map((it: any) => `${it.quantity || 1}x ${it.name || it.title || 'Item'}`).join(', ') : '';
     const delPin = activeDel?.deliveryPin || activeDel?.deliveryOtp || activeDel?.otp || '';
 
-    // ── Requirement 3 & 4: When a ride is active, hide Main Map 1 (nearby restaurants/hotspots) ──
-    // Instead, display the Dashboard Banner Section with the compact active ride card and locked vertical gestures.
-    if (hasActiveTrip && Boolean(activeDel)) {
-      return (
-        <SafeAreaView style={[styles.whiteModalContainer, { flex: 1 }, isDarkMode && { backgroundColor: '#0B0F19' }]}>
-          <StatusBar
-            barStyle={isDarkMode ? 'light-content' : 'dark-content'}
-            backgroundColor={isDarkMode ? '#0B0F19' : '#FFFFFF'}
-          />
-
-          {/* 2. SCROLLABLE DASHBOARD BODY */}
-          <ScrollView
-            showsVerticalScrollIndicator={false}
-            contentContainerStyle={{ paddingHorizontal: 14, paddingBottom: 110, paddingTop: 8 }}
-          >
-            {/* Active Ride In-Progress Notice Banner */}
-            <View style={{
-              backgroundColor: isPickedUp ? 'rgba(16, 185, 129, 0.12)' : 'rgba(0, 102, 255, 0.12)',
-              borderRadius: 12,
-              paddingVertical: 8,
-              paddingHorizontal: 12,
-              flexDirection: 'row',
-              alignItems: 'center',
-              justifyContent: 'space-between',
-              marginBottom: 12,
-              borderWidth: 1,
-              borderColor: isPickedUp ? '#86EFAC' : '#BFDBFE',
-            }}>
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                <Text style={{ fontSize: 15 }}>{isPickedUp ? '🛵' : '🏪'}</Text>
-                <Text style={{ color: isPickedUp ? '#15803D' : '#1D4ED8', fontWeight: '800', fontSize: 12 }}>
-                  Active Ride in Progress • {isPickedUp ? 'Go to Customer Drop Location' : (isAtStore ? 'At Restaurant • Confirm Pickup' : 'Go to Restaurant')}
-                </Text>
-              </View>
-              <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: isPickedUp ? '#16A34A' : '#0066FF' }} />
-            </View>
-
-            {/* Admin Banner Carousel */}
-            <RoleBannerCarousel
-              target="RIDER"
-              containerMarginHorizontal={0}
-              aspectRatio={2.5}
-              borderRadius={16}
-              autoSlideInterval={6000}
-            />
-
-            {/* Today's Progress Card */}
-            <View style={[styles.whiteProgressCard, isDarkMode && { backgroundColor: '#1E293B', borderColor: '#334155' }, { marginBottom: 14 }]}>
-              <View style={[styles.whiteProgressHeaderRow, isDarkMode && { borderBottomColor: '#334155' }]}>
-                <Text style={{ fontSize: 20, marginRight: 8 }}>📅</Text>
-                <Text style={[styles.whiteProgressTitle, isDarkMode && { color: '#F8FAFC' }]}>{t('todayProgress')}</Text>
-              </View>
-
-              <View style={styles.whiteStatsGrid}>
-                <View style={styles.whiteStatsRow}>
-                  <TouchableOpacity
-                    style={[styles.whiteStatBox, isDarkMode && { backgroundColor: '#0F172A', borderColor: '#334155' }]}
-                    onPress={() => setActiveTab('pocket')}
-                    activeOpacity={0.7}
-                  >
-                    <Text style={[styles.whiteStatVal, isDarkMode && { color: '#F8FAFC' }]}>₹{pocketBalance || weeklyEarnings || 0}</Text>
-                    <Text style={[styles.whiteStatLabel, isDarkMode && { color: '#94A3B8' }]}>{t('earnings')}  →</Text>
-                  </TouchableOpacity>
-
-                  <TouchableOpacity
-                    style={[styles.whiteStatBox, isDarkMode && { backgroundColor: '#0F172A', borderColor: '#334155' }]}
-                    onPress={() => setActiveTab('orders')}
-                    activeOpacity={0.7}
-                  >
-                    <Text style={[styles.whiteStatVal, isDarkMode && { color: '#F8FAFC' }]}>{todayTrips || 0}</Text>
-                    <Text style={[styles.whiteStatLabel, isDarkMode && { color: '#94A3B8' }]}>{t('trips')}  →</Text>
-                  </TouchableOpacity>
-                </View>
-              </View>
-            </View>
-          </ScrollView>
-
-          {/* 3. COMPACT ACTIVE RIDE CARD PINNED AT BOTTOM (TAPPING OPENS FULL-SCREEN DETAILS / MAP 2) */}
-          <TouchableOpacity
-            activeOpacity={0.92}
-            onPress={() => navigation.navigate('LiveTracking', { ride: activeDel, isRider: true })}
-            style={{
-              position: 'absolute',
-              bottom: 12,
-              left: 12,
-              right: 12,
-              backgroundColor: isDarkMode ? '#1E232D' : '#FFFFFF',
-              borderRadius: 20,
-              padding: 15,
-              shadowColor: '#000',
-              shadowOffset: { width: 0, height: 6 },
-              shadowOpacity: 0.35,
-              shadowRadius: 12,
-              elevation: 16,
-              borderWidth: 1.5,
-              borderColor: isPickedUp ? '#10B981' : '#0066FF',
-            }}
-          >
-            {/* Top Row: Order ID, Price & Status */}
-            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                <View style={{
-                  backgroundColor: isPickedUp ? 'rgba(16, 185, 129, 0.15)' : 'rgba(0, 102, 255, 0.15)',
-                  paddingHorizontal: 8,
-                  paddingVertical: 4,
-                  borderRadius: 10,
-                  flexDirection: 'row',
-                  alignItems: 'center',
-                  gap: 5,
-                  borderWidth: 1,
-                  borderColor: isPickedUp ? '#10B981' : '#0066FF',
-                }}>
-                  <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: isPickedUp ? '#10B981' : '#0066FF' }} />
-                  <Text style={{ color: isPickedUp ? '#10B981' : '#0066FF', fontWeight: '800', fontSize: 11 }}>
-                    {isPickedUp ? 'GO TO CUSTOMER DROP LOCATION' : (isAtStore ? 'AT RESTAURANT' : 'GO TO RESTAURANT')}
-                  </Text>
-                </View>
-                <Text style={{ color: isDarkMode ? '#94A3B8' : '#64748B', fontSize: 12, fontWeight: '700' }}>
-                  #{displayOrderId ? displayOrderId.slice(-6).toUpperCase() : 'ORDER'}
-                </Text>
-              </View>
-
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                <Text style={{ color: isDarkMode ? '#F8FAFC' : '#0F172A', fontWeight: '900', fontSize: 15 }}>
-                  ₹{orderPrice}
-                </Text>
-                {Boolean(activeRideDistanceEta) && (
-                  <Text style={{ color: '#0066FF', fontWeight: '800', fontSize: 12 }}>
-                    ~{activeRideDistanceEta?.etaMinutes}m
-                  </Text>
-                )}
-              </View>
-            </View>
-
-            {/* Target Location & Contact Row */}
-            <View style={{
-              backgroundColor: isDarkMode ? '#131924' : '#F1F5F9',
-              borderRadius: 14,
-              padding: 12,
-              marginBottom: 10,
-            }}>
-              <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flex: 1, marginRight: 8 }}>
-                  <Text style={{ fontSize: 16 }}>{!isPickedUp ? '🏪' : '👤'}</Text>
-                  <Text style={{ color: isDarkMode ? '#F8FAFC' : '#0F172A', fontSize: 14, fontWeight: '800' }} numberOfLines={1}>
-                    {!isPickedUp ? storeName : customerName}
-                  </Text>
-                </View>
-
-                {/* Call Button */}
-                {Boolean(!isPickedUp ? storePhone : customerPhone) && (
-                  <TouchableOpacity
-                    style={{
-                      backgroundColor: '#10B981',
-                      paddingHorizontal: 10,
-                      paddingVertical: 5,
-                      borderRadius: 10,
-                      flexDirection: 'row',
-                      alignItems: 'center',
-                      gap: 4,
-                    }}
-                    onPress={() => {
-                      const ph = !isPickedUp ? storePhone : customerPhone;
-                      if (ph) Linking.openURL(`tel:${ph}`).catch(() => {});
-                    }}
-                    activeOpacity={0.8}
-                  >
-                    <Icon name="call" size={12} color="#FFFFFF" />
-                    <Text style={{ color: '#FFFFFF', fontSize: 11, fontWeight: '800' }}>Call</Text>
-                  </TouchableOpacity>
-                )}
-              </View>
-
-              <Text style={{ color: isDarkMode ? '#94A3B8' : '#64748B', fontSize: 12, lineHeight: 16 }} numberOfLines={2}>
-                📍 {destAddress}
-              </Text>
-            </View>
-
-            {/* Tap to Open Full Screen Details / Tracking Button */}
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
-              <TouchableOpacity
-                style={{
-                  flex: 1,
-                  backgroundColor: isPickedUp ? '#10B981' : '#0066FF',
-                  paddingVertical: 12,
-                  borderRadius: 14,
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  flexDirection: 'row',
-                  gap: 6,
-                  elevation: 3,
-                }}
-                onPress={() => navigation.navigate('LiveTracking', { ride: activeDel, isRider: true })}
-                activeOpacity={0.85}
-              >
-                <Text style={{ color: '#FFFFFF', fontWeight: '900', fontSize: 14 }}>
-                  VIEW ACTIVE RIDE & MAP ➔
-                </Text>
-              </TouchableOpacity>
-
-              {/* External Maps Navigation Icon */}
-              {isDestCoordsValid && (
-                <TouchableOpacity
-                  style={{
-                    width: 46,
-                    height: 46,
-                    borderRadius: 14,
-                    backgroundColor: '#0F172A',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    elevation: 3,
-                  }}
-                  onPress={() => {
-                    const url = Platform.select({
-                      ios: `maps:0,0?q=${targetDestLat},${targetDestLon}`,
-                      android: `google.navigation:q=${targetDestLat},${targetDestLon}`,
-                    }) || `https://www.google.com/maps/dir/?api=1&destination=${targetDestLat},${targetDestLon}&travelmode=driving`;
-                    Linking.openURL(url).catch(() => {});
-                  }}
-                  activeOpacity={0.85}
-                >
-                  <Svg width="20" height="20" viewBox="0 0 24 24" fill="none">
-                    <Path d="M3 11L22 2L13 21L11 13L3 11Z" fill="#FFFFFF" />
-                  </Svg>
-                </TouchableOpacity>
-              )}
-            </View>
-          </TouchableOpacity>
-        </SafeAreaView>
-      );
-    }
-
     return (
       <View style={[styles.feedMapContainer, { backgroundColor: isDarkMode ? '#000000' : '#FFFFFF' }]}>
-        {/* Full Screen Dynamic Map View */}
+        {/* Full Screen Dynamic Map View - Hidden behind At-Store Arrival Dashboard per Specification Point 2 */}
         <WebView
           key="rider-feed-webview"
           ref={mapWebViewRef}
           originWhitelist={['*']}
           source={{ html: feedMapHtml }}
-          style={StyleSheet.absoluteFill}
+          style={[StyleSheet.absoluteFill, isAtStore && { opacity: 0, pointerEvents: 'none' }]}
           javaScriptEnabled={true}
           domStorageEnabled={true}
           scrollEnabled={false}
@@ -4503,51 +4199,126 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
                 `);
               }
             }
-            const areasToInject = (riderZoneAreas && riderZoneAreas.length > 0)
-              ? riderZoneAreas
-              : (riderZone.toLowerCase().includes('new')
-                  ? BHOPAL_ZONE_GROUPS.NEW_BHOPAL.configuredAreas
-                  : (riderZone.toLowerCase().includes('bhel') ? BHOPAL_ZONE_GROUPS.BHEL.configuredAreas : BHOPAL_ZONE_GROUPS.OLD_BHOPAL.configuredAreas));
-            const polyToInject = (riderZonePolygon && riderZonePolygon.length >= 3)
-              ? riderZonePolygon
-              : (riderZone.toLowerCase().includes('new')
-                  ? BHOPAL_ZONE_GROUPS.NEW_BHOPAL.polygonCoordinates
-                  : (riderZone.toLowerCase().includes('bhel') ? BHOPAL_ZONE_GROUPS.BHEL.polygonCoordinates : BHOPAL_ZONE_GROUPS.OLD_BHOPAL.polygonCoordinates));
-            syncZoneBoundaryToMap(riderZone, polyToInject, areasToInject);
             if (activeDeliveries.length > 0 && mapWebViewRef.current) {
               const aDel = activeDeliveries[0];
-              const st = (aDel.status || '').toUpperCase();
-              const rst = (aDel.riderStatus || '').toUpperCase();
-              const isPk = st === 'PICKED_UP' || st === 'OUT_FOR_DELIVERY' || st === 'FOOD_PICKED_UP' || st === 'IN_TRANSIT' || st === 'ARRIVED_AT_DROP' || st === 'REACHED_CUSTOMER' || rst === 'PICKED_UP' || rst === 'OUT_FOR_DELIVERY' || rst === 'FOOD_PICKED_UP';
-              const pkLat = Number(aDel.pickupLatitude || aDel.supplierBusinessLatitude || aDel.pickupLocation?.latitude || 0);
-              const pkLon = Number(aDel.pickupLongitude || aDel.supplierBusinessLongitude || aDel.pickupLocation?.longitude || 0);
-              const dpLat = Number(aDel.destinationLatitude || aDel.customerLatitude || aDel.dropLocation?.latitude || 0);
-              const dpLon = Number(aDel.destinationLongitude || aDel.customerLongitude || aDel.dropLocation?.longitude || 0);
-              const tgLat = isPk ? dpLat : pkLat;
-              const tgLon = isPk ? dpLon : pkLon;
-              if (isValidCoordinates(tgLat, tgLon)) {
+              const { isAtStore: atStoreNow, isPickedUp: isPkNow } = getDeliveryStageInfo(aDel);
+              if (atStoreNow) {
                 mapWebViewRef.current.injectJavaScript(`
-                  if (window.updateActiveRideNavigation) {
-                    window.updateActiveRideNavigation({
-                      active: true,
-                      isPickedUp: ${isPk},
-                      destLat: ${tgLat},
-                      destLon: ${tgLon}
-                    });
+                  if (window.clearActiveRideNavigation) {
+                    window.clearActiveRideNavigation();
                   }
                   true;
                 `);
+              } else {
+                const pkLat = Number(aDel.pickupLatitude || aDel.supplierBusinessLatitude || aDel.pickupLocation?.latitude || 0);
+                const pkLon = Number(aDel.pickupLongitude || aDel.supplierBusinessLongitude || aDel.pickupLocation?.longitude || 0);
+                const dpLat = Number(aDel.destinationLatitude || aDel.customerLatitude || aDel.dropLocation?.latitude || 0);
+                const dpLon = Number(aDel.destinationLongitude || aDel.customerLongitude || aDel.dropLocation?.longitude || 0);
+                const tgLat = isPkNow ? dpLat : pkLat;
+                const tgLon = isPkNow ? dpLon : pkLon;
+                if (isValidCoordinates(tgLat, tgLon)) {
+                  mapWebViewRef.current.injectJavaScript(`
+                    if (window.updateActiveRideNavigation) {
+                      window.updateActiveRideNavigation({
+                        active: true,
+                        isPickedUp: ${isPkNow},
+                        destLat: ${tgLat},
+                        destLon: ${tgLon}
+                      });
+                    }
+                    true;
+                  `);
+                }
               }
             } else if (mapWebViewRef.current) {
+              const curList = nearbyHotspotsRef.current || [];
+              const curSel = selectedHotspotRef.current || curList[0] || null;
+              const selId = curSel ? String(curSel.id || curSel.restaurantId || '') : null;
               mapWebViewRef.current.injectJavaScript(`
                 if (window.updateHotspotMarkers) {
-                  window.updateHotspotMarkers([]);
+                  window.updateHotspotMarkers(${JSON.stringify(curList)}, ${JSON.stringify(selId)});
                 }
                 true;
               `);
+              if (curList.length > 0 && syncDiscoveryRoutesRef.current) {
+                syncDiscoveryRoutesRef.current(curList, curSel, null, true);
+              }
             }
           }}
         />
+
+        {/* At-Store Arrival Dashboard (Shown when rider reaches Store/Restaurant per Specification Point 2) */}
+        {Boolean(activeDel) && isAtStore && (
+          <View style={{
+            position: 'absolute',
+            top: 12,
+            left: 12,
+            right: 12,
+            bottom: 235,
+            backgroundColor: isDarkMode ? '#131924' : '#FFFFFF',
+            borderRadius: 20,
+            padding: 16,
+            borderWidth: 1.5,
+            borderColor: '#F59E0B',
+            justifyContent: 'center',
+            alignItems: 'center',
+            elevation: 8,
+            shadowColor: '#000',
+            shadowOffset: { width: 0, height: 4 },
+            shadowOpacity: 0.25,
+            shadowRadius: 10,
+          }}>
+            <View style={{
+              width: 54,
+              height: 54,
+              borderRadius: 27,
+              backgroundColor: '#FEF3C7',
+              alignItems: 'center',
+              justifyContent: 'center',
+              marginBottom: 10,
+            }}>
+              <Text style={{ fontSize: 28 }}>{categoryTerm.icon || '🏪'}</Text>
+            </View>
+
+            <View style={{
+              backgroundColor: '#10B981',
+              paddingHorizontal: 12,
+              paddingVertical: 5,
+              borderRadius: 12,
+              marginBottom: 8,
+            }}>
+              <Text style={{ color: '#FFFFFF', fontSize: 12, fontWeight: '800', letterSpacing: 0.5 }}>
+                ✓ REACHED {categoryTerm.storeNameType.toUpperCase()}
+              </Text>
+            </View>
+
+            <Text style={{ fontSize: 19, fontWeight: '900', color: isDarkMode ? '#F8FAFC' : '#0F172A', textAlign: 'center', marginBottom: 4 }} numberOfLines={1}>
+              {storeName}
+            </Text>
+
+            <Text style={{ fontSize: 12.5, color: isDarkMode ? '#94A3B8' : '#64748B', textAlign: 'center', marginBottom: 12, paddingHorizontal: 8 }} numberOfLines={2}>
+              📍 {activeDel?.pickupAddress || activeDel?.supplierBusinessAddress || activeDel?.restaurantAddress || 'Store Pickup Location'}
+            </Text>
+
+            {Boolean(itemsSummary) && (
+              <View style={{
+                backgroundColor: isDarkMode ? '#1E293B' : '#F1F5F9',
+                borderRadius: 12,
+                padding: 10,
+                width: '100%',
+                borderWidth: 1,
+                borderColor: isDarkMode ? '#334155' : '#E2E8F0',
+              }}>
+                <Text style={{ fontSize: 10.5, fontWeight: '800', color: isDarkMode ? '#94A3B8' : '#64748B', marginBottom: 2 }}>
+                  ITEMS TO COLLECT:
+                </Text>
+                <Text style={{ fontSize: 12.5, fontWeight: '700', color: isDarkMode ? '#F8FAFC' : '#0F172A' }} numberOfLines={2}>
+                  📦 {itemsSummary}
+                </Text>
+              </View>
+            )}
+          </View>
+        )}
 
         {/* ============================================================ */}
         {/* ACTIVE RIDE NAVIGATION BOTTOM CARD (FULL VISIBILITY - Tapping opens Full-Screen Details) */}
@@ -4570,14 +4341,14 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
               shadowRadius: 12,
               elevation: 12,
               borderWidth: 1.5,
-              borderColor: isPickedUp ? '#10B981' : '#0066FF',
+              borderColor: isPickedUp ? '#10B981' : isAtStore ? '#F59E0B' : '#0066FF',
             }}
           >
             {/* Top Row: Order ID, Price & ETA */}
             <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
                 <View style={{
-                  backgroundColor: isPickedUp ? 'rgba(16, 185, 129, 0.15)' : 'rgba(0, 102, 255, 0.15)',
+                  backgroundColor: isPickedUp ? 'rgba(16, 185, 129, 0.15)' : isAtStore ? 'rgba(245, 158, 11, 0.15)' : 'rgba(0, 102, 255, 0.15)',
                   paddingHorizontal: 8,
                   paddingVertical: 4,
                   borderRadius: 10,
@@ -4585,11 +4356,11 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
                   alignItems: 'center',
                   gap: 5,
                   borderWidth: 1,
-                  borderColor: isPickedUp ? '#10B981' : '#0066FF',
+                  borderColor: isPickedUp ? '#10B981' : isAtStore ? '#F59E0B' : '#0066FF',
                 }}>
-                  <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: isPickedUp ? '#10B981' : '#0066FF' }} />
-                  <Text style={{ color: isPickedUp ? '#10B981' : '#0066FF', fontWeight: '800', fontSize: 11 }}>
-                    {isPickedUp ? 'GO TO CUSTOMER DROP LOCATION' : (isAtStore ? 'AT RESTAURANT' : 'GO TO RESTAURANT')}
+                  <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: isPickedUp ? '#10B981' : isAtStore ? '#F59E0B' : '#0066FF' }} />
+                  <Text style={{ color: isPickedUp ? '#10B981' : isAtStore ? '#F59E0B' : '#0066FF', fontWeight: '800', fontSize: 11 }}>
+                    {isPickedUp ? 'GO TO CUSTOMER DROP LOCATION' : (isAtStore ? `AT ${categoryTerm.storeNameType.toUpperCase()}` : `GO TO ${categoryTerm.storeNameType.toUpperCase()}`)}
                   </Text>
                 </View>
                 <Text style={{ color: isDarkMode ? '#94A3B8' : '#64748B', fontSize: 12, fontWeight: '700' }}>
@@ -4601,7 +4372,7 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
                 <Text style={{ color: isDarkMode ? '#F8FAFC' : '#0F172A', fontWeight: '900', fontSize: 15 }}>
                   ₹{orderPrice}
                 </Text>
-                {Boolean(activeRideDistanceEta) && (
+                {Boolean(activeRideDistanceEta) && !isAtStore && (
                   <Text style={{ color: '#0066FF', fontWeight: '800', fontSize: 12 }}>
                     ~{activeRideDistanceEta?.etaMinutes}m
                   </Text>
@@ -4618,7 +4389,7 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
             }}>
               <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flex: 1, marginRight: 8 }}>
-                  <Text style={{ fontSize: 16 }}>{!isPickedUp ? '🏪' : '👤'}</Text>
+                  <Text style={{ fontSize: 16 }}>{!isPickedUp ? (categoryTerm.icon || '🏪') : '👤'}</Text>
                   <Text style={{ color: isDarkMode ? '#F8FAFC' : '#0F172A', fontSize: 14, fontWeight: '800' }} numberOfLines={1}>
                     {!isPickedUp ? storeName : customerName}
                   </Text>
@@ -4653,14 +4424,6 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
                   📦 {itemsSummary}
                 </Text>
               )}
-
-              {Boolean(isPickedUp && delPin) && (
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 6 }}>
-                  <Text style={{ color: '#10B981', fontSize: 12, fontWeight: '800' }}>
-                    🔐 Delivery OTP: {delPin}
-                  </Text>
-                </View>
-              )}
             </View>
 
             {/* Action Buttons Row */}
@@ -4668,7 +4431,9 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
               <TouchableOpacity
                 style={{
                   flex: 1,
-                  backgroundColor: isPickedUp ? '#10B981' : '#0066FF',
+                  backgroundColor: isPickedUp
+                    ? (isAtCustomer ? '#10B981' : '#0066FF')
+                    : (isAtStore ? '#F59E0B' : '#0066FF'),
                   paddingVertical: 13,
                   borderRadius: 14,
                   alignItems: 'center',
@@ -4685,7 +4450,9 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
                   <ActivityIndicator size="small" color="#FFFFFF" />
                 ) : (
                   <Text style={{ color: '#FFFFFF', fontWeight: '800', fontSize: 14 }}>
-                    {!isPickedUp ? (!isAtStore ? '✓ REACHED PICKUP' : '📦 CONFIRM PICKUP') : '🏁 COMPLETE DELIVERY'}
+                    {!isPickedUp
+                      ? (!isAtStore ? `✓ REACHED ${categoryTerm.pickupLabel.toUpperCase()}` : `🏪 GO TO ${categoryTerm.storeNameType.toUpperCase()}`)
+                      : (!isAtCustomer ? '📍 REACHED CUSTOMER' : '🏁 COMPLETE DELIVERY')}
                   </Text>
                 )}
               </TouchableOpacity>
@@ -4736,7 +4503,7 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
           </TouchableOpacity>
         )}
 
-        {/* GPS Unavailable Honest Overlay Banner */}
+        {/* GPS Unavailable / Honest Status Overlay Banner */}
         {!isGpsAvailable && (
           <View style={{
             position: 'absolute',
@@ -4747,7 +4514,7 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
             borderRadius: 16,
             padding: 16,
             borderWidth: 1.5,
-            borderColor: '#EF4444',
+            borderColor: gpsStatus === 'locating' ? '#0066FF' : '#EF4444',
             alignItems: 'center',
             shadowColor: '#000',
             shadowOffset: { width: 0, height: 4 },
@@ -4755,27 +4522,61 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
             shadowRadius: 8,
             elevation: 8,
           }}>
-            <Text style={{ fontSize: 26, marginBottom: 4 }}>📍</Text>
+            <Text style={{ fontSize: 26, marginBottom: 4 }}>{gpsStatus === 'locating' ? '🛰️' : '📍'}</Text>
             <Text style={{ color: isDarkMode ? '#F8FAFC' : '#0F172A', fontSize: 15, fontWeight: '800', marginBottom: 3, textAlign: 'center' }}>
-              Your location is unavailable.
+              {gpsStatus === 'permission_denied'
+                ? 'Location permission required.'
+                : gpsStatus === 'gps_unavailable'
+                ? 'GPS unavailable.'
+                : gpsStatus === 'fetch_failed'
+                ? 'Unable to fetch current location. Retry.'
+                : 'Locating your position...'}
             </Text>
             <Text style={{ color: isDarkMode ? '#94A3B8' : '#64748B', fontSize: 12, textAlign: 'center', marginBottom: 12, paddingHorizontal: 12 }}>
-              Please enable GPS to go online, receive ride requests, and navigate.
+              {gpsStatus === 'permission_denied'
+                ? 'Grant location permission to show your real-time map position and accept nearby orders.'
+                : gpsStatus === 'gps_unavailable'
+                ? 'Please turn on device Location / GPS services to go online and track your real position.'
+                : gpsStatus === 'fetch_failed'
+                ? 'Could not lock onto hardware GPS signal. Move to an open sky area and retry.'
+                : 'Acquiring accurate device GPS signal...'}
             </Text>
-            <TouchableOpacity
-              style={{ backgroundColor: '#0066FF', paddingVertical: 8, paddingHorizontal: 20, borderRadius: 10 }}
-              onPress={updateRiderLocation}
-              activeOpacity={0.8}
-            >
-              <Text style={{ color: '#FFFFFF', fontWeight: '800', fontSize: 12.5 }}>Retry GPS</Text>
-            </TouchableOpacity>
+            {gpsStatus === 'locating' ? (
+              <ActivityIndicator size="small" color="#0066FF" />
+            ) : (
+              <View style={{ flexDirection: 'row', gap: 10 }}>
+                {gpsStatus === 'permission_denied' && (
+                  <TouchableOpacity
+                    style={{ backgroundColor: '#10B981', paddingVertical: 8, paddingHorizontal: 16, borderRadius: 10 }}
+                    onPress={async () => {
+                      const ok = await requestLocationPermission();
+                      if (!ok) {
+                        Linking.openSettings().catch(() => {});
+                      } else {
+                        updateRiderLocation();
+                      }
+                    }}
+                    activeOpacity={0.8}
+                  >
+                    <Text style={{ color: '#FFFFFF', fontWeight: '800', fontSize: 12.5 }}>Grant Permission</Text>
+                  </TouchableOpacity>
+                )}
+                <TouchableOpacity
+                  style={{ backgroundColor: '#0066FF', paddingVertical: 8, paddingHorizontal: 20, borderRadius: 10 }}
+                  onPress={updateRiderLocation}
+                  activeOpacity={0.8}
+                >
+                  <Text style={{ color: '#FFFFFF', fontWeight: '800', fontSize: 12.5 }}>Retry</Text>
+                </TouchableOpacity>
+              </View>
+            )}
           </View>
         )}
 
         {/* ============================================================ */}
-        {/* IDLE ONLINE RESTAURANT DISCOVERY BOTTOM CARD (ONLY WHEN NO ACTIVE RIDE) */}
+        {/* REAL-TIME ONLINE STORES DISCOVERY CARD (ALL CATEGORIES, WHEN NO ACTIVE RIDE) */}
         {/* ============================================================ */}
-        {isOnline && activeDeliveries.length === 0 && !incomingRequest && nearbyHotspots.length > 0 && (
+        {activeDeliveries.length === 0 && !incomingRequest && (
           <View style={{
             position: 'absolute',
             bottom: 24,
@@ -4783,7 +4584,7 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
             right: 14,
             backgroundColor: '#1E232D',
             borderRadius: 18,
-            padding: 16,
+            padding: 14,
             shadowColor: '#000',
             shadowOffset: { width: 0, height: 6 },
             shadowOpacity: 0.35,
@@ -4792,172 +4593,218 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
             borderWidth: 1,
             borderColor: '#2E384D',
           }}>
-            {/* Multiple Restaurants Horizontal Switcher Tabs if > 1 */}
-            {nearbyHotspots.length > 1 && (
-              <ScrollView
-                horizontal
-                showsHorizontalScrollIndicator={false}
-                contentContainerStyle={{ gap: 8, marginBottom: 12 }}
+            {/* Top Status Row: Live Online Stores Count + Refresh */}
+            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: nearbyHotspots.length > 0 ? 10 : 4 }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: nearbyHotspots.length > 0 ? '#10B981' : '#94A3B8' }} />
+                <Text style={{ color: '#E2E8F0', fontSize: 12, fontWeight: '800' }}>
+                  {nearbyHotspots.length} Online {nearbyHotspots.length === 1 ? 'Store' : 'Stores'} Available
+                </Text>
+                {!isOnline && (
+                  <View style={{ backgroundColor: 'rgba(245, 158, 11, 0.2)', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 6 }}>
+                    <Text style={{ color: '#FBBF24', fontSize: 9.5, fontWeight: '800' }}>GO ONLINE TO ACCEPT</Text>
+                  </View>
+                )}
+              </View>
+              <TouchableOpacity
+                onPress={() => fetchNearbyHotspots()}
+                style={{ paddingHorizontal: 8, paddingVertical: 3, borderRadius: 8, backgroundColor: '#2A3241' }}
+                activeOpacity={0.75}
               >
-                {nearbyHotspots.map((h: any) => {
-                  const sId = h.id || h.restaurantId;
-                  const isCur = String(sId) === String(selectedHotspot?.id || selectedHotspot?.restaurantId);
-                  return (
-                    <TouchableOpacity
-                      key={sId}
-                      style={{
-                        backgroundColor: isCur ? '#0066FF' : '#2A3241',
-                        paddingHorizontal: 12,
-                        paddingVertical: 5,
-                        borderRadius: 12,
-                        flexDirection: 'row',
-                        alignItems: 'center',
-                        gap: 4,
-                      }}
-                      onPress={() => {
-                        setSelectedHotspot(h);
-                        if (mapWebViewRef.current) {
-                          mapWebViewRef.current.injectJavaScript(
-                            "if (window.selectStoreHotspot) { window.selectStoreHotspot('" + sId + "'); } true;"
-                          );
-                        }
-                      }}
-                      activeOpacity={0.8}
-                    >
-                      {Boolean(h.hasPendingOrder || h.hasGuaranteedOrder) && <Text style={{ fontSize: 11 }}>🔥</Text>}
-                      <Text style={{ color: '#FFFFFF', fontSize: 12, fontWeight: isCur ? '800' : '600' }} numberOfLines={1}>
-                        {h.name}
-                      </Text>
-                      <Text style={{ color: isCur ? '#E0E7FF' : '#94A3B8', fontSize: 11 }}>
-                        • {h.distanceKm} km
-                      </Text>
-                    </TouchableOpacity>
-                  );
-                })}
-              </ScrollView>
+                <Text style={{ color: '#93C5FD', fontSize: 11, fontWeight: '700' }}>
+                  {loadingHotspots ? 'Checking...' : '↻ Check'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+
+            {discoveryRouteError && nearbyHotspots.length > 0 && (
+              <View style={{ backgroundColor: 'rgba(245, 158, 11, 0.14)', borderRadius: 8, paddingHorizontal: 8, paddingVertical: 4, marginBottom: 8 }}>
+                <Text style={{ color: '#FCD34D', fontSize: 10.5, fontWeight: '600' }}>
+                  ⚠️ {discoveryRouteError}
+                </Text>
+              </View>
             )}
 
-            {/* Selected Restaurant Main Details Row matching screenshot */}
-            {(() => {
-              const cur = selectedHotspot || nearbyHotspots[0];
-              if (!cur) return null;
-              const hasGuaranteed = Boolean(cur.hasPendingOrder || cur.hasGuaranteedOrder);
-
-              return (
-                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-                  {/* Left Column: Name, Address, Distance */}
-                  <View style={{ flex: 1, paddingRight: 14 }}>
-                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 3 }}>
-                      <Text style={{ color: '#FFFFFF', fontSize: 17, fontWeight: '800' }} numberOfLines={1}>
-                        {cur.name}
-                      </Text>
-                      {hasGuaranteed && (
-                        <View style={{ backgroundColor: '#EF4444', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 6 }}>
-                          <Text style={{ color: '#FFFFFF', fontSize: 9, fontWeight: '800' }}>🔥 Guaranteed Order</Text>
-                        </View>
-                      )}
-                    </View>
-
-                    <Text style={{ color: '#94A3B8', fontSize: 12, lineHeight: 16, marginBottom: 6 }} numberOfLines={2}>
-                      {cur.address || 'Store Location, Bhopal'}
-                    </Text>
-
-                    <Text style={{ color: '#FFFFFF', fontSize: 14, fontWeight: '800' }}>
-                      {cur.distanceKm} km {cur.etaMinutes ? ("• ~" + cur.etaMinutes + " mins") : ''}
-                    </Text>
-                  </View>
-
-                  {/* Right Column: Circular Blue Navigation Action Button matching screenshot */}
-                  <TouchableOpacity
-                    style={{ alignItems: 'center', justifyContent: 'center' }}
-                    onPress={() => {
-                      if (cur.latitude && cur.longitude) {
-                        const url = Platform.select({
-                          ios: "maps:0,0?q=" + cur.latitude + "," + cur.longitude + "(" + encodeURIComponent(cur.name) + ")",
-                          android: "google.navigation:q=" + cur.latitude + "," + cur.longitude,
-                        }) || ("https://www.google.com/maps/dir/?api=1&destination=" + cur.latitude + "," + cur.longitude);
-
-                        Linking.openURL(url).catch(() => {
-                          Linking.openURL("https://www.google.com/maps/dir/?api=1&destination=" + cur.latitude + "," + cur.longitude);
-                        });
-                      }
-                    }}
-                    activeOpacity={0.8}
+            {nearbyHotspots.length === 0 ? (
+              <View style={{ paddingVertical: 10, paddingHorizontal: 4, alignItems: 'center', justifyContent: 'center' }}>
+                <Text style={{ fontSize: 24, marginBottom: 4 }}>📍</Text>
+                <Text style={{ color: '#F8FAFC', fontSize: 13.5, fontWeight: '800', textAlign: 'center' }}>
+                  Store not open in your location
+                </Text>
+                <Text style={{ color: '#94A3B8', fontSize: 11, textAlign: 'center', marginTop: 2 }}>
+                  When a restaurant or store opens nearby, it will appear here automatically.
+                </Text>
+              </View>
+            ) : (
+              <>
+                {/* Horizontal Scrollable Online Stores Switcher (deduplicated, all categories) */}
+                {nearbyHotspots.length > 1 && (
+                  <ScrollView
+                    horizontal
+                    showsHorizontalScrollIndicator={false}
+                    contentContainerStyle={{ gap: 8, marginBottom: 12 }}
                   >
-                    <View style={{
-                      width: 50,
-                      height: 50,
-                      borderRadius: 25,
-                      backgroundColor: '#5C93FF',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      shadowColor: '#0066FF',
-                      shadowOffset: { width: 0, height: 4 },
-                      shadowOpacity: 0.4,
-                      shadowRadius: 6,
-                      elevation: 5,
-                    }}>
-                      {/* Navigation Arrow */}
-                      <Svg width="22" height="22" viewBox="0 0 24 24" fill="none">
-                        <Path d="M3 11L22 2L13 21L11 13L3 11Z" fill="#FFFFFF" />
-                      </Svg>
+                    {nearbyHotspots.map((h: any) => {
+                      const sId = String(h.id || h.restaurantId);
+                      const isCur = sId === String(selectedHotspot?.id || selectedHotspot?.restaurantId || nearbyHotspots[0]?.id);
+                      return (
+                        <TouchableOpacity
+                          key={sId}
+                          style={{
+                            backgroundColor: isCur ? '#0066FF' : '#2A3241',
+                            paddingHorizontal: 12,
+                            paddingVertical: 6,
+                            borderRadius: 12,
+                            flexDirection: 'row',
+                            alignItems: 'center',
+                            gap: 5,
+                            borderWidth: isCur ? 1 : 0,
+                            borderColor: '#60A5FA',
+                          }}
+                          onPress={() => {
+                            setSelectedHotspot(h);
+                            selectedHotspotRef.current = h;
+                            if (mapWebViewRef.current) {
+                              mapWebViewRef.current.injectJavaScript(
+                                "if (window.selectStoreHotspot) { window.selectStoreHotspot('" + sId.replace(/'/g, '') + "', false); } true;"
+                              );
+                            }
+                            if (syncDiscoveryRoutesRef.current) {
+                              syncDiscoveryRoutesRef.current(nearbyHotspots, h, null, true);
+                            }
+                          }}
+                          activeOpacity={0.8}
+                        >
+                          {Boolean(h.hasPendingOrder || h.hasGuaranteedOrder) && <Text style={{ fontSize: 11 }}>🔥</Text>}
+                          <Text style={{ color: '#FFFFFF', fontSize: 12, fontWeight: isCur ? '800' : '600' }} numberOfLines={1}>
+                            {h.name}
+                          </Text>
+                          <View style={{ backgroundColor: 'rgba(255,255,255,0.16)', paddingHorizontal: 5, paddingVertical: 1, borderRadius: 5 }}>
+                            <Text style={{ color: '#E2E8F0', fontSize: 9.5, fontWeight: '700' }}>
+                              {h.categoryName || h.category || 'Store'}
+                            </Text>
+                          </View>
+                          {h.distanceKm !== null && h.distanceKm !== undefined && (
+                            <Text style={{ color: isCur ? '#E0E7FF' : '#94A3B8', fontSize: 11 }}>
+                              • {h.distanceKm} km
+                            </Text>
+                          )}
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </ScrollView>
+                )}
+
+                {/* Selected Online Store Main Details Row */}
+                {(() => {
+                  const cur = selectedHotspot || nearbyHotspots[0];
+                  if (!cur) return null;
+                  const hasGuaranteed = Boolean(cur.hasPendingOrder || cur.hasGuaranteedOrder);
+                  const shownDistKm = (hotspotRouteInfo && String(cur.id) === String(selectedHotspot?.id || nearbyHotspots[0]?.id))
+                    ? hotspotRouteInfo.distanceKm
+                    : cur.distanceKm;
+                  const shownEta = (hotspotRouteInfo && String(cur.id) === String(selectedHotspot?.id || nearbyHotspots[0]?.id))
+                    ? hotspotRouteInfo.etaMinutes
+                    : cur.etaMinutes;
+
+                  return (
+                    <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                      {/* Left Column: Name, Category, Address, Distance */}
+                      <View style={{ flex: 1, paddingRight: 14 }}>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 6, marginBottom: 3 }}>
+                          <Text style={{ color: '#FFFFFF', fontSize: 16.5, fontWeight: '800' }} numberOfLines={1}>
+                            {cur.name}
+                          </Text>
+                          <View style={{ backgroundColor: 'rgba(56, 189, 248, 0.18)', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 6 }}>
+                            <Text style={{ color: '#38BDF8', fontSize: 9.5, fontWeight: '800' }}>
+                              {cur.categoryName || cur.category || 'Store'}
+                            </Text>
+                          </View>
+                          {hasGuaranteed && (
+                            <View style={{ backgroundColor: '#EF4444', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 6 }}>
+                              <Text style={{ color: '#FFFFFF', fontSize: 9, fontWeight: '800' }}>🔥 Pending Order</Text>
+                            </View>
+                          )}
+                        </View>
+
+                        <Text style={{ color: '#94A3B8', fontSize: 12, lineHeight: 16, marginBottom: 5 }} numberOfLines={2}>
+                          {cur.address || 'Verified Store Location'}
+                        </Text>
+
+                        <Text style={{ color: '#FFFFFF', fontSize: 13.5, fontWeight: '800' }}>
+                          {shownDistKm !== null && shownDistKm !== undefined ? `${shownDistKm} km` : 'Distance synced on GPS'}
+                          {shownEta ? ` • ~${shownEta} mins` : ''}
+                        </Text>
+                      </View>
+
+                      {/* Right Column: Circular Blue Navigation Action Button */}
+                      <TouchableOpacity
+                        style={{ alignItems: 'center', justifyContent: 'center' }}
+                        onPress={() => {
+                          if (cur.latitude && cur.longitude) {
+                            const url = Platform.select({
+                              ios: "maps:0,0?q=" + cur.latitude + "," + cur.longitude + "(" + encodeURIComponent(cur.name) + ")",
+                              android: "google.navigation:q=" + cur.latitude + "," + cur.longitude,
+                            }) || ("https://www.openstreetmap.org/directions?to=" + cur.latitude + "%2C" + cur.longitude);
+
+                            Linking.openURL(url).catch(() => {
+                              Linking.openURL("https://www.openstreetmap.org/directions?to=" + cur.latitude + "%2C" + cur.longitude);
+                            });
+                          }
+                        }}
+                        activeOpacity={0.8}
+                      >
+                        <View style={{
+                          width: 48,
+                          height: 48,
+                          borderRadius: 24,
+                          backgroundColor: '#5C93FF',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          shadowColor: '#0066FF',
+                          shadowOffset: { width: 0, height: 4 },
+                          shadowOpacity: 0.4,
+                          shadowRadius: 6,
+                          elevation: 5,
+                        }}>
+                          <Svg width="21" height="21" viewBox="0 0 24 24" fill="none">
+                            <Path d="M3 11L22 2L13 21L11 13L3 11Z" fill="#FFFFFF" />
+                          </Svg>
+                        </View>
+                        <Text style={{ color: '#5C93FF', fontSize: 11, fontWeight: '700', marginTop: 4 }}>
+                          {t('map')}
+                        </Text>
+                      </TouchableOpacity>
                     </View>
-                    <Text style={{ color: '#5C93FF', fontSize: 11, fontWeight: '700', marginTop: 4 }}>
-                      {t('map')}
-                    </Text>
-                  </TouchableOpacity>
-                </View>
-              );
-            })()}
+                  );
+                })()}
+              </>
+            )}
           </View>
         )}
 
-        {/* Floating Real Geolocation Recenter Button (Pinned to Bottom-Right of Map) */}
+        {/* Floating Real Geolocation Recenter Button (Pinned to Bottom-Right of Map — resumes auto-follow) */}
         <TouchableOpacity
           style={[
             styles.floatingGpsBtn,
             {
-              bottom: (isOnline && activeDeliveries.length === 0 && !incomingRequest && nearbyHotspots.length > 0) ? 220 : 36,
-              backgroundColor: isDarkMode ? '#27272A' : '#FFFFFF',
-              borderColor: isDarkMode ? 'rgba(255,255,255,0.15)' : '#CBD5E1'
+              bottom: (activeDeliveries.length === 0 && !incomingRequest) ? (nearbyHotspots.length > 0 ? 225 : 135) : 36,
+              backgroundColor: isAutoFollowPaused ? '#0066FF' : (isDarkMode ? '#27272A' : '#FFFFFF'),
+              borderColor: isAutoFollowPaused ? '#60A5FA' : (isDarkMode ? 'rgba(255,255,255,0.15)' : '#CBD5E1')
             }
           ]}
           onPress={recenterMap}
           activeOpacity={0.8}
         >
           <Svg width="22" height="22" viewBox="0 0 24 24" fill="none">
-            <Circle cx="12" cy="12" r="7" stroke={isDarkMode ? '#FFFFFF' : '#0F172A'} strokeWidth="2.2" />
-            <Line x1="12" y1="1" x2="12" y2="4.5" stroke={isDarkMode ? '#FFFFFF' : '#0F172A'} strokeWidth="2.2" strokeLinecap="round" />
-            <Line x1="12" y1="19.5" x2="12" y2="23" stroke={isDarkMode ? '#FFFFFF' : '#0F172A'} strokeWidth="2.2" strokeLinecap="round" />
-            <Line x1="1" y1="12" x2="4.5" y2="12" stroke={isDarkMode ? '#FFFFFF' : '#0F172A'} strokeWidth="2.2" strokeLinecap="round" />
-            <Line x1="19.5" y1="12" x2="23" y2="12" stroke={isDarkMode ? '#FFFFFF' : '#0F172A'} strokeWidth="2.2" strokeLinecap="round" />
-            <Circle cx="12" cy="12" r="3.2" fill={isDarkMode ? '#FFFFFF' : '#0F172A'} />
+            <Circle cx="12" cy="12" r="7" stroke={isAutoFollowPaused ? '#FFFFFF' : (isDarkMode ? '#FFFFFF' : '#0F172A')} strokeWidth="2.2" />
+            <Line x1="12" y1="1" x2="12" y2="4.5" stroke={isAutoFollowPaused ? '#FFFFFF' : (isDarkMode ? '#FFFFFF' : '#0F172A')} strokeWidth="2.2" strokeLinecap="round" />
+            <Line x1="12" y1="19.5" x2="12" y2="23" stroke={isAutoFollowPaused ? '#FFFFFF' : (isDarkMode ? '#FFFFFF' : '#0F172A')} strokeWidth="2.2" strokeLinecap="round" />
+            <Line x1="1" y1="12" x2="4.5" y2="12" stroke={isAutoFollowPaused ? '#FFFFFF' : (isDarkMode ? '#FFFFFF' : '#0F172A')} strokeWidth="2.2" strokeLinecap="round" />
+            <Line x1="19.5" y1="12" x2="23" y2="12" stroke={isAutoFollowPaused ? '#FFFFFF' : (isDarkMode ? '#FFFFFF' : '#0F172A')} strokeWidth="2.2" strokeLinecap="round" />
+            <Circle cx="12" cy="12" r="3.2" fill={isAutoFollowPaused ? '#FFFFFF' : (isDarkMode ? '#FFFFFF' : '#0F172A')} />
           </Svg>
         </TouchableOpacity>
-
-        {/* Floating Outside Service Zone Alert Banner with GO TO ZONE Navigation CTA (Visible ONLY when Online + Outside Zone) */}
-        {isOnline && isOutsideZone && (
-          <View style={styles.outsideZoneBanner}>
-            <View style={{ flexDirection: 'row', alignItems: 'center', flex: 1, marginRight: 10 }}>
-              <Text style={{ fontSize: 18, marginRight: 8 }}>⚠️</Text>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.outsideZoneTitle} numberOfLines={1}>
-                  Outside Zone: {riderZone} ({zoneDistanceKm} km away)
-                </Text>
-                <Text style={styles.outsideZoneSubtitle}>
-                  Move into zone to get maximum orders
-                </Text>
-              </View>
-            </View>
-            <TouchableOpacity
-              style={styles.goToZoneBtn}
-              onPress={openZoneNavigation}
-              activeOpacity={0.8}
-            >
-              <Text style={styles.goToZoneBtnText}>GO TO ZONE</Text>
-            </TouchableOpacity>
-          </View>
-        )}
       </View>
     );
   };
@@ -5303,7 +5150,9 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
         </View>
 
         {/* ── Orders List ── */}
-        {displayedOrders.length === 0 ? (
+        {loadingDeliveries && allDeliveries.length === 0 ? (
+          <OrderHistorySkeletonLoader isDark={isDarkMode} message="Syncing delivery history..." />
+        ) : displayedOrders.length === 0 ? (
           <View style={[styles.emptyCard, { backgroundColor: isDarkMode ? '#1E293B' : '#FFFFFF', borderColor: isDarkMode ? '#334155' : '#E2E8F0', borderWidth: 1, marginTop: 10 }]}>
             <Text style={{ fontSize: 38, marginBottom: 8 }}>
               {orderFilter === 'active' ? '🛵' : orderFilter === 'cancelled' ? '🚫' : '🗓️'}
@@ -5477,7 +5326,7 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
                       : isOutForDelivery
                       ? 'Deliver Order ➔'
                       : isAtStore
-                      ? 'Confirm Pickup ➔'
+                      ? 'Go to Supplier ➔'
                       : 'Go to Pickup ➔';
                     return (
                       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
@@ -5930,23 +5779,21 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
 
                 <View style={[styles.rdDivider, { backgroundColor: isDarkMode ? '#334155' : '#E2E8F0' }]} />
 
-                {/* Area / Zone with Change action */}
+                {/* Open Location Model Status */}
                 <TouchableOpacity
                   style={[styles.rdCardRowInline, { justifyContent: 'space-between' }]}
                   onPress={() => {
-                    if (navigation && navigation.navigate) {
-                      navigation.navigate('RiderZoneSelection', {
-                        currentZone: riderZone,
-                        onZoneSelected: handleZoneSelectionComplete,
-                      });
-                    }
+                    Alert.alert(
+                      '🌐 Open Location Mode',
+                      `Current City: ${riderCity || currentAddress || 'GPS Active'}\n\nZone restrictions are completely removed! You can go Online and accept nearby orders from any location.`
+                    );
                   }}
                   activeOpacity={0.7}
                 >
                   <Text style={[styles.rdLabelText, { color: isDarkMode ? '#94A3B8' : '#64748B' }]}>
-                    Your Zone: <Text style={[styles.rdValueText, { color: '#0066FF', fontWeight: '700' }]}>{riderZone}</Text>
+                    Service Area: <Text style={[styles.rdValueText, { color: '#16A34A', fontWeight: '700' }]}>🌐 Open Location (All Areas)</Text>
                   </Text>
-                  <Text style={{ fontSize: 12, color: '#0066FF', fontWeight: '600' }}>Change 📍</Text>
+                  <Text style={{ fontSize: 12, color: '#0066FF', fontWeight: '600' }}>Active ✓</Text>
                 </TouchableOpacity>
 
                 <View style={[styles.rdDivider, { backgroundColor: isDarkMode ? '#334155' : '#E2E8F0' }]} />
@@ -6127,21 +5974,19 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
               <Text style={[styles.zpActionCardText, { color: isDarkMode ? '#F8FAFC' : '#0F172A' }]}>{t('tripsHistory')}</Text>
             </TouchableOpacity>
 
-            {/* 2. Service Zone */}
+            {/* 2. Open Location Status */}
             <TouchableOpacity
               style={[styles.zpActionCard, { backgroundColor: isDarkMode ? '#1E293B' : '#FFFFFF', borderColor: isDarkMode ? '#33333A' : '#E2E8F0' }]}
               onPress={() => {
-                if (navigation && navigation.navigate) {
-                  navigation.navigate('RiderZoneSelection', {
-                    currentZone: riderZone,
-                    onZoneSelected: handleZoneSelectionComplete,
-                  });
-                }
+                Alert.alert(
+                  '🌐 Open Location Mode',
+                  `Active City: ${riderCity || currentAddress || 'GPS Live'}\n\nZone limits removed! You can work & go Online anywhere.`
+                );
               }}
               activeOpacity={0.7}
             >
-              <Text style={styles.zpActionBigEmoji}>📍</Text>
-              <Text style={[styles.zpActionCardText, { color: isDarkMode ? '#F8FAFC' : '#0F172A' }]}>Your Zone</Text>
+              <Text style={styles.zpActionBigEmoji}>🌐</Text>
+              <Text style={[styles.zpActionCardText, { color: isDarkMode ? '#F8FAFC' : '#0F172A' }]}>Open Location</Text>
             </TouchableOpacity>
 
             {/* 3. Partner ID Card */}
@@ -6253,27 +6098,23 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
               <TouchableOpacity
                 style={styles.zpGroupRow}
                 onPress={() => {
-                  if (navigation && navigation.navigate) {
-                    navigation.navigate('RiderZoneSelection', {
-                      currentZone: riderZone,
-                      onZoneSelected: handleZoneSelectionComplete,
-                    });
-                  } else {
-                    Alert.alert('Work Area', `Current Zone: ${riderZone}\nTap to select a new 15 KM eligible service zone.`);
-                  }
+                  Alert.alert(
+                    '🌐 Open Location Mode',
+                    `Current City: ${riderCity || currentAddress || 'GPS Live'}\n\nZone restrictions removed! You receive nearby orders based on your live GPS.`
+                  );
                 }}
                 activeOpacity={0.7}
               >
                 <View style={styles.zpRowLeft}>
-                  <Text style={styles.zpRowIcon}>⛳</Text>
+                  <Text style={styles.zpRowIcon}>🌐</Text>
                   <View>
                     <Text style={[styles.zpRowTitle, { color: isDarkMode ? '#F8FAFC' : '#0F172A' }]}>{t('workArea')}</Text>
-                    <Text style={{ fontSize: 11, color: isDarkMode ? '#94A3B8' : '#64748B', marginTop: 1 }}>{riderZone} • Change Zone</Text>
+                    <Text style={{ fontSize: 11, color: '#16A34A', marginTop: 1, fontWeight: '600' }}>Open Location • Work Anywhere</Text>
                   </View>
                 </View>
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                  <View style={[styles.zpNewBadge, { backgroundColor: '#0066FF' }]}>
-                    <Text style={styles.zpNewBadgeText}>GPS 15KM</Text>
+                  <View style={[styles.zpNewBadge, { backgroundColor: '#16A34A' }]}>
+                    <Text style={styles.zpNewBadgeText}>OPEN GPS</Text>
                   </View>
                   <Text style={[styles.zpRowChevron, { color: isDarkMode ? '#94A3B8' : '#64748B' }]}>›</Text>
                 </View>
@@ -6305,10 +6146,14 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
                   text: t('logOut'),
                   style: 'destructive',
                   onPress: async () => {
+                    const targetId = riderId || user?._id || user?.id;
+                    if (socket && socket.connected && targetId) {
+                      socket.emit('user_logout', targetId);
+                    }
                     if (logout) {
                       await logout('DELIVERY');
                     } else {
-                      await AsyncStorage.multiRemove(['deliveryToken', 'deliveryUser']).catch(() => {});
+                      await AsyncStorage.multiRemove(['deliveryToken', 'deliveryRefreshToken', 'deliveryUser', 'delivery_is_online']).catch(() => {});
                       navigation.reset({ index: 0, routes: [{ name: 'RoleSelection' }] });
                     }
                   },
@@ -6342,10 +6187,32 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
         }
       ]}>
         <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+          {/* UI Back Button directly navigating to RoleSelection per Specification Point 1 */}
+          <TouchableOpacity
+            onPress={() => navigation.navigate('RoleSelection')}
+            activeOpacity={0.7}
+            hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+            style={{
+              width: 36,
+              height: 36,
+              borderRadius: 18,
+              backgroundColor: isDarkMode ? '#1E293B' : '#F1F5F9',
+              alignItems: 'center',
+              justifyContent: 'center',
+              marginRight: 10,
+              borderWidth: 1,
+              borderColor: isDarkMode ? '#334155' : '#CBD5E1',
+            }}
+          >
+            <Text style={{ fontSize: 22, color: isDarkMode ? '#F8FAFC' : '#0F172A', fontWeight: 'bold', marginTop: -2 }}>‹</Text>
+          </TouchableOpacity>
+
           {/* Online / Offline Capsule Toggle Switch (Matching Screenshot) */}
           <TouchableOpacity
             onPress={toggleOnlineStatus}
-            activeOpacity={0.85}
+            activeOpacity={0.7}
+            delayPressIn={0}
+            hitSlop={{ top: 14, bottom: 14, left: 14, right: 18 }}
             style={[
               styles.headerSwitchPill,
               { backgroundColor: isOnline ? '#16A34A' : isDarkMode ? '#334155' : '#E2E8F0' }
@@ -6703,7 +6570,7 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
           : stageInfo.isPickedUp
           ? 'Heading to Customer Drop Location'
           : stageInfo.isAtStore
-          ? 'At Restaurant • Confirm Pickup'
+          ? 'At Restaurant • Go to Supplier'
           : 'Go to Restaurant';
         return (
           <TouchableOpacity
@@ -6787,7 +6654,7 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
 
       {/* ── FULL SCREEN PARTNER DASHBOARD (OPENED FROM MAP ARROW - CLEAN WHITE THEME) ── */}
       <Modal
-        visible={showBannersModal && !hasActiveTrip}
+        visible={showBannersModal}
         animationType="slide"
         transparent={false}
         onRequestClose={() => setShowBannersModal(false)}
@@ -6800,21 +6667,43 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
 
           {/* 1. TOP HEADER (DYNAMIC THEME) */}
           <View style={[styles.whiteTopHeader, isDarkMode && { backgroundColor: '#0B0F19', borderBottomColor: '#1E293B' }]}>
-            {/* Left: Online / Offline Capsule Toggle */}
-            <TouchableOpacity
-              onPress={toggleOnlineStatus}
-              activeOpacity={0.85}
-              style={[
-                styles.headerSwitchPill,
-                { backgroundColor: isOnline ? '#16A34A' : isDarkMode ? '#334155' : '#E2E8F0' }
-              ]}
-            >
-              {!isOnline && <View style={[styles.switchDotWhite, { backgroundColor: isDarkMode ? '#94A3B8' : '#64748B' }]} />}
-              <Text style={[styles.headerSwitchPillText, !isOnline && { color: isDarkMode ? '#F8FAFC' : '#0F172A' }]}>
-                {isOnline ? t('online') : t('offline')}
-              </Text>
-              {isOnline && <View style={styles.switchDotWhite} />}
-            </TouchableOpacity>
+            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+              <TouchableOpacity
+                onPress={() => navigation.navigate('RoleSelection')}
+                activeOpacity={0.7}
+                hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+                style={{
+                  width: 36,
+                  height: 36,
+                  borderRadius: 18,
+                  backgroundColor: isDarkMode ? '#1E293B' : '#F1F5F9',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  marginRight: 10,
+                  borderWidth: 1,
+                  borderColor: isDarkMode ? '#334155' : '#CBD5E1',
+                }}
+              >
+                <Text style={{ fontSize: 22, color: isDarkMode ? '#F8FAFC' : '#0F172A', fontWeight: 'bold', marginTop: -2 }}>‹</Text>
+              </TouchableOpacity>
+              {/* Left: Online / Offline Capsule Toggle */}
+              <TouchableOpacity
+                onPress={toggleOnlineStatus}
+                activeOpacity={0.7}
+                delayPressIn={0}
+                hitSlop={{ top: 14, bottom: 14, left: 14, right: 18 }}
+                style={[
+                  styles.headerSwitchPill,
+                  { backgroundColor: isOnline ? '#16A34A' : isDarkMode ? '#334155' : '#E2E8F0' }
+                ]}
+              >
+                {!isOnline && <View style={[styles.switchDotWhite, { backgroundColor: isDarkMode ? '#94A3B8' : '#64748B' }]} />}
+                <Text style={[styles.headerSwitchPillText, !isOnline && { color: isDarkMode ? '#F8FAFC' : '#0F172A' }]}>
+                  {isOnline ? t('online') : t('offline')}
+                </Text>
+                {isOnline && <View style={styles.switchDotWhite} />}
+              </TouchableOpacity>
+            </View>
 
             {/* Right: SOS, Notifications, Help, Avatar */}
             <View style={styles.headerRightRow}>
@@ -6909,17 +6798,8 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
             showsVerticalScrollIndicator={false}
             contentContainerStyle={{ paddingHorizontal: 14, paddingBottom: 60 }}
           >
-            {/* Admin Uploaded Banner Carousel */}
-            <RoleBannerCarousel
-              target="RIDER"
-              containerMarginHorizontal={0}
-              aspectRatio={2.5}
-              borderRadius={16}
-              autoSlideInterval={6000}
-            />
-
-            {/* CARD: Today's Progress (Dynamic Language & Theme) */}
-            <View style={[styles.whiteProgressCard, isDarkMode && { backgroundColor: '#1E293B', borderColor: '#334155' }]}>
+            {/* CARD: Today's Progress (Dynamic Language & Theme - Always visible at top of dashboard) */}
+            <View style={[styles.whiteProgressCard, isDarkMode && { backgroundColor: '#1E293B', borderColor: '#334155' }, { marginBottom: 14 }]}>
               <View style={[styles.whiteProgressHeaderRow, isDarkMode && { borderBottomColor: '#334155' }]}>
                 <Text style={{ fontSize: 20, marginRight: 8 }}>📅</Text>
                 <Text style={[styles.whiteProgressTitle, isDarkMode && { color: '#F8FAFC' }]}>{t('todayProgress')}</Text>
@@ -6964,24 +6844,232 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
                   <TouchableOpacity
                     style={[styles.whiteStatBox, isDarkMode && { backgroundColor: '#0F172A', borderColor: '#334155' }]}
                     onPress={() => {
-                      setShowBannersModal(false);
-                      if (navigation && navigation.navigate) {
-                        navigation.navigate('RiderZoneSelection', {
-                          currentZone: riderZone,
-                          onZoneSelected: handleZoneSelectionComplete,
-                        });
-                      }
+                      Alert.alert('🌐 Open Location Active', `City: ${riderCity || currentAddress || 'Live GPS'}\n\nZone limits removed! Go Online anywhere.`);
                     }}
                     activeOpacity={0.7}
                   >
                     <Text style={[styles.whiteStatVal, isDarkMode && { color: '#F8FAFC' }]} numberOfLines={1}>
-                      {riderZone || 'Your Zone'}
+                      🌐 Open GPS
                     </Text>
-                    <Text style={[styles.whiteStatLabel, isDarkMode && { color: '#94A3B8' }]}>Your Zone  →</Text>
+                    <Text style={[styles.whiteStatLabel, isDarkMode && { color: '#94A3B8' }]}>All Areas Active</Text>
                   </TouchableOpacity>
                 </View>
               </View>
             </View>
+
+            {/* ── PROMINENT ACTIVE RIDE CARD INSIDE DASHBOARD (Visible at the bottom of the dashboard per user requirement!) ── */}
+            {activeDeliveries.length > 0 && (() => {
+              const del = activeDeliveries[0];
+              const { isBeforePickup, isAtStore, isPickedUp, isAtCustomer } = getDeliveryStageInfo(del);
+              const stageTerm = getCategoryOrderTerminology(del);
+              const delStoreName = del?.restaurantName || del?.supplierBusinessName || del?.storeName || del?.partnerName || stageTerm.storeNameType;
+              const delStorePhone = del?.restaurantPhone || del?.supplierPhone || del?.partnerPhone || '';
+              const isFriend = Boolean(del?.isOrderingForSomeoneElse || del?.orderType === 'SOMEONE_ELSE');
+              const delCustName = isFriend && del?.recipientName ? `${del.recipientName} (Friend)` : (del?.customerName || del?.customer?.name || del?.userName || 'Customer');
+              const delCustPhone = isFriend && del?.recipientPhone ? del.recipientPhone : (del?.customerPhone || del?.customer?.phone || del?.customer?.phoneNumber || '');
+              const delId = (del?.bookingId || del?.rideId || del?._id || '').toString();
+              const delPrice = del?.price || del?.totalAmount || del?.estimatedEarnings || del?.riderEarnedAmount || '0';
+              const itemsList = del?.items || del?.orderItems || [];
+              const itemsText = Array.isArray(itemsList) && itemsList.length > 0
+                ? itemsList.map((it: any) => `${it.quantity || 1}x ${it.name || it.title || 'Item'}`).join(', ')
+                : '';
+              const delPin = del?.deliveryPin || del?.deliveryOtp || del?.otp || '';
+
+              const badgeColor = isPickedUp ? '#10B981' : isAtStore ? '#F59E0B' : '#0066FF';
+              const badgeBg = isPickedUp ? 'rgba(16, 185, 129, 0.15)' : isAtStore ? 'rgba(245, 158, 11, 0.15)' : 'rgba(0, 102, 255, 0.15)';
+              const badgeLabel = isAtCustomer
+                ? '📍 AT CUSTOMER LOCATION • DROP OFF'
+                : isPickedUp
+                ? '📦 OUT FOR DELIVERY • TO CUSTOMER'
+                : isAtStore
+                ? `🏪 AT ${stageTerm.storeNameType.toUpperCase()} • PICK UP`
+                : `🛵 GO TO ${stageTerm.storeNameType.toUpperCase()}`;
+
+              return (
+                <View
+                  style={{
+                    backgroundColor: isDarkMode ? '#1E293B' : '#FFFFFF',
+                    borderRadius: 18,
+                    padding: 16,
+                    borderWidth: 2,
+                    borderColor: badgeColor,
+                    marginBottom: 14,
+                    shadowColor: badgeColor,
+                    shadowOffset: { width: 0, height: 4 },
+                    shadowOpacity: 0.25,
+                    shadowRadius: 10,
+                    elevation: 6,
+                  }}
+                >
+                  {/* Status Banner Header */}
+                  <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+                    <View style={{
+                      backgroundColor: badgeBg,
+                      borderColor: badgeColor,
+                      borderWidth: 1.2,
+                      paddingHorizontal: 10,
+                      paddingVertical: 5,
+                      borderRadius: 12,
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      gap: 6,
+                    }}>
+                      <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: badgeColor }} />
+                      <Text style={{ color: badgeColor, fontWeight: '900', fontSize: 11.5, letterSpacing: 0.4 }}>
+                        {badgeLabel}
+                      </Text>
+                    </View>
+                    <View style={{ alignItems: 'flex-end' }}>
+                      <Text style={{ fontSize: 16, fontWeight: '900', color: '#16A34A' }}>
+                        ₹{delPrice}
+                      </Text>
+                      <Text style={{ fontSize: 11, color: isDarkMode ? '#94A3B8' : '#64748B', fontWeight: '700' }}>
+                        #{delId ? delId.slice(-6).toUpperCase() : 'ORDER'}
+                      </Text>
+                    </View>
+                  </View>
+
+                  {/* Store & Customer Route Details */}
+                  <View style={{
+                    backgroundColor: isDarkMode ? '#0F172A' : '#F8FAFC',
+                    borderRadius: 14,
+                    padding: 12,
+                    borderWidth: 1,
+                    borderColor: isDarkMode ? '#334155' : '#E2E8F0',
+                    marginBottom: 12,
+                    gap: 10,
+                  }}>
+                    {/* Store Pickup Location */}
+                    <View style={{ flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between' }}>
+                      <View style={{ flex: 1, marginRight: 8 }}>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 2 }}>
+                          <Text style={{ fontSize: 15 }}>{stageTerm.icon || '🏪'}</Text>
+                          <Text style={{ fontSize: 14, fontWeight: '800', color: isDarkMode ? '#F8FAFC' : '#0F172A' }} numberOfLines={1}>
+                            {delStoreName}
+                          </Text>
+                        </View>
+                        <Text style={{ fontSize: 12, color: isDarkMode ? '#94A3B8' : '#64748B', paddingLeft: 21 }} numberOfLines={2}>
+                          {del?.pickupAddress || del?.supplierBusinessAddress || del?.restaurantAddress || 'Store Pickup Location'}
+                        </Text>
+                      </View>
+                      {Boolean(delStorePhone) && (
+                        <TouchableOpacity
+                          style={{
+                            backgroundColor: '#10B981',
+                            paddingHorizontal: 10,
+                            paddingVertical: 6,
+                            borderRadius: 10,
+                            flexDirection: 'row',
+                            alignItems: 'center',
+                            gap: 4,
+                          }}
+                          onPress={() => Linking.openURL(`tel:${delStorePhone}`).catch(() => {})}
+                          activeOpacity={0.8}
+                        >
+                          <Text style={{ color: '#FFFFFF', fontSize: 11, fontWeight: '800' }}>📞 Store</Text>
+                        </TouchableOpacity>
+                      )}
+                    </View>
+
+                    {/* Divider Line */}
+                    <View style={{ height: 1, backgroundColor: isDarkMode ? '#1E293B' : '#E2E8F0', marginVertical: 2 }} />
+
+                    {/* Customer Drop Location */}
+                    <View style={{ flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between' }}>
+                      <View style={{ flex: 1, marginRight: 8 }}>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 2 }}>
+                          <Text style={{ fontSize: 15 }}>👤</Text>
+                          <Text style={{ fontSize: 14, fontWeight: '800', color: isDarkMode ? '#F8FAFC' : '#0F172A' }} numberOfLines={1}>
+                            {delCustName}
+                          </Text>
+                        </View>
+                        <Text style={{ fontSize: 12, color: isDarkMode ? '#94A3B8' : '#64748B', paddingLeft: 21 }} numberOfLines={2}>
+                          {del?.deliveryAddress || del?.destinationAddress || del?.customerAddress || 'Delivery Location'}
+                        </Text>
+                      </View>
+                      {Boolean(delCustPhone) && (
+                        <TouchableOpacity
+                          style={{
+                            backgroundColor: '#0066FF',
+                            paddingHorizontal: 10,
+                            paddingVertical: 6,
+                            borderRadius: 10,
+                            flexDirection: 'row',
+                            alignItems: 'center',
+                            gap: 4,
+                          }}
+                          onPress={() => Linking.openURL(`tel:${delCustPhone}`).catch(() => {})}
+                          activeOpacity={0.8}
+                        >
+                          <Text style={{ color: '#FFFFFF', fontSize: 11, fontWeight: '800' }}>📞 Client</Text>
+                        </TouchableOpacity>
+                      )}
+                    </View>
+                  </View>
+
+                  {/* Items Summary (if any) */}
+                  {Boolean(itemsText) && (
+                    <View style={{
+                      backgroundColor: isDarkMode ? '#0F172A' : '#EFF6FF',
+                      borderRadius: 10,
+                      padding: 10,
+                      marginBottom: 12,
+                      borderWidth: 1,
+                      borderColor: isDarkMode ? '#1E293B' : '#DBEAFE',
+                    }}>
+                      <Text style={{ fontSize: 11, fontWeight: '800', color: isDarkMode ? '#94A3B8' : '#1D4ED8', marginBottom: 2 }}>
+                        ITEMS TO COLLECT:
+                      </Text>
+                      <Text style={{ fontSize: 12.5, fontWeight: '600', color: isDarkMode ? '#F8FAFC' : '#1E293B' }} numberOfLines={2}>
+                        📦 {itemsText}
+                      </Text>
+                    </View>
+                  )}
+
+                  {/* Big Navigation Button */}
+                  <View style={{ flexDirection: 'row', gap: 8 }}>
+                    <TouchableOpacity
+                      style={{
+                        flex: 1,
+                        backgroundColor: '#0066FF',
+                        paddingVertical: 12,
+                        borderRadius: 12,
+                        flexDirection: 'row',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        gap: 6,
+                        shadowColor: '#0066FF',
+                        shadowOffset: { width: 0, height: 3 },
+                        shadowOpacity: 0.35,
+                        shadowRadius: 5,
+                        elevation: 4,
+                      }}
+                      onPress={() => {
+                        setShowBannersModal(false);
+                        navigation.navigate('LiveTracking', { ride: del, isRider: true });
+                      }}
+                      activeOpacity={0.85}
+                    >
+                      <Text style={{ fontSize: 16 }}>🗺️</Text>
+                      <Text style={{ color: '#FFFFFF', fontSize: 13.5, fontWeight: '900' }}>
+                        LIVE MAP & NAVIGATION
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              );
+            })()}
+
+            {/* Admin Uploaded Banner Carousel - Hidden when active ride is displayed */}
+            {activeDeliveries.length === 0 && (
+              <RoleBannerCarousel
+                target="RIDER"
+                containerMarginHorizontal={0}
+                aspectRatio={2.5}
+                borderRadius={16}
+                autoSlideInterval={6000}
+              />
+            )}
           </ScrollView>
 
           {/* ── 4-TAB BOTTOM NAVIGATION INSIDE DASHBOARD (POCKET, ORDERS, PROFILE VISIBLE ON SLIDE UP) ── */}
@@ -7096,8 +7184,8 @@ const DeliveryRiderHomeScreen = ({ navigation, route }: any) => {
                   <Text style={styles.idCardMetaVal}>{vehicleType} • {riderVehicleNumber}</Text>
                 </View>
                 <View style={styles.idCardMetaRow}>
-                  <Text style={styles.idCardMetaLabel}>City / Zone:</Text>
-                  <Text style={styles.idCardMetaVal}>{riderCity} • {riderZone}</Text>
+                  <Text style={styles.idCardMetaLabel}>Service Area:</Text>
+                  <Text style={styles.idCardMetaVal}>{riderCity ? `${riderCity} • All Locations` : 'Open Location Delivery'}</Text>
                 </View>
                 <View style={styles.idCardMetaRow}>
                   <Text style={styles.idCardMetaLabel}>Emergency Contact:</Text>
@@ -10392,66 +10480,6 @@ const styles = StyleSheet.create({
   pocketOpenCalendarBtnText: {
     color: '#FFFFFF',
     fontSize: 13,
-    fontWeight: '800',
-  },
-
-  // ── Outside Zone Alert Floating Banner ──
-  outsideZoneBanner: {
-    position: 'absolute',
-    top: 58,
-    left: 14,
-    right: 14,
-    backgroundColor: '#7C2D12',
-    borderWidth: 1.5,
-    borderColor: '#EA580C',
-    borderRadius: 14,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    zIndex: 99,
-    elevation: 8,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.3,
-    shadowRadius: 5,
-  },
-  outsideZoneTitle: {
-    color: '#FFFFFF',
-    fontSize: 13,
-    fontWeight: '800',
-  },
-  outsideZoneSubtitle: {
-    color: '#FED7AA',
-    fontSize: 11,
-    fontWeight: '600',
-    marginTop: 1,
-  },
-  outsideZoneBtn: {
-    backgroundColor: '#EA580C',
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#FDBA74',
-  },
-  outsideZoneBtnText: {
-    color: '#FFFFFF',
-    fontSize: 11.5,
-    fontWeight: '800',
-  },
-  goToZoneBtn: {
-    backgroundColor: '#0066FF',
-    paddingHorizontal: 11,
-    paddingVertical: 6,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#60A5FA',
-  },
-  goToZoneBtnText: {
-    color: '#FFFFFF',
-    fontSize: 11.5,
     fontWeight: '800',
   },
 });

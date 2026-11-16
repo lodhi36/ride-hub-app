@@ -44,6 +44,9 @@ const EarningsScreen = ({ navigation }: any) => {
   const [totalEarnings, setTotalEarnings] = useState<number>(0);
   const [totalWithdrawn, setTotalWithdrawn] = useState<number>(0);
   const [pocketBalance, setPocketBalance] = useState<number>(0);
+  // MODULE 07: ₹100 Minimum Reserved Balance Policy
+  const MIN_RESERVED_BALANCE = 100;
+  const withdrawableAmount = Math.max(0, pocketBalance - MIN_RESERVED_BALANCE);
   const [completedServicesCount, setCompletedServicesCount] = useState<number>(0);
   const [averageEarning, setAverageEarning] = useState<number>(0);
   const [earningsList, setEarningsList] = useState<any[]>([]);
@@ -217,6 +220,83 @@ const EarningsScreen = ({ navigation }: any) => {
 
   const filteredOrdersCount = filteredEarningsList.length;
 
+  const periodCalculations = useMemo(() => {
+    const now = new Date();
+    const todayStr = now.toISOString().split('T')[0];
+    const sevenDaysAgo = new Date();
+    sevenDaysAgo.setDate(now.getDate() - 6);
+    sevenDaysAgo.setHours(0, 0, 0, 0);
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+
+    let dailySum = 0;
+    let dailyOrders = 0;
+    let weeklySum = 0;
+    let weeklyOrders = 0;
+    let monthlySum = 0;
+    let monthlyOrders = 0;
+
+    earningsList.forEach((e: any) => {
+      const eDate = e.date || e.createdAt;
+      if (!eDate) return;
+      const d = new Date(eDate);
+      const amt = Number(e.netEarning || e.price || e.amount || 0);
+
+      const dStr = d.toISOString().split('T')[0];
+      if (dStr === todayStr) {
+        dailySum += amt;
+        dailyOrders += 1;
+      }
+      if (d >= sevenDaysAgo && d <= now) {
+        weeklySum += amt;
+        weeklyOrders += 1;
+      }
+      if (d >= monthStart && d <= now) {
+        monthlySum += amt;
+        monthlyOrders += 1;
+      }
+    });
+
+    if (dailySum === 0 && todaysEarnings > 0) {
+      dailySum = todaysEarnings;
+    }
+
+    return {
+      daily: { sum: dailySum, count: dailyOrders },
+      weekly: { sum: weeklySum, count: weeklyOrders },
+      monthly: { sum: monthlySum, count: monthlyOrders },
+    };
+  }, [earningsList, todaysEarnings]);
+
+  const dynamicPeriodEarnings = useMemo(() => {
+    if (selectedDate && selectedDate !== 'All Time') {
+      return {
+        label: isHindi ? `चयनित तारीख (${selectedDate}) कमाई` : `Selected Date (${selectedDate}) Earnings`,
+        amount: dateTotalEarnings,
+        count: dateTotalOrders,
+      };
+    }
+    if (filterPeriod === 'weekly') {
+      return {
+        label: isHindi ? 'इस सप्ताह की कमाई' : "This Week's Earnings",
+        amount: periodCalculations.weekly.sum,
+        count: periodCalculations.weekly.count,
+      };
+    }
+    if (filterPeriod === 'monthly') {
+      return {
+        label: isHindi ? 'इस महीने की कमाई' : "This Month's Earnings",
+        amount: periodCalculations.monthly.sum,
+        count: periodCalculations.monthly.count,
+      };
+    }
+    return {
+      label: isHindi ? 'आज की कमाई (दैनिक)' : "Today's Earnings (Daily)",
+      amount: periodCalculations.daily.sum || todaysEarnings,
+      count: periodCalculations.daily.count,
+    };
+  }, [selectedDate, filterPeriod, dateTotalEarnings, dateTotalOrders, periodCalculations, todaysEarnings, isHindi]);
+
+
 
   // UPI & Withdrawal Modal States
   const [savedUpiId, setSavedUpiId] = useState<string>('');
@@ -313,8 +393,18 @@ const EarningsScreen = ({ navigation }: any) => {
       Alert.alert('Invalid Amount', 'Minimum withdrawal amount is â‚¹1.');
       return;
     }
-    if (amt > pocketBalance) {
-      Alert.alert('Insufficient Balance', `You can withdraw up to â‚¹${pocketBalance} only.`);
+    if (pocketBalance <= MIN_RESERVED_BALANCE) {
+      Alert.alert(
+        'न्यूनतम बैलेंस आवश्यक',
+        `न्यूनतम सुरक्षित बैलेंस ₹${MIN_RESERVED_BALANCE} होना आवश्यक है। आपका कुल बैलेंस ₹${pocketBalance} है, इसलिए वर्तमान निकासी योग्य राशि ₹0 है।`
+      );
+      return;
+    }
+    if (amt > withdrawableAmount) {
+      Alert.alert(
+        'निकासी सीमा',
+        `आप अधिकतम ₹${withdrawableAmount} निकाल सकते हैं (₹${MIN_RESERVED_BALANCE} न्यूनतम बैलेंस सुरक्षित रखा जाता है)।`
+      );
       return;
     }
     if (!savedUpiId) {
@@ -397,9 +487,35 @@ const EarningsScreen = ({ navigation }: any) => {
           <Text style={styles.totalValue}>₹{pocketBalance}</Text>
           <Text style={styles.totalSub}>
             {isHindi
-              ? `पूर्ण ऑर्डर्स से कमाई: ₹${totalServiceEarnings} • निकाली गई राशि: ₹${totalWithdrawn}`
-              : `Earnings from Completed Orders: ₹${totalServiceEarnings} • Withdrawn: ₹${totalWithdrawn}`}
+              ? `निकासी योग्य वास्तविक बैलेंस • लाइफटाइम कमाई: ₹${totalEarnings}`
+              : `Withdrawable Real Balance • Total Lifetime: ₹${totalEarnings}`}
           </Text>
+
+          {/* DYNAMIC FILTERED PERIOD EARNINGS BANNER */}
+          <View style={{
+            backgroundColor: 'rgba(255, 255, 255, 0.16)',
+            borderRadius: 12,
+            padding: 10,
+            marginTop: 10,
+            marginBottom: 6,
+            flexDirection: 'row',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+          }}>
+            <View style={{ flex: 1 }}>
+              <Text style={{ color: '#E0F2FE', fontSize: 11, fontWeight: '700', textTransform: 'uppercase' }}>
+                {dynamicPeriodEarnings.label}
+              </Text>
+              <Text style={{ color: '#FFFFFF', fontSize: 18, fontWeight: '800', marginTop: 2 }}>
+                ₹{dynamicPeriodEarnings.amount}
+              </Text>
+            </View>
+            <View style={{ backgroundColor: 'rgba(255, 255, 255, 0.25)', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 20 }}>
+              <Text style={{ color: '#FFFFFF', fontSize: 11, fontWeight: '700' }}>
+                {dynamicPeriodEarnings.count} {isHindi ? 'ऑर्डर्स' : 'Orders'}
+              </Text>
+            </View>
+          </View>
 
           {/* Action Buttons on Wallet Card */}
           <View style={styles.walletActionsRow}>
@@ -415,7 +531,7 @@ const EarningsScreen = ({ navigation }: any) => {
                   );
                   return;
                 }
-                setWithdrawAmountInput(String(pocketBalance));
+                setWithdrawAmountInput(String(withdrawableAmount));
                 setIsWithdrawModalVisible(true);
               }}
               activeOpacity={0.85}
@@ -509,60 +625,41 @@ const EarningsScreen = ({ navigation }: any) => {
           </TouchableOpacity>
         </View>
 
-        {/* Summary Grid Cards */}
-        <View style={styles.summaryGrid}>
-          <View style={styles.summaryCard}>
-            <Icon name="cash-check" size={22} color="#0066FF" />
-            <Text style={styles.summaryLabel}>
-              {selectedDate !== 'All Time'
-                ? (isHindi ? 'चयनित दिन कमाई' : 'Selected Earnings')
-                : (isHindi ? 'आज की कमाई' : "Today's Earnings")}
-            </Text>
-            {isDateEarningsLoading ? (
-              <ActivityIndicator size="small" color="#0066FF" style={{ marginTop: 4 }} />
-            ) : (
-              <Text style={styles.summaryValue}>
-                ₹{selectedDate !== 'All Time' ? dateTotalEarnings : todaysEarnings}
+        {/* Completed Orders Card (Permanently removed Selected Earnings, Avg/Order, Total Lifetime per Spec #2) */}
+        <View style={{
+          backgroundColor: isDark ? '#1E293B' : '#FFFFFF',
+          borderRadius: 16,
+          padding: 16,
+          marginBottom: 18,
+          borderWidth: 1,
+          borderColor: isDark ? '#334155' : '#E2E8F0',
+          flexDirection: 'row',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+        }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+            <View style={{ width: 44, height: 44, borderRadius: 22, backgroundColor: '#EFF6FF', justifyContent: 'center', alignItems: 'center' }}>
+              <Icon name="calendar-check" size={24} color="#0066FF" />
+            </View>
+            <View>
+              <Text style={{ fontSize: 12, color: isDark ? '#94A3B8' : '#64748B', fontWeight: '600' }}>
+                {selectedDate !== 'All Time'
+                  ? (isHindi ? `चयनित तारीख (${selectedDate}) ऑर्डर्स` : `Orders for ${selectedDate}`)
+                  : (isHindi ? 'पूर्ण ऑर्डर्स (Completed Orders)' : 'Completed Orders')}
               </Text>
-            )}
+              {isDateEarningsLoading ? (
+                <ActivityIndicator size="small" color="#0066FF" style={{ marginTop: 4, alignSelf: 'flex-start' }} />
+              ) : (
+                <Text style={{ fontSize: 20, fontWeight: '800', color: isDark ? '#F8FAFC' : '#0F172A', marginTop: 2 }}>
+                  {selectedDate !== 'All Time' ? dateTotalOrders : (filterPeriod === 'daily' ? periodCalculations.daily.count : filterPeriod === 'weekly' ? periodCalculations.weekly.count : periodCalculations.monthly.count || completedServicesCount)}
+                </Text>
+              )}
+            </View>
           </View>
-
-          <View style={styles.summaryCard}>
-            <Icon name="calendar-check" size={22} color="#0066FF" />
-            <Text style={styles.summaryLabel}>
-              {isHindi ? 'पूर्ण ऑर्डर्स' : 'Completed Orders'}
+          <View style={{ backgroundColor: '#DCFCE7', paddingHorizontal: 10, paddingVertical: 5, borderRadius: 20 }}>
+            <Text style={{ color: '#166534', fontSize: 11, fontWeight: '700' }}>
+              {isHindi ? '✓ सत्यापित' : '✓ Verified'}
             </Text>
-            {isDateEarningsLoading ? (
-              <ActivityIndicator size="small" color="#0066FF" style={{ marginTop: 4 }} />
-            ) : (
-              <Text style={styles.summaryValue}>
-                {selectedDate !== 'All Time' ? dateTotalOrders : completedServicesCount}
-              </Text>
-            )}
-          </View>
-
-          <View style={styles.summaryCard}>
-            <Icon name="calculator" size={22} color="#0066FF" />
-            <Text style={styles.summaryLabel}>
-              {isHindi ? 'औसत / ऑर्डर' : 'Avg / Order'}
-            </Text>
-            {isDateEarningsLoading ? (
-              <ActivityIndicator size="small" color="#0066FF" style={{ marginTop: 4 }} />
-            ) : (
-              <Text style={styles.summaryValue}>
-                ₹{selectedDate !== 'All Time'
-                  ? (dateTotalOrders > 0 ? Math.round(dateTotalEarnings / dateTotalOrders) : 0)
-                  : averageEarning}
-              </Text>
-            )}
-          </View>
-
-          <View style={styles.summaryCard}>
-            <Icon name="shield-check" size={22} color="#0066FF" />
-            <Text style={styles.summaryLabel}>
-              {isHindi ? 'कुल लाइफटाइम' : 'Total Lifetime'}
-            </Text>
-            <Text style={[styles.summaryValue, { color: '#16A34A' }]}>₹{totalEarnings}</Text>
           </View>
         </View>
 
@@ -912,10 +1009,10 @@ const EarningsScreen = ({ navigation }: any) => {
               ))}
               <TouchableOpacity
                 style={[styles.quickAmountChip, { backgroundColor: '#DBEAFE', borderColor: '#93C5FD' }]}
-                onPress={() => setWithdrawAmountInput(String(pocketBalance))}
+                onPress={() => setWithdrawAmountInput(String(withdrawableAmount))}
               >
                 <Text style={[styles.quickAmountText, { color: '#0066FF', fontWeight: '800' }]}>
-                  {isHindi ? `अधिकतम ₹${pocketBalance}` : `Max ₹${pocketBalance}`}
+                  {isHindi ? `अधिकतम ₹${withdrawableAmount} (₹100 रिज़र्व)` : `Max ₹${withdrawableAmount} (₹100 reserved)`}
                 </Text>
               </TouchableOpacity>
             </View>

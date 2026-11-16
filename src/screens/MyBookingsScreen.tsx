@@ -18,7 +18,8 @@ import {
   KeyboardAvoidingView,
   FlatList,
   LayoutAnimation,
-  UIManager
+  UIManager,
+  RefreshControl
 } from 'react-native';
 import Icon from '../components/PngIcon';
 
@@ -27,6 +28,7 @@ import { useSocket } from '../context/SocketContext';
 import { useTheme } from '../context/ThemeContext';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import api, { UPLOADS_URL } from '../services/api';
+import { OrderHistorySkeletonLoader } from '../components/OrderHistorySkeletonLoader';
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
@@ -49,10 +51,52 @@ const MyBookingsScreen = ({ navigation, route }: any) => {
   const { isDark, currentColors } = useTheme();
   const [bookings, setBookings] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const lastFetchTimeRef = useRef(0);
 
   const screenTitle = route?.params?.title || 'Order History';
   const roleParam = route?.params?.role;
   const userIdParam = route?.params?.userId;
+
+  // Instant Cache Hydration on Mount (0ms delay - zero blank screen)
+  useEffect(() => {
+    let isMounted = true;
+    const hydrateCache = async () => {
+      try {
+        const uId = userIdParam || user?._id || user?.id || 'customer';
+        const cacheKey = `CACHE_CUSTOMER_BOOKINGS_${roleParam || 'customer'}_${uId}`;
+        const cached = await AsyncStorage.getItem(cacheKey);
+        if (cached && isMounted) {
+          let parsed = JSON.parse(cached);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            // If navigated with cancelled booking param, immediately reconcile status
+            const cancelledId = route?.params?.cancelledBookingId;
+            if (cancelledId) {
+              parsed = parsed.map((b: any) => {
+                const bId = b.bookingId || b.rideId || b._id || b.id;
+                if (String(bId) === String(cancelledId)) {
+                  return {
+                    ...b,
+                    status: 'CANCELLED',
+                    deliveryStatus: 'CANCELLED',
+                    riderStatus: 'CANCELLED',
+                    cancelledBy: 'CUSTOMER',
+                    cancelledAt: new Date().toISOString(),
+                    cancellationStatus: 'CANCELLED',
+                  };
+                }
+                return b;
+              });
+              AsyncStorage.setItem(cacheKey, JSON.stringify(parsed)).catch(() => {});
+            }
+            setBookings(parsed);
+          }
+        }
+      } catch (_) {}
+    };
+    hydrateCache();
+    return () => { isMounted = false; };
+  }, [roleParam, userIdParam, user?._id, user?.id, route?.params?.cancelledBookingId]);
   
   // Date Helpers
   const _today = new Date();
@@ -142,11 +186,16 @@ const MyBookingsScreen = ({ navigation, route }: any) => {
   }, [selectedMonthIndex]);
 
   const isFetchingRef = useRef(false);
-  const fetchBookings = useCallback(async () => {
+  const fetchBookings = useCallback(async (isUserInitiated: any = false) => {
     if (isFetchingRef.current) return;
     try {
       isFetchingRef.current = true;
-      setLoading(true);
+      const userInit = Boolean(isUserInitiated === true);
+      if (userInit) {
+        setRefreshing(true);
+      } else if (bookings.length === 0) {
+        setLoading(true);
+      }
 
       const isSupplierMode = roleParam === 'provider' || roleParam === 'supplier' || roleParam === 'seller_partner';
       let targetUserId = userIdParam;
@@ -200,56 +249,112 @@ const MyBookingsScreen = ({ navigation, route }: any) => {
       });
       let list = (res.data && Array.isArray(res.data.bookings)) ? res.data.bookings : [];
       setBookings(list);
+      lastFetchTimeRef.current = Date.now();
+      const uId = targetUserId || user?._id || user?.id || 'customer';
+      const cacheKey = `CACHE_CUSTOMER_BOOKINGS_${userRole}_${uId}`;
+      AsyncStorage.setItem(cacheKey, JSON.stringify(list)).catch(() => {});
     } catch (err) {
       console.log('Error fetching bookings:', err);
     } finally {
       isFetchingRef.current = false;
       setLoading(false);
+      setRefreshing(false);
     }
   }, [userIdParam, roleParam, route?.params?.phone, user?._id, user?.id, user?.role, user?.phone, user?.phoneNumber, selectedDateStr, statusFilter]);
 
   useFocusEffect(
     useCallback(() => {
-      fetchBookings();
+      // Re-fetch bookings on screen focus silently in background (instant sync)
+      fetchBookings(false);
     }, [fetchBookings])
   );
 
-  // Real-time updates via Socket
+  // Real-time updates via Socket (Instant 0ms cancellation reflection)
   useEffect(() => {
     if (!socket) return;
 
     const handleBookingUpdate = () => {
-      fetchBookings();
+      fetchBookings(false);
     };
 
+    const handleOrderCancellation = (data: any) => {
+      const targetId = data?.bookingId || data?.rideId || data?.orderId || data?.id;
+      if (targetId) {
+        setBookings((prev) => {
+          const updated = prev.map((b: any) => {
+            const bId = b.bookingId || b.rideId || b._id || b.id;
+            if (String(bId) === String(targetId)) {
+              return {
+                ...b,
+                status: 'CANCELLED',
+                deliveryStatus: 'CANCELLED',
+                riderStatus: 'CANCELLED',
+                cancelledBy: data?.cancelledBy || b.cancelledBy || 'CUSTOMER',
+                cancellationReason: data?.cancellationReason || data?.reason || b.cancellationReason || 'Order Cancelled',
+                cancelledAt: data?.cancelledAt || b.cancelledAt || new Date().toISOString(),
+                cancellationStatus: 'CANCELLED',
+                paidAmount: data?.paidAmount ?? b.paidAmount,
+                refundAmount: data?.refundAmount ?? b.refundAmount,
+              };
+            }
+            return b;
+          });
+
+          // Re-persist immediately so app restart retains CANCELLED
+          const userRole = roleParam || user?.role || 'customer';
+          const uId = userIdParam || user?._id || user?.id || 'customer';
+          const cacheKey = `CACHE_CUSTOMER_BOOKINGS_${userRole}_${uId}`;
+          AsyncStorage.setItem(cacheKey, JSON.stringify(updated)).catch(() => {});
+          return updated;
+        });
+      }
+      fetchBookings(false);
+    };
+
+    socket.on('order_cancelled', handleOrderCancellation);
+    socket.on('ORDER_CANCELLED', handleOrderCancellation);
+    socket.on('DELIVERY_REQUEST_CANCELLED', handleOrderCancellation);
+    socket.on('booking_cancelled', handleOrderCancellation);
+    socket.on('booking_cancelled_by_customer', handleOrderCancellation);
+    socket.on('ride_cancelled', handleOrderCancellation);
+    socket.on('ride_cancelled_by_customer', handleOrderCancellation);
+    socket.on('service_cancelled', handleOrderCancellation);
+    socket.on('food_order_updated', handleBookingUpdate);
+    socket.on('FOOD_ORDER_UPDATED', handleBookingUpdate);
+    socket.on('order_status_updated', handleBookingUpdate);
+    socket.on('booking_status_updated', handleBookingUpdate);
     socket.on('ride_accepted', handleBookingUpdate);
     socket.on('service_accepted', handleBookingUpdate);
     socket.on('ride_rejected', handleBookingUpdate);
     socket.on('service_rejected', handleBookingUpdate);
-    socket.on('ride_cancelled', handleBookingUpdate);
-    socket.on('booking_cancelled_by_customer', handleBookingUpdate);
-    socket.on('ride_cancelled_by_customer', handleBookingUpdate);
     socket.on('service_completed', handleBookingUpdate);
     socket.on('provider_arrived', handleBookingUpdate);
     socket.on('service_started', handleBookingUpdate);
-    socket.on('booking_status_updated', handleBookingUpdate);
     socket.on('new_booking_created', handleBookingUpdate);
 
     return () => {
+      socket.off('order_cancelled', handleOrderCancellation);
+      socket.off('ORDER_CANCELLED', handleOrderCancellation);
+      socket.off('DELIVERY_REQUEST_CANCELLED', handleOrderCancellation);
+      socket.off('booking_cancelled', handleOrderCancellation);
+      socket.off('booking_cancelled_by_customer', handleOrderCancellation);
+      socket.off('ride_cancelled', handleOrderCancellation);
+      socket.off('ride_cancelled_by_customer', handleOrderCancellation);
+      socket.off('service_cancelled', handleOrderCancellation);
+      socket.off('food_order_updated', handleBookingUpdate);
+      socket.off('FOOD_ORDER_UPDATED', handleBookingUpdate);
+      socket.off('order_status_updated', handleBookingUpdate);
+      socket.off('booking_status_updated', handleBookingUpdate);
       socket.off('ride_accepted', handleBookingUpdate);
       socket.off('service_accepted', handleBookingUpdate);
       socket.off('ride_rejected', handleBookingUpdate);
       socket.off('service_rejected', handleBookingUpdate);
-      socket.off('ride_cancelled', handleBookingUpdate);
-      socket.off('booking_cancelled_by_customer', handleBookingUpdate);
-      socket.off('ride_cancelled_by_customer', handleBookingUpdate);
       socket.off('service_completed', handleBookingUpdate);
       socket.off('provider_arrived', handleBookingUpdate);
       socket.off('service_started', handleBookingUpdate);
-      socket.off('booking_status_updated', handleBookingUpdate);
       socket.off('new_booking_created', handleBookingUpdate);
     };
-  }, [socket, user]);
+  }, [socket, user, roleParam, userIdParam]);
 
   const handleOpenCancelSheet = (booking: any) => {
     setBookingToCancel(booking);
@@ -353,8 +458,8 @@ const MyBookingsScreen = ({ navigation, route }: any) => {
         const statusUpper = (b.status || '').toUpperCase();
 
         // 1. Status Filter
-        if (statusFilter === 'COMPLETED' && !statusUpper.includes('COMPLET')) return false;
-        if (statusFilter === 'CANCELLED' && !statusUpper.includes('CANCEL')) return false;
+        if (statusFilter === 'COMPLETED' && !statusUpper.includes('COMPLET') && !statusUpper.includes('DELIVER')) return false;
+        if (statusFilter === 'CANCELLED' && !statusUpper.includes('CANCEL') && !statusUpper.includes('REJECT') && !statusUpper.includes('DECLINE') && !statusUpper.includes('TIMEOUT')) return false;
 
         // 2. Calendar Month & Date Filter
         if (selectedMonthIndex !== -1) {
@@ -411,7 +516,7 @@ const MyBookingsScreen = ({ navigation, route }: any) => {
           </TouchableOpacity>
           <Text style={[styles.headerTitle, { color: currentColors.text }]}>{screenTitle}</Text>
         </View>
-        <TouchableOpacity style={styles.refreshBtn} onPress={fetchBookings}>
+        <TouchableOpacity style={styles.refreshBtn} onPress={() => fetchBookings(true)}>
           <Icon name="refresh-outline" size={20} color={currentColors.text} />
         </TouchableOpacity>
       </View>
@@ -504,12 +609,13 @@ const MyBookingsScreen = ({ navigation, route }: any) => {
         })}
       </View>
 
-      {loading ? (
-        <View style={styles.loadingContainer}>
-          <ActivityIndicator size="large" color="#0066FF" />
-        </View>
+      {loading && bookings.length === 0 ? (
+        <OrderHistorySkeletonLoader isDark={isDark} message="Loading your order history..." />
       ) : filteredBookings.length === 0 ? (
-        <ScrollView contentContainerStyle={styles.emptyContainer}>
+        <ScrollView 
+          contentContainerStyle={styles.emptyContainer}
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => fetchBookings(true)} colors={['#0066FF']} tintColor="#0066FF" />}
+        >
           <Image 
             source={{ uri: 'https://img.icons8.com/fluency/144/purchase-order.png' }} 
             style={styles.emptyImage} 
@@ -529,6 +635,7 @@ const MyBookingsScreen = ({ navigation, route }: any) => {
           showsVerticalScrollIndicator={false}
           onScroll={handleScroll}
           scrollEventThrottle={16}
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => fetchBookings(true)} colors={['#0066FF']} tintColor="#0066FF" />}
         >
           {filteredBookings.map((b) => {
             const stUpper = (b.status || '').toUpperCase();

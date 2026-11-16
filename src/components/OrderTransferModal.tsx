@@ -31,12 +31,14 @@ export interface OrderTransferModalProps {
 }
 
 const TRANSFER_REASONS = [
-  { id: 'Bike Puncture', label: 'Bike Puncture / Flat Tyre', icon: '🚲', desc: 'Cannot ride due to puncture or tyre issue' },
-  { id: 'Vehicle Breakdown', label: 'Vehicle Breakdown', icon: '🔧', desc: 'Engine failure, chain issue or fuel problem' },
-  { id: 'Minor Accident', label: 'Minor Accident / Skid', icon: '🩹', desc: 'Minor collision or slip, unable to ride' },
-  { id: 'Health Issue', label: 'Health Issue / Fatigue', icon: '🩺', desc: 'Sudden weakness, dehydration or illness' },
-  { id: 'Emergency', label: 'Personal Emergency', icon: '🚨', desc: 'Urgent family or safety emergency' },
-  { id: 'Other', label: 'Other Valid Reason', icon: '📝', desc: 'Any other unforeseen delivery roadblock' },
+  { id: 'Bike Puncture', label: 'Bike Puncture', icon: '🚲', desc: 'Cannot ride due to puncture or tyre issue' },
+  { id: 'Vehicle Breakdown', label: 'Bike Breakdown', icon: '🔧', desc: 'Engine failure, chain issue or mechanical problem' },
+  { id: 'Accident', label: 'Accident', icon: '🩹', desc: 'Collision or slip on road, unable to continue' },
+  { id: 'Personal Emergency', label: 'Personal Emergency', icon: '🚨', desc: 'Urgent personal or family matter' },
+  { id: 'Health Problem', label: 'Health Problem', icon: '🩺', desc: 'Sudden illness, weakness or medical condition' },
+  { id: 'Road Block', label: 'Road Block', icon: '🚧', desc: 'Route blocked, diversion or construction' },
+  { id: 'Traffic', label: 'Traffic', icon: '🚦', desc: 'Severe gridlock or unmovable congestion' },
+  { id: 'Helmet Not Available', label: 'Helmet Not Available', icon: '🪖', desc: 'Safety gear missing or damaged' },
 ];
 
 export const OrderTransferModal: React.FC<OrderTransferModalProps> = ({

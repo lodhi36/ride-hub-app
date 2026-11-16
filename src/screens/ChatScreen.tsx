@@ -92,6 +92,8 @@ const ChatScreen = ({ route, navigation }: any) => {
   const [inputText, setInputText] = useState('');
   const [isTyping, setIsTyping] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const [hasMoreOlder, setHasMoreOlder] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [isGiftModalVisible, setGiftModalVisible] = useState(false);
   const [isMenuVisible, setMenuVisible] = useState(false);
@@ -221,6 +223,32 @@ const ChatScreen = ({ route, navigation }: any) => {
     }
   }, [chat, paramChatId, otherUserId, targetReceiverId, user?._id, socket]);
 
+  const fetchOlderMessages = async () => {
+    if (!chat?._id || loadingOlder || !hasMoreOlder || messages.length === 0) return;
+    try {
+      setLoadingOlder(true);
+      const oldestMsg = messages[0];
+      const beforeTime = oldestMsg?.createdAt;
+      const res = await api.get(`/messages/${chat._id}?limit=30${beforeTime ? `&before=${encodeURIComponent(beforeTime)}` : ''}`);
+      if (res.data?.success && Array.isArray(res.data.messages)) {
+        if (res.data.messages.length === 0) {
+          setHasMoreOlder(false);
+        } else {
+          setMessages(prev => {
+            const existingIds = new Set(prev.map(m => m._id));
+            const newOlder = res.data.messages.filter((m: any) => !existingIds.has(m._id));
+            if (newOlder.length === 0) setHasMoreOlder(false);
+            return [...newOlder, ...prev];
+          });
+        }
+      }
+    } catch (e: any) {
+      console.log('Error fetching older messages:', e?.message);
+    } finally {
+      setLoadingOlder(false);
+    }
+  };
+
   // Load chat on mount
   useEffect(() => {
     initializeChat();
@@ -312,10 +340,17 @@ const ChatScreen = ({ route, navigation }: any) => {
     if (!socket || !chat?._id) return;
 
     const handleReceiveMessage = (newMsg: any) => {
-      console.log('[ChatScreen] Socket receive_message event:', newMsg?._id);
+      console.log('[ChatScreen] Socket receive_message event:', newMsg?._id, newMsg?.clientMsgId);
       const targetChatId = newMsg.chatId?._id || newMsg.chatId;
       if (targetChatId === chat._id) {
         setMessages(prev => {
+          // Deduplication via clientMsgId: replace optimistic placeholder
+          if (newMsg.clientMsgId) {
+            const hasOptimistic = prev.some(m => m.clientMsgId === newMsg.clientMsgId || m._id === newMsg.clientMsgId);
+            if (hasOptimistic) {
+              return prev.map(m => (m.clientMsgId === newMsg.clientMsgId || m._id === newMsg.clientMsgId) ? { ...newMsg, text: newMsg.text || newMsg.content, status: 'sent' } : m);
+            }
+          }
           if (prev.some(m => m._id === newMsg._id)) return prev;
           return [...prev, newMsg];
         });
@@ -428,22 +463,63 @@ const ChatScreen = ({ route, navigation }: any) => {
     }
   };
 
-  const handleSend = async () => {
-    if (!inputText.trim() || !chat?._id) return;
-    const content = inputText.trim();
-    setInputText('');
+  const handleSend = async (retryItem?: any) => {
+    const content = retryItem ? (retryItem.text || retryItem.content) : inputText.trim();
+    if (!content || !chat?._id) return;
+    if (!retryItem) setInputText('');
     socket?.emit('stop_typing', { chatId: chat._id });
 
-    try {
-      console.log('[ChatScreen] Sending message api call content:', content);
-      await api.post('/messages', {
+    const clientMsgId = retryItem?.clientMsgId || retryItem?._id || `cmsg_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    const myId = user?._id || user?.id;
+
+    if (!retryItem) {
+      // ⚡ 0ms INSTANT OPTIMISTIC UI MESSAGE (<10ms UI update)
+      const optimisticMsg = {
+        _id: clientMsgId,
+        clientMsgId,
+        text: content,
         content,
         chatId: chat._id,
-        receiverId: otherUserId
-      });
+        sender: { _id: myId, name: user?.name || 'Me' },
+        createdAt: new Date().toISOString(),
+        status: 'sending',
+      };
+      setMessages(prev => [...prev, optimisticMsg]);
       playMessageTone();
+    } else {
+      // Retry in progress
+      setMessages(prev => prev.map(m => (m.clientMsgId === clientMsgId || m._id === clientMsgId) ? { ...m, status: 'sending' } : m));
+    }
+
+    try {
+      const res = await api.post('/messages', {
+        content,
+        chatId: chat._id,
+        receiverId: otherUserId,
+        clientMsgId,
+      });
+      const savedMsg = res.data?.message || res.data;
+      if (savedMsg && (savedMsg._id || savedMsg.content)) {
+        setMessages(prev => prev.map(m => 
+          (m.clientMsgId === clientMsgId || m._id === clientMsgId)
+            ? { ...m, ...savedMsg, text: savedMsg.text || savedMsg.content || content, status: 'sent', clientMsgId }
+            : m
+        ));
+      } else {
+        setMessages(prev => prev.map(m => 
+          (m.clientMsgId === clientMsgId || m._id === clientMsgId)
+            ? { ...m, status: 'sent' }
+            : m
+        ));
+      }
     } catch (error) {
       console.log('[ChatScreen] api.post(/messages) failed:', error);
+      // Mark as failed to allow tap-to-retry
+      setMessages(prev => prev.map(m => 
+        (m.clientMsgId === clientMsgId || m._id === clientMsgId)
+          ? { ...m, status: 'failed' }
+          : m
+      ));
     }
   };
 
@@ -956,7 +1032,19 @@ const ChatScreen = ({ route, navigation }: any) => {
                 {formatMessageTime(item.createdAt || new Date().toISOString())}
               </Text>
               {isMe && (
-                <Text style={{ fontSize: 11, color: item.status === 'seen' ? '#0066FF' : 'rgba(255,255,255,0.7)', marginLeft: 2 }}>✓✓</Text>
+                <View style={{ flexDirection: 'row', alignItems: 'center', marginLeft: 4 }}>
+                  {item.status === 'sending' ? (
+                    <ActivityIndicator size="small" color="rgba(255,255,255,0.7)" style={{ transform: [{ scale: 0.6 }] }} />
+                  ) : item.status === 'failed' ? (
+                    <TouchableOpacity onPress={() => handleSend(item)} style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(239, 68, 68, 0.2)', paddingHorizontal: 4, paddingVertical: 1, borderRadius: 4 }}>
+                      <Text style={{ fontSize: 10, color: '#EF4444', fontWeight: '800' }}>⚠️ Failed (Tap to retry)</Text>
+                    </TouchableOpacity>
+                  ) : (
+                    <Text style={{ fontSize: 11, color: item.status === 'seen' ? '#0066FF' : 'rgba(255,255,255,0.7)' }}>
+                      {item.status === 'seen' ? '✓✓' : '✓'}
+                    </Text>
+                  )}
+                </View>
               )}
             </View>
           </TouchableOpacity>

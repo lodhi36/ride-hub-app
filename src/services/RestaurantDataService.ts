@@ -349,9 +349,9 @@ class RestaurantDataService {
                 : null,
               reviewCount: Number(resto.reviewCount || resto.reviewsCount || resto.ratingCount || 0),
               reviewsCount: Number(resto.reviewCount || resto.reviewsCount || resto.ratingCount || 0),
-              deliveryTime: canonical.deliveryTimeText,
-              distanceKm: canonical.distanceKm !== null ? canonical.distanceKm : null,
-              distanceText: canonical.distanceText,
+              deliveryTime: resto.deliveryTime || canonical.deliveryTimeText,
+              distanceKm: resto.distanceKm !== undefined && resto.distanceKm !== null ? Number(resto.distanceKm) : (canonical.distanceKm !== null ? canonical.distanceKm : null),
+              distanceText: resto.distanceText || canonical.distanceText,
               priceForTwo: '₹200 for two',
               discountBadge: '',
               image: imgUrl,
@@ -369,7 +369,7 @@ class RestaurantDataService {
             };
           });
 
-          // Strict 5.0 KM filtering when customer coordinates are available
+          // Strict 5.0 KM Haversine filtering when customer coordinates are available
           const finalRestos = activeCustomerCoords
             ? restos.filter((r) => {
                 if (!r.latitude || !r.longitude || r.latitude === 0 || r.longitude === 0) return false;
@@ -391,7 +391,7 @@ class RestaurantDataService {
           ]).catch(() => {});
 
           return {
-            restaurants: restos,
+            restaurants: finalRestos,
             popularDishes: dishes,
             fromCache: false,
             isStale: false,

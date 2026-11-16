@@ -23,6 +23,8 @@ import {
   fetchCurrentGpsPositionDetailed,
   reverseGeocodeCoords,
   isValidCoordinates,
+  isDummyCoordinates,
+  requestLocationPermission,
 } from '../services/LocationAddressService';
 import { useTheme } from '../context/ThemeContext';
 
@@ -41,35 +43,42 @@ export const StoreMapLocationModal: React.FC<StoreMapLocationModalProps> = ({
   initialCoords,
   onLocationSaved,
 }) => {
+  const hasValidInit = Boolean(
+    initialCoords &&
+    isValidCoordinates(initialCoords.latitude, initialCoords.longitude) &&
+    !isDummyCoordinates(initialCoords.latitude, initialCoords.longitude)
+  );
   const [selectedLat, setSelectedLat] = useState<number>(
-    initialCoords && isValidCoordinates(initialCoords.latitude, initialCoords.longitude)
-      ? initialCoords.latitude
-      : 23.2599
+    hasValidInit && initialCoords ? initialCoords.latitude : 0
   );
   const [selectedLon, setSelectedLon] = useState<number>(
-    initialCoords && isValidCoordinates(initialCoords.latitude, initialCoords.longitude)
-      ? initialCoords.longitude
-      : 77.4126
+    hasValidInit && initialCoords ? initialCoords.longitude : 0
   );
-  const [addressTitle, setAddressTitle] = useState<string>('Selected Store Location');
-  const [fullAddressText, setFullAddressText] = useState<string>(
-    'Arera Colony, Bhopal, Madhya Pradesh 462016, India'
-  );
+  const [addressTitle, setAddressTitle] = useState<string>('Store Location');
+  const [fullAddressText, setFullAddressText] = useState<string>('Locating your position...');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [isSearching, setIsSearching] = useState<boolean>(false);
   const [searchResults, setSearchResults] = useState<any[]>([]);
   const [detectingGps, setDetectingGps] = useState<boolean>(false);
-  const [gpsLocked, setGpsLocked] = useState<boolean>(true);
+  const [gpsStatusMsg, setGpsStatusMsg] = useState<string>(hasValidInit ? '' : 'Locating your position...');
+  const [gpsLocked, setGpsLocked] = useState<boolean>(hasValidInit);
   const [savingLocation, setSavingLocation] = useState<boolean>(false);
+  const [gpsAccuracy, setGpsAccuracy] = useState<number | null>(null);
   const [mapLayerType, setMapLayerType] = useState<'standard' | 'satellite'>('standard');
 
   const webViewRef = useRef<any>(null);
 
   useEffect(() => {
     if (visible) {
-      if (initialCoords && isValidCoordinates(initialCoords.latitude, initialCoords.longitude)) {
+      if (
+        initialCoords &&
+        isValidCoordinates(initialCoords.latitude, initialCoords.longitude) &&
+        !isDummyCoordinates(initialCoords.latitude, initialCoords.longitude)
+      ) {
         setSelectedLat(initialCoords.latitude);
         setSelectedLon(initialCoords.longitude);
+        setGpsLocked(true);
+        setGpsStatusMsg('');
         resolveAddress(initialCoords.latitude, initialCoords.longitude);
       } else {
         handleDetectCurrentGps();
@@ -84,7 +93,8 @@ export const StoreMapLocationModal: React.FC<StoreMapLocationModalProps> = ({
         setFullAddressText(geo.fullAddress);
         setAddressTitle(geo.locality || geo.city || 'Selected Store Location');
       } else {
-        setFullAddressText(`Arera Colony, Bhopal, Madhya Pradesh 462016, India`);
+        setAddressTitle('Selected Store Location');
+        setFullAddressText(`Coordinates: ${lat.toFixed(4)}, ${lon.toFixed(4)}`);
       }
     } catch (_) {
       setFullAddressText(`Lat: ${lat.toFixed(4)}, Lon: ${lon.toFixed(4)}`);
@@ -94,19 +104,40 @@ export const StoreMapLocationModal: React.FC<StoreMapLocationModalProps> = ({
   const handleDetectCurrentGps = async () => {
     try {
       setDetectingGps(true);
-      const res = await fetchCurrentGpsPositionDetailed(true);
-      const fix = res.fix || (isValidCoordinates((res as any)?.latitude, (res as any)?.longitude) ? (res as any) : null);
+      setGpsStatusMsg('Locating your position...');
+      const res = await fetchCurrentGpsPositionDetailed(false);
+      const fix = res.fix && !isDummyCoordinates(res.fix.latitude, res.fix.longitude) ? res.fix : null;
       if (fix && isValidCoordinates(fix.latitude, fix.longitude)) {
+        const acc = fix.accuracy || 10;
+        setGpsAccuracy(acc);
         setSelectedLat(fix.latitude);
         setSelectedLon(fix.longitude);
         setGpsLocked(true);
+        if (acc > 20) {
+          const warningMsg = 'लोकेशन ठीक नहीं मिल रही, कृपया खुली जगह पर जाएँ और दोबारा कोशिश करें।';
+          setGpsStatusMsg(warningMsg);
+          Alert.alert('GPS शुद्धता चेतावनी', warningMsg + `\n(वर्तमान GPS शुद्धता: ${Math.round(acc)}m, आवश्यक: 20m)`);
+        } else {
+          setGpsStatusMsg('');
+        }
         updateMapPin(fix.latitude, fix.longitude);
         await resolveAddress(fix.latitude, fix.longitude);
       } else {
-        Alert.alert('GPS Notice', res.message || 'Could not detect store GPS. Please verify device permissions.');
+        const msg =
+          res.errorType === 'PERMISSION_DENIED'
+            ? 'Location permission required.'
+            : res.errorType === 'LOCATION_OFF'
+            ? 'GPS unavailable.'
+            : 'Unable to fetch current location. Retry.';
+        setGpsStatusMsg(msg);
+        if (!isValidCoordinates(selectedLat, selectedLon)) {
+          setFullAddressText(msg);
+        }
+        Alert.alert('GPS Status', msg);
       }
     } catch (err) {
       console.warn('Store GPS detect notice:', err);
+      setGpsStatusMsg('Unable to fetch current location. Retry.');
     } finally {
       setDetectingGps(false);
     }
@@ -166,7 +197,7 @@ export const StoreMapLocationModal: React.FC<StoreMapLocationModalProps> = ({
     try {
       setIsSearching(true);
       const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(
-        q.trim() + ' Bhopal'
+        q.trim()
       )}&format=json&limit=5`;
       const res = await fetch(url, { headers: { 'User-Agent': 'RideHub-StoreMap/2.0' } });
       const data = await res.json();
@@ -179,25 +210,61 @@ export const StoreMapLocationModal: React.FC<StoreMapLocationModalProps> = ({
   };
 
   const handleSaveStoreLocation = async () => {
-    try {
-      setSavingLocation(true);
-      try {
-        await api.post('/users/update-store-location', {
-          latitude: selectedLat,
-          longitude: selectedLon,
-          address: fullAddressText,
-        });
-      } catch (_) { }
-
-      onLocationSaved({ latitude: selectedLat, longitude: selectedLon }, fullAddressText);
-      onClose();
-    } catch (err: any) {
-      console.error('Save store location error:', err);
-      onLocationSaved({ latitude: selectedLat, longitude: selectedLon }, fullAddressText);
-      onClose();
-    } finally {
-      setSavingLocation(false);
+    if (!isValidCoordinates(selectedLat, selectedLon) || isDummyCoordinates(selectedLat, selectedLon)) {
+      Alert.alert('GPS Required', gpsStatusMsg || 'Unable to fetch current location. Retry.');
+      return;
     }
+
+    if (gpsAccuracy && gpsAccuracy > 20) {
+      Alert.alert(
+        'GPS शुद्धता चेतावनी',
+        'लोकेशन ठीक नहीं मिल रही, कृपया खुली जगह पर जाएँ और दोबारा कोशिश करें।\n(वर्तमान GPS शुद्धता: ' + Math.round(gpsAccuracy) + 'm, आवश्यक: 20m)'
+      );
+      return;
+    }
+
+    Alert.alert(
+      'दुकान लोकेशन पुष्टि',
+      'क्या यही आपकी दुकान है?\n\n' + fullAddressText + '\n\n(पुष्टि के बाद यह लोकेशन सर्वर पर स्थायी रूप से लॉक हो जाएगी)',
+      [
+        { text: 'रद्द करें (Cancel)', style: 'cancel' },
+        {
+          text: 'हाँ, यही दुकान है (Confirm)',
+          onPress: async () => {
+            try {
+              setSavingLocation(true);
+              await api.post('/profile/supplier-permanent-location', {
+                latitude: selectedLat,
+                longitude: selectedLon,
+                formattedAddress: fullAddressText,
+                accuracy: gpsAccuracy || 10,
+              });
+              try {
+                await api.post('/users/update-store-location', {
+                  latitude: selectedLat,
+                  longitude: selectedLon,
+                  address: fullAddressText,
+                  accuracy: gpsAccuracy || 10,
+                });
+              } catch (_) {}
+
+              Alert.alert('सफलता', 'दुकान की लोकेशन सफलतापूर्वक लॉक और सेव हो गई है।');
+              onLocationSaved({ latitude: selectedLat, longitude: selectedLon }, fullAddressText);
+              onClose();
+            } catch (err: any) {
+              console.warn('Store location save notice:', err);
+              const errMsg = err?.response?.data?.message || err?.message || 'लोकेशन सेव नहीं हो सकी।';
+              Alert.alert('लोकेशन स्टेटस', errMsg);
+              if (err?.response?.data?.code === 'LOCATION_LOCKED') {
+                onClose();
+              }
+            } finally {
+              setSavingLocation(false);
+            }
+          },
+        },
+      ]
+    );
   };
 
   const mapHtml = useMemo(() => {
@@ -298,13 +365,21 @@ export const StoreMapLocationModal: React.FC<StoreMapLocationModalProps> = ({
 <body>
   <div id="map"></div>
   <script>
+    var hasPin = ${isValidCoordinates(selectedLat, selectedLon) && !isDummyCoordinates(selectedLat, selectedLon)};
     var centerLat = ${selectedLat};
     var centerLon = ${selectedLon};
 
+    var mapEl = document.getElementById('map');
+    if (mapEl && !hasPin) {
+      mapEl.style.visibility = 'hidden';
+    }
     var map = L.map('map', {
       zoomControl: false,
       attributionControl: false
-    }).setView([centerLat, centerLon], 15);
+    });
+    if (hasPin) {
+      map.setView([centerLat, centerLon], 15);
+    }
     window.map = map;
 
     var standardTile = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -332,24 +407,34 @@ export const StoreMapLocationModal: React.FC<StoreMapLocationModalProps> = ({
       iconAnchor: [21, 42]
     });
 
-    var marker = L.marker([centerLat, centerLon], {
+    var marker = hasPin ? L.marker([centerLat, centerLon], {
       icon: pinIcon,
       draggable: true
-    }).addTo(map);
+    }).addTo(map) : null;
 
-    marker.on('dragend', function(e) {
-      var pos = marker.getLatLng();
-      if (window.ReactNativeWebView) {
-        window.ReactNativeWebView.postMessage(JSON.stringify({
-          type: 'PIN_MOVED',
-          lat: pos.lat,
-          lon: pos.lng
-        }));
-      }
-    });
+    function attachMarkerDrag(m) {
+      m.on('dragend', function(e) {
+        var pos = m.getLatLng();
+        if (window.ReactNativeWebView) {
+          window.ReactNativeWebView.postMessage(JSON.stringify({
+            type: 'PIN_MOVED',
+            lat: pos.lat,
+            lon: pos.lng
+          }));
+        }
+      });
+    }
+    if (marker) {
+      attachMarkerDrag(marker);
+    }
 
     map.on('click', function(e) {
-      marker.setLatLng(e.latlng);
+      if (!marker) {
+        marker = L.marker(e.latlng, { icon: pinIcon, draggable: true }).addTo(map);
+        attachMarkerDrag(marker);
+      } else {
+        marker.setLatLng(e.latlng);
+      }
       if (window.ReactNativeWebView) {
         window.ReactNativeWebView.postMessage(JSON.stringify({
           type: 'PIN_MOVED',
@@ -360,7 +445,16 @@ export const StoreMapLocationModal: React.FC<StoreMapLocationModalProps> = ({
     });
 
     window.setPinLocation = function(lat, lon) {
-      marker.setLatLng([lat, lon]);
+      var el = document.getElementById('map');
+      if (el && el.style.visibility === 'hidden') {
+        el.style.visibility = 'visible';
+      }
+      if (!marker) {
+        marker = L.marker([lat, lon], { icon: pinIcon, draggable: true }).addTo(map);
+        attachMarkerDrag(marker);
+      } else {
+        marker.setLatLng([lat, lon]);
+      }
       map.setView([lat, lon], 15, { animate: true });
     };
   </script>
@@ -409,7 +503,7 @@ export const StoreMapLocationModal: React.FC<StoreMapLocationModalProps> = ({
             <Icon name="search" size={20} color={isDark ? currentColors.disabled : '#64748B'} style={{ marginRight: 8 }} />
             <TextInput
               style={[styles.searchInput, isDark && { color: currentColors.primaryText }]}
-              placeholder="Search area, road or market in Bhopal..."
+              placeholder="Search area, road or market..."
               placeholderTextColor={isDark ? currentColors.disabled : '#94A3B8'}
               value={searchQuery}
               onChangeText={setSearchQuery}
@@ -496,6 +590,29 @@ export const StoreMapLocationModal: React.FC<StoreMapLocationModalProps> = ({
             onMessage={handleWebViewMessage}
           />
 
+          {(!isValidCoordinates(selectedLat, selectedLon) || isDummyCoordinates(selectedLat, selectedLon)) && (
+            <View style={{
+              position: 'absolute',
+              top: 0, left: 0, right: 0, bottom: 0,
+              backgroundColor: 'rgba(15, 23, 42, 0.72)',
+              alignItems: 'center',
+              justifyContent: 'center',
+              padding: 24,
+            }}>
+              <ActivityIndicator size="large" color="#38BDF8" style={{ marginBottom: 12 }} />
+              <Text style={{ color: '#FFFFFF', fontSize: 15, fontWeight: '800', textAlign: 'center', marginBottom: 10 }}>
+                {gpsStatusMsg || 'Locating your position...'}
+              </Text>
+              <TouchableOpacity
+                style={{ backgroundColor: '#0066FF', paddingHorizontal: 18, paddingVertical: 10, borderRadius: 12 }}
+                onPress={handleDetectCurrentGps}
+                activeOpacity={0.85}
+              >
+                <Text style={{ color: '#FFFFFF', fontWeight: '800', fontSize: 13 }}>Retry</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+
           {/* Floating Right Map Controls Stack */}
           <View style={styles.floatingControlsStack}>
             {/* Map Layers */}
@@ -560,7 +677,9 @@ export const StoreMapLocationModal: React.FC<StoreMapLocationModalProps> = ({
               </Text>
 
               <Text style={styles.coordsText}>
-                Lat: {selectedLat.toFixed(4)} • Lon: {selectedLon.toFixed(4)}
+                {isValidCoordinates(selectedLat, selectedLon)
+                  ? `Lat: ${selectedLat.toFixed(4)} • Lon: ${selectedLon.toFixed(4)}`
+                  : (gpsStatusMsg || 'Locating your position...')}
               </Text>
             </View>
           </View>

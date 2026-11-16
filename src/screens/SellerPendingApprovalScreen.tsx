@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useContext } from 'react';
+import React, { useState, useEffect, useContext, useRef } from 'react';
 import {
   View,
   Text,
@@ -9,6 +9,7 @@ import {
   ActivityIndicator,
   Alert,
   Dimensions,
+  AppState,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -29,6 +30,74 @@ export default function SellerPendingApprovalScreen({ route, navigation }: any) 
 
   const sellerId = sellerData?._id || sellerData?.id || authUser?._id || authUser?.id;
 
+  const isNavigatingRef = useRef(false);
+
+  // Navigate to Supplier Home (RiderHomeScreen) without manual reload or user click
+  const navigateToSupplierHome = (userData: any) => {
+    if (isNavigatingRef.current) return;
+    isNavigatingRef.current = true;
+    const sId = userData?._id || userData?.id || sellerId;
+    const sName = userData?.restaurantName || userData?.name || 'Store Partner';
+    const pType = userData?.partnerType || 'RESTAURANT';
+    const bType = userData?.businessType || 'RESTAURANT';
+
+    console.log('🚀 [SELLER AUTO-APPROVAL] Supplier APPROVED! Instant automatic navigation to RiderHomeScreen for:', sName, sId);
+
+    navigation.reset({
+      index: 0,
+      routes: [
+        {
+          name: 'RiderHomeScreen',
+          params: {
+            riderName: sName,
+            riderId: sId,
+            partnerType: pType,
+            businessType: bType,
+          },
+        },
+      ],
+    });
+  };
+
+  // Verify latest approval status directly from backend (Requirement 2: never navigate solely on unverified socket event)
+  const verifyAndNavigate = async (silent = true) => {
+    if (isNavigatingRef.current) return;
+    try {
+      if (!silent) setChecking(true);
+      const res = await api.get('/auth/me');
+      if (res.data?.success && res.data.user) {
+        const user = res.data.user;
+        const currentApproval = String(user.approvalStatus || 'PENDING').toUpperCase();
+        setStatus(currentApproval);
+        setSellerData(user);
+
+        // Update local persistent storage and global context
+        await AsyncStorage.setItem('supplierUser', JSON.stringify(user));
+        if (updateUser) updateUser(user);
+
+        if (currentApproval === 'APPROVED') {
+          console.log('✅ [SELLER PENDING] Backend verified APPROVED status! Auto-navigating immediately...');
+          navigateToSupplierHome(user);
+        } else if (currentApproval === 'REJECTED') {
+          if (!silent) {
+            Alert.alert('Notice', 'Your application status is currently marked as Rejected.');
+          }
+        } else {
+          if (!silent) {
+            Alert.alert('Status: In Review ⏳', 'Your application is still under review by our Admin team. We appreciate your patience!');
+          }
+        }
+      }
+    } catch (err: any) {
+      console.log('[SELLER PENDING] Verification check notice:', err?.message || err);
+      if (!silent) {
+        Alert.alert('Check Failed', 'Could not refresh status. Please check your internet connection.');
+      }
+    } finally {
+      if (!silent) setChecking(false);
+    }
+  };
+
   // Load user from AsyncStorage on mount
   useEffect(() => {
     AsyncStorage.getItem('supplierUser').then((stored) => {
@@ -37,132 +106,93 @@ export default function SellerPendingApprovalScreen({ route, navigation }: any) 
           const parsed = JSON.parse(stored);
           setSellerData(parsed);
           if (parsed.approvalStatus) {
-            setStatus(parsed.approvalStatus);
+            const st = String(parsed.approvalStatus).toUpperCase();
+            setStatus(st);
+            if (st === 'APPROVED') {
+              navigateToSupplierHome(parsed);
+            }
           }
         } catch (e) {}
       }
     });
   }, []);
 
-  // Real-time socket listener for instant admin approval
+  // Real-time socket listener for instant admin approval (Requirement 2 & 7)
   useEffect(() => {
     if (!socket) return;
 
     const handleApprovalEvent = async (data: any) => {
       console.log('📡 [SELLER PENDING] Received approval event:', data);
-      const incomingId = data?.sellerId?.toString();
-      const myId = sellerId?.toString();
+      const incomingId = String(
+        data?.supplierId || data?.sellerId || data?.userId || data?.user?._id || data?.user?.id || ''
+      );
+      const myId = String(sellerId || sellerData?._id || sellerData?.id || authUser?._id || authUser?.id || '');
 
-      if (incomingId && myId && incomingId === myId) {
-        const newStatus = (data.approvalStatus || 'APPROVED').toUpperCase();
-        setStatus(newStatus);
-
-        if (newStatus === 'APPROVED') {
-          try {
-            const stored = await AsyncStorage.getItem('supplierUser');
-            if (stored) {
-              const parsed = JSON.parse(stored);
-              parsed.approvalStatus = 'APPROVED';
-              await AsyncStorage.setItem('supplierUser', JSON.stringify(parsed));
-              if (updateUser) updateUser(parsed);
-            }
-          } catch (e) {}
-
-          Alert.alert(
-            '🎉 Store Approved!',
-            'Congratulations! Your store application has been approved by Admin. Opening your store dashboard now...',
-            [
-              {
-                text: 'Open Dashboard',
-                onPress: () => {
-                  navigation.reset({
-                    index: 0,
-                    routes: [
-                      {
-                        name: 'RiderHomeScreen',
-                        params: {
-                          riderName: sellerData.restaurantName || sellerData.name || 'Store Partner',
-                          riderId: myId,
-                        },
-                      },
-                    ],
-                  });
-                },
-              },
-            ]
-          );
-
-          setTimeout(() => {
-            navigation.reset({
-              index: 0,
-              routes: [
-                {
-                  name: 'RiderHomeScreen',
-                  params: {
-                    riderName: sellerData.restaurantName || sellerData.name || 'Store Partner',
-                    riderId: myId,
-                  },
-                },
-              ],
-            });
-          }, 1500);
-        } else if (newStatus === 'REJECTED') {
-          Alert.alert(
-            'Application Notice',
-            'Your store application was not approved at this time. Please contact Admin support for more information.'
-          );
+      // Check if event targets this supplier or is broadcast for this account
+      if (!incomingId || !myId || incomingId === myId) {
+        const targetStatus = String(data?.approvalStatus || '').toUpperCase();
+        if (targetStatus === 'APPROVED' || !targetStatus) {
+          // Verify with backend before navigation as per prompt requirement
+          await verifyAndNavigate(true);
+        } else if (targetStatus === 'REJECTED') {
+          setStatus('REJECTED');
         }
       }
     };
 
-    socket.on('seller_approval_updated', handleApprovalEvent);
-    socket.on('seller_status_updated', handleApprovalEvent);
+    const approvalEvents = [
+      'SUPPLIER_APPROVED',
+      'supplier_approved',
+      'seller_approval_updated',
+      'seller_status_updated',
+      'approval_status_updated',
+      'user_status_changed',
+    ];
+
+    approvalEvents.forEach((evt) => socket.on(evt, handleApprovalEvent));
+
+    // If internet disconnected during approval, automatically fetch when socket reconnects
+    const handleSocketConnect = () => {
+      console.log('🔌 [SELLER PENDING] Socket connected/reconnected. Verifying approval status...');
+      verifyAndNavigate(true);
+    };
+    socket.on('connect', handleSocketConnect);
 
     return () => {
-      socket.off('seller_approval_updated', handleApprovalEvent);
-      socket.off('seller_status_updated', handleApprovalEvent);
+      approvalEvents.forEach((evt) => socket.off(evt, handleApprovalEvent));
+      socket.off('connect', handleSocketConnect);
     };
-  }, [socket, sellerId, sellerData, navigation, updateUser]);
+  }, [socket, sellerId, sellerData, authUser]);
+
+  // AppState Listener: If app was backgrounded or connection dropped, auto-fetch when app resumes (Requirement 2)
+  useEffect(() => {
+    const handleAppStateChange = (nextAppState: string) => {
+      if (nextAppState === 'active') {
+        console.log('📱 [SELLER PENDING] App resumed to active. Checking approval status...');
+        verifyAndNavigate(true);
+      }
+    };
+
+    const sub = AppState.addEventListener('change', handleAppStateChange);
+    return () => sub.remove();
+  }, [sellerId]);
+
+  // Background silent polling (every 3.5s) while on this screen
+  useEffect(() => {
+    verifyAndNavigate(true);
+
+    const interval = setInterval(() => {
+      if (!isNavigatingRef.current) {
+        verifyAndNavigate(true);
+      }
+    }, 3500);
+
+    return () => clearInterval(interval);
+  }, [sellerId]);
 
   // Manual Check Status Button
-  const handleCheckStatus = async () => {
-    try {
-      setChecking(true);
-      const res = await api.get('/auth/me');
-      if (res.data?.success && res.data.user) {
-        const updated = res.data.user;
-        const currentApproval = updated.approvalStatus || 'PENDING';
-        setStatus(currentApproval);
-        setSellerData(updated);
-
-        await AsyncStorage.setItem('supplierUser', JSON.stringify(updated));
-        if (updateUser) updateUser(updated);
-
-        if (currentApproval === 'APPROVED') {
-          Alert.alert('Approved! 🎉', 'Your application is approved! Welcome to RideHub.');
-          navigation.reset({
-            index: 0,
-            routes: [
-              {
-                name: 'RiderHomeScreen',
-                params: {
-                  riderName: updated.restaurantName || updated.name,
-                  riderId: updated._id || updated.id,
-                },
-              },
-            ],
-          });
-        } else if (currentApproval === 'REJECTED') {
-          Alert.alert('Notice', 'Your application status is currently marked as Rejected.');
-        } else {
-          Alert.alert('Status: In Review ⏳', 'Your application is still under review by our Admin team. We appreciate your patience!');
-        }
-      }
-    } catch (err: any) {
-      Alert.alert('Check Failed', 'Could not refresh status. Please check your internet connection.');
-    } finally {
-      setChecking(false);
-    }
+  const handleCheckStatus = () => {
+    verifyAndNavigate(false);
   };
 
   const handleLogout = () => {

@@ -1502,25 +1502,18 @@ const PaymentConfirmScreen: React.FC<PaymentConfirmScreenProps> = ({ route, navi
       return;
     }
 
-    // ── Zone Serviceability Check (Customer GPS against active zones) ──
+    // ── Strict 5.0 KM Store Delivery Radius Check (Open Location Model) ──
     const custLat = effectiveCoords?.latitude || deliveryAddress?.latitude;
     const custLon = effectiveCoords?.longitude || deliveryAddress?.longitude;
-    if (custLat && custLon) {
-      try {
-        const zoneRes = await api.post('/zones/check-customer-serviceable', {
-          latitude: custLat,
-          longitude: custLon,
-        });
-        if (zoneRes.data && zoneRes.data.serviceable === false) {
-          Alert.alert(
-            'Location Unavailable',
-            'This service is not available in your location.',
-            [{ text: 'OK' }]
-          );
-          return;
-        }
-      } catch (err) {
-        console.log('[Zone Serviceable Check Error]', err);
+    if (isFoodDelivery && custLat && custLon && restoLat && restoLon && restoLat !== 0 && restoLon !== 0) {
+      const straightKm = calculateHaversineDistanceKm(custLat, custLon, restoLat, restoLon);
+      if (straightKm !== null && straightKm > 5.0) {
+        Alert.alert(
+          'Outside 5 KM Delivery Radius 📍',
+          `यह स्टोर आपकी लोकेशन से ${straightKm.toFixed(1)} km दूर है (अधिकतम 5.0 km दायरे में ऑर्डर उपलब्ध है)।`,
+          [{ text: 'OK' }]
+        );
+        return;
       }
     }
 
@@ -1948,12 +1941,17 @@ const PaymentConfirmScreen: React.FC<PaymentConfirmScreenProps> = ({ route, navi
         var restoLat = ${rLat};
         var restoLon = ${rLon};
 
-        var hasValidCenter = Boolean((currentLat > 0 && currentLon > 0) || (restoLat > 0 && restoLon > 0));
-        var initialCenterLat = (currentLat > 0 && restoLat > 0) ? (currentLat + restoLat)/2 : (currentLat > 0 ? currentLat : (restoLat > 0 ? restoLat : 23.2505));
-        var initialCenterLon = (currentLon > 0 && restoLon > 0) ? (currentLon + restoLon)/2 : (currentLon > 0 ? currentLon : (restoLon > 0 ? restoLon : 77.4065));
-        var initialZoom = (currentLat > 0 && restoLat > 0) ? 14 : ((currentLat > 0 || restoLat > 0) ? 15 : 12);
+        var hasValidCenter = Boolean((currentLat !== 0 && currentLon !== 0) || (restoLat !== 0 && restoLon !== 0));
+        var initialCenterLat = (currentLat !== 0 && restoLat !== 0) ? (currentLat + restoLat)/2 : (currentLat !== 0 ? currentLat : (restoLat !== 0 ? restoLat : 0));
+        var initialCenterLon = (currentLon !== 0 && restoLon !== 0) ? (currentLon + restoLon)/2 : (currentLon !== 0 ? currentLon : (restoLon !== 0 ? restoLon : 0));
+        var initialZoom = (currentLat !== 0 && restoLat !== 0) ? 14 : 15;
 
-        var map = L.map('map', { zoomControl: false, attributionControl: false }).setView([initialCenterLat, initialCenterLon], initialZoom);
+        var mapEl = document.getElementById('map');
+        if (mapEl && !hasValidCenter) mapEl.style.visibility = 'hidden';
+        var map = L.map('map', { zoomControl: false, attributionControl: false });
+        if (hasValidCenter) {
+          map.setView([initialCenterLat, initialCenterLon], initialZoom);
+        }
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
           maxZoom: 19,
           attribution: '&copy; OpenStreetMap'
@@ -1996,14 +1994,10 @@ const PaymentConfirmScreen: React.FC<PaymentConfirmScreenProps> = ({ route, navi
             .openTooltip();
         }
 
-        if (effectiveRestoLat > 0 && effectiveRestoLon > 0 && effectiveHomeLat > 0 && effectiveHomeLon > 0) {
-          restoPoly = L.polyline([[effectiveRestoLat, effectiveRestoLon], [effectiveHomeLat, effectiveHomeLon]], {
-            color: '#0066FF',
-            weight: 3.5,
-            dashArray: '6, 8'
-          }).addTo(map);
+        if (effectiveRestoLat !== 0 && effectiveRestoLon !== 0 && effectiveHomeLat !== 0 && effectiveHomeLon !== 0) {
           var bounds = L.latLngBounds([[effectiveRestoLat, effectiveRestoLon], [effectiveHomeLat, effectiveHomeLon]]);
           map.fitBounds(bounds, { padding: [60, 60], maxZoom: 17 });
+          setTimeout(function() { fetchRoadRoute(effectiveRestoLat, effectiveRestoLon, effectiveHomeLat, effectiveHomeLon); }, 100);
         }
         ` : ''}
 
@@ -2047,7 +2041,6 @@ const PaymentConfirmScreen: React.FC<PaymentConfirmScreenProps> = ({ route, navi
           if (restoMarker && homeMarker) {
             var rP = restoMarker.getLatLng();
             var hP = homeMarker.getLatLng();
-            if (restoPoly) restoPoly.setLatLngs([rP, hP]);
             var b = L.latLngBounds([rP, hP]);
             if (riderMarker) b.extend(riderMarker.getLatLng());
             map.fitBounds(b, { padding: [50, 50], maxZoom: 16 });

@@ -53,6 +53,8 @@ const ICON_MAP: Record<string, any> = {
   'speaker': require('../assets/icons/speaker.png'),
   'moped': require('../assets/icons/motorbike.png'),
   'motorbike': require('../assets/icons/motorbike.png'),
+  'bike': require('../banner/bike.png'),
+  'scooter': require('../banner/bike.png'),
   'shield-check': require('../assets/icons/shield.png'),
   'shield-checkmark': require('../assets/icons/shield.png'),
   'shield-checkmark-outline': require('../assets/icons/shield.png'),
@@ -148,6 +150,24 @@ const ICON_MAP: Record<string, any> = {
   'lock-closed-outline': require('../assets/icons/lock.png'),
   'information-circle-outline': require('../assets/icons/info.png'),
   'receipt': require('../assets/icons/receipt.png'),
+
+  // Missing mapped icons that were falling back to dummy settings.png
+  'send': require('../assets/icons/arrow_forward.png'),
+  'check-circle': require('../assets/icons/checkmark.png'),
+  'create': require('../assets/icons/pencil.png'),
+  'mail': require('../assets/icons/contact.png'),
+  'globe': require('../assets/icons/route.png'),
+  'log-out': require('../assets/icons/logout.png'),
+  'bag-handle-outline': require('../assets/icons/best_cart.png'),
+  'navigate-circle': require('../assets/icons/recenter.png'),
+  'chatbubble-outline': require('../assets/icons/chatbubble.png'),
+  'menu': require('../assets/icons/menu.png'),
+  'help': require('../assets/icons/help.png'),
+  'security': require('../assets/icons/security.png'),
+  'privacy': require('../assets/icons/privacy.png'),
+  'terms': require('../assets/icons/terms.png'),
+  'faq': require('../assets/icons/faq.png'),
+  'report': require('../assets/icons/report.png'),
 };
 
 interface PngIconProps {
